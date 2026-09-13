@@ -367,7 +367,10 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
             let finish: (Bool) -> Void = { value in guard !done else { return }; done = true; continuation.resume(returning: value) }
             let alert = UIAlertController(title: MobileText.get(request.changed ? "mobile.native.trustChangedTitle" : "mobile.native.trustTitle"), message: MobileText.get(request.changed ? "mobile.native.trustChangedBody" : "mobile.native.trustBody", ["identity": request.identity, "fingerprint": request.fingerprint]), preferredStyle: .alert)
             alert.addAction(UIAlertAction(title: MobileText.get("common.cancel"), style: .cancel) { _ in finish(false) })
-            alert.addAction(UIAlertAction(title: MobileText.get("mobile.native.trustAccept"), style: .default) { _ in finish(true) })
+            let trust = UIAlertAction(title: MobileText.get("mobile.native.trustAccept"), style: .default) { _ in finish(true) }
+            alert.addAction(trust)
+            // Trusting a verified fingerprint is the expected action, so it carries the bold highlight instead of Cancel.
+            alert.preferredAction = trust
             host.present(alert, animated: true) { shown = true }
             func watch() {
                 guard !done else { return }

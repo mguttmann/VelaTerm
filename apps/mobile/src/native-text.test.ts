@@ -23,7 +23,8 @@ function sources(directory: string, files: string[] = []): string[] {
   return files;
 }
 const files = sources(plugin);
-const mobileKeys = Object.keys(dictionary).filter(key => key.startsWith('mobile.'));
+// Only string entries travel through native-text.json; function entries (parameterized web copy) are the web app's alone, exactly as sync-resources.mjs filters them.
+const mobileKeys = Object.keys(dictionary).filter(key => key.startsWith('mobile.') && typeof dictionary[key] === 'string');
 const placeholders = (text: string) => [...text.matchAll(/\{[a-z]+\}/g)].map(match => match[0]).sort();
 const keyLiteral = /["']((?:mobile|common)\.[A-Za-z0-9.]+)["']/g;
 
