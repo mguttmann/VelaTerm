@@ -560,14 +560,16 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
                 }
             }
         }
-        view.onCertificate = { [weak self] identity, fingerprint in
+        view.onCertificate = { [weak self, weak view] identity, fingerprint in
             guard let self else { return false }
+            // A declined or failed prompt explains itself on the page, like Android does, instead of waiting for WebKit's error, which some builds report as a plain cancellation.
+            let declined: () async -> Bool = { await MainActor.run { view?.showError(MobileText.get("mobile.native.certificateRejected")) }; return false }
             do {
                 let store=try self.vault.read();let previous=(store["keys"] as? [String:String])?[identity]
                 if previous==fingerprint {return true}
-                guard await self.approve(MobileText.get("mobile.native.tlsIdentity", ["identity": identity]),fingerprint,previous != nil) else{return false}
+                guard await self.approve(MobileText.get("mobile.native.tlsIdentity", ["identity": identity]),fingerprint,previous != nil) else{return await declined()}
                 try self.vault.update { updated in var keys=updated["keys"] as? [String:String] ?? [:];keys[identity]=fingerprint;updated["keys"]=keys };return true
-            } catch {return false}
+            } catch {return await declined()}
         }
         browser=view;view.modalPresentationStyle = .fullScreen
         bridge?.viewController?.present(view,animated:true)
@@ -587,6 +589,8 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
     private let message = UILabel()
     private let recovery = ConnectionRecoveryView()
     private var navigationFailed = false
+    // Fingerprints the user declined during the current load: WebKit opens further connections after a refusal, and each would ask again. Cleared when a new load starts (retry).
+    private var declinedFingerprints = Set<String>()
     private var reconnecting = false
     private var loadTimeout: DispatchWorkItem?
     private var closed = false
@@ -665,7 +669,7 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
     }
     private func beginLoading() {
         guard !closed else { return }
-        loadTimeout?.cancel(); navigationFailed = false; recovery.showLoading()
+        loadTimeout?.cancel(); navigationFailed = false; declinedFingerprints.removeAll(); recovery.showLoading()
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, !self.closed, !self.navigationFailed else { return }
             self.reconnecting = false
@@ -819,11 +823,14 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
         guard let chain=SecTrustCopyCertificateChain(trust) as? [SecCertificate],let leaf=chain.first else {completionHandler(.cancelAuthenticationChallenge,nil);return}
         let fingerprint="SHA256:"+Data(SHA256.hash(data:SecCertificateCopyData(leaf) as Data)).base64EncodedString().replacingOccurrences(of:"=",with:"")
         let identity="tls:https://\(target.host!):\(target.port ?? 443)"
-        Task {let accepted=await onCertificate?(identity,fingerprint) ?? false;await MainActor.run {completionHandler(accepted ? .useCredential:.cancelAuthenticationChallenge,accepted ? URLCredential(trust:trust):nil)}}
+        if declinedFingerprints.contains(fingerprint) {completionHandler(.cancelAuthenticationChallenge,nil);return}
+        Task {let accepted=await onCertificate?(identity,fingerprint) ?? false;await MainActor.run {if !accepted {self.declinedFingerprints.insert(fingerprint)};completionHandler(accepted ? .useCredential:.cancelAuthenticationChallenge,accepted ? URLCredential(trust:trust):nil)}}
     }
     private func failedNavigation(_ error: Error) {
         let failure = error as NSError
         if failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled { return }
+        // The first failure of a load owns the page; a declined fingerprint prompt has already explained itself.
+        if navigationFailed { return }
         // Append the system sentence (already localized by iOS) plus domain and code so the real cause is visible on the page.
         showError(MobileText.get("mobile.native.pageLoadFailedReason", ["reason": failure.localizedDescription, "domain": failure.domain, "code": String(failure.code)]))
     }
