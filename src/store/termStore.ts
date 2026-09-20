@@ -106,9 +106,11 @@ import {
   loadSettings,
   loadSoundEnabled,
   defaultEngineFor,
+  sanitizeComposerInlineChips,
   saveSettings,
   visualOf,
   type AgentDefaultConfig,
+  type ComposerChipId,
   type ImagePasteMode,
   type MemoryPrefs,
   type PersistedSettings,
@@ -1096,6 +1098,8 @@ interface TermStore {
    * sparse persisted map, so a section the user never touched keeps its default expanded state.
    */
   infoCollapsed: Record<string, boolean>;
+  /** Composer chips shown inline under the message input, in display order; the rest are off. */
+  composerInlineChips: ComposerChipId[];
 
   /** Saved agent launch configurations shown in the new-session menu, in menu order. */
   agentPresets: AgentPreset[];
@@ -1480,6 +1484,8 @@ interface TermStore {
   setShowSystemResources: (v: boolean) => void;
   /** Collapses or expands one Info panel section by id, persisting the choice across sessions and shells. */
   toggleInfoSection: (id: string) => void;
+  /** Replaces the ordered list of composer chips shown inline; chips left out are off. */
+  setComposerInlineChips: (ids: ComposerChipId[]) => void;
   /** Turns the backend's automatic usage polling on or off. */
   setUsageAutoRefresh: (v: boolean) => void;
   /** Sets how often the backend refreshes the usage snapshot, in seconds. */
@@ -1684,6 +1690,7 @@ function persistAndApplyVisual(getState: () => TermStore) {
     referSummary: s.referSummary,
     showSystemResources: s.showSystemResources,
     infoCollapsed: s.infoCollapsed,
+    composerInlineChips: s.composerInlineChips,
   };
   saveSettings(ps);
   applyVisual(visualOf(ps));
@@ -4710,6 +4717,10 @@ export const useTermStore = create<TermStore>((set, get) => ({
       else next[id] = true;
       return { infoCollapsed: next };
     });
+    persistAndApplyVisual(get);
+  },
+  setComposerInlineChips: (ids) => {
+    set({ composerInlineChips: sanitizeComposerInlineChips(ids) });
     persistAndApplyVisual(get);
   },
   setUsageAutoRefresh: (v) => {

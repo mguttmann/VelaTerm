@@ -130,7 +130,13 @@ export function FastModeChip({
   );
 }
 
-/** A chip whose menu is arbitrary content rather than a list of choices. Closes on outside click and Escape. */
+/**
+ * A chip whose menu is arbitrary content rather than a list of choices. Closes on outside click and Escape.
+ *
+ * `disabled` keeps the chip in the row but inert, dimmed the way a disabled `ControlChip` is: it cannot
+ * open, an open menu closes, and `onOpen` is never called, so a chip whose backing process is away
+ * stays where the user put it without asking anything of that process.
+ */
 export function ChipPopover({
   glyph,
   label,
@@ -138,6 +144,7 @@ export function ChipPopover({
   badge,
   width = 300,
   fitViewport = true,
+  disabled = false,
   children,
   onOpen,
 }: {
@@ -147,10 +154,14 @@ export function ChipPopover({
   badge?: ReactNode;
   width?: number;
   fitViewport?: boolean;
+  disabled?: boolean;
   children: ReactNode;
   onOpen?: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  useEffect(() => {
+    if (disabled) setOpen(false);
+  }, [disabled]);
   const boxRef = useRef<HTMLDivElement | null>(null);
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
   useEffect(() => {
@@ -187,6 +198,8 @@ export function ChipPopover({
         className="sv-chip"
         title={title}
         aria-expanded={open}
+        aria-disabled={disabled || undefined}
+        disabled={disabled}
         style={open ? { background: "var(--bg-hover)" } : undefined}
         onClick={() => setOpen((v) => !v)}
       >
@@ -207,8 +220,13 @@ export function ChipPopover({
   );
 }
 
-/** The MCP servers the agent knows, each with a switch and, when it is down, a reconnect. */
-export function McpChip({ sessionId, codex = false }: { sessionId: string; codex?: boolean }) {
+/**
+ * The MCP servers the agent knows, each with a switch and, when it is down, a reconnect.
+ *
+ * `disabled` is for the time no agent process is alive: the chip stays in the row but opens nothing and
+ * asks the backend nothing, because the status request needs a running agent to answer it.
+ */
+export function McpChip({ sessionId, codex = false, disabled = false }: { sessionId: string; codex?: boolean; disabled?: boolean }) {
   const t = useT();
   const [servers, setServers] = useState<ChatMcpServer[] | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -226,9 +244,11 @@ export function McpChip({ sessionId, codex = false }: { sessionId: string; codex
     <ChipPopover
       glyph={<Icons.connect size={14} />}
       label="MCP"
-      title={t("chat.mcp.tooltip")}
-      badge={connected !== undefined ? <span className="sv-chip-badge">{connected}</span> : undefined}
+      title={disabled ? t("chat.chipAgentNotRunning") : t("chat.mcp.tooltip")}
+      // A disabled chip carries no badge: the count belongs to a process that is gone.
+      badge={!disabled && connected !== undefined ? <span className="sv-chip-badge">{connected}</span> : undefined}
       width={340}
+      disabled={disabled}
       onOpen={() => apply(chatMcpStatus(sessionId))}
     >
       {error ? (
@@ -313,33 +333,35 @@ function taskStatusLabel(t: ReturnType<typeof useT>, status: string | undefined)
 /**
  * Claude's background tasks, and the way to send the running turn's foreground work there.
  *
- * Shown while there is something to list or something to background; otherwise the row stays clean. Each
- * row is live (a workflow reads "Phase: agent") and opens the task in a tab of its own; finished tasks stay
- * listed with their status until the next turn so their final state can still be opened.
+ * The chip is always drawn once the user turned it on; with nothing to list it carries no badge and its
+ * menu says so, rather than the chip appearing and vanishing with the task list. `disabled` covers the
+ * time no agent process is alive: the chip stays put but opens nothing.
  */
 export function TasksChip({
   tasks,
   busy,
+  disabled = false,
   onStop,
   onOpen,
   onBackgroundAll,
 }: {
   tasks: ChatBackgroundTask[];
   busy: boolean;
+  disabled?: boolean;
   onStop: (taskId: string) => void;
   onOpen: (task: ChatBackgroundTask) => void;
   onBackgroundAll: () => void;
 }) {
   const t = useT();
-  if (tasks.length === 0 && !busy) return null;
   const running = tasks.filter((task) => !isTaskFinished(task)).length;
   return (
     <ChipPopover
       glyph={<Icons.layers size={14} />}
       label={t("chat.tasks.label")}
-      title={t("chat.tasks.tooltip")}
-      badge={running > 0 ? <span className="sv-chip-badge">{running}</span> : undefined}
+      title={disabled ? t("chat.chipAgentNotRunning") : t("chat.tasks.tooltip")}
+      badge={!disabled && running > 0 ? <span className="sv-chip-badge">{running}</span> : undefined}
       width={340}
+      disabled={disabled}
     >
       {busy ? (
         <button className="sv-popover-wide" onClick={onBackgroundAll}>
