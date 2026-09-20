@@ -54,6 +54,8 @@ xcodebuild -project ios/App/App.xcodeproj -scheme App \
 
 `src/remote.ts` 定义统一插件接口：`list/save/remove/connect/disconnect/status/scanURL/account` 和 `state` 事件。Swift 与 Kotlin 分别实现系统安全存储、SSH、端口转发、项目 WebView 和账号操作。共享远端准备代码位于 `plugins/remote/shared/`；`pnpm sync` 生成压缩脚本和 iOS 资源副本，不能直接修改生成副本。
 
+原生插件的用户可见文本（Swift、Kotlin 以及 Android 注入的 `download.js`）不写在源码里，而是来自共享词典 `src/i18n/locales/`：键位于 `mobile.native.*` 组，参数用 `{name}` 占位符表示，由 `MobileText.get(key, values)`（Swift 与 Kotlin 同名）在原生侧按设备语言解析并替换；返回给起始页的 `call.reject(...)` 错误也经此本地化。`scripts/sync-resources.mjs` 自动收集英文词典中所有 `mobile.*` 键，写入两份 `native-text.json`（`plugins/remote/shared/` 与 iOS `Bootstrap/`），新增原生文本时只需在各语言词典中添加键并运行 `node scripts/sync-resources.mjs`（`pnpm sync` 已包含此步骤）。`download.js` 的文本由 Android 插件在注入脚本前以 `window.__VELATERM_DOWNLOAD_TEXT__` 提供。
+
 凭据保存在 iOS Keychain 或由 Android Keystore 密钥加密的存储中，不返回连接列表、不进入 URL、不写入前端 localStorage。远端网页没有 Capacitor SSH 插件桥接权限。网页只能通过现有服务的登录与权限访问项目。
 
 远端准备需要 Python 3；下载安装还需要支持 Ed25519 的 OpenSSL。程序下载限定 `dl.velaterm.com`，校验 SHA-256 和桌面端同一 minisign 公钥。文件写入远端 `~/.velaterm/`，已有桌面数据库可复用。安装授权由连接表单中默认关闭的复选框表达。
@@ -69,6 +71,8 @@ sh scripts/test-ios-native.sh
 ```
 
 `scripts/test-ios-native.sh` 用本机 `swiftc` 直接编译 iOS 插件中不依赖 UIKit 的指纹对话框协调逻辑（`TrustPromptCoordinator.swift`）及其测试，不需要设备、模拟器或 xcodebuild；覆盖并发合并、排队不重叠、弹出失败返回取消、连接代次变化返回取消。原生对话框的实际弹出和加载失败页仅经模拟器编译，未做行为测试。
+
+`src/native-text.test.ts`（随 `pnpm test` 运行）对照真实产物检查原生文本：插件源码中不得残留中日韩字符，源码引用的每个 `mobile.*`/`common.*` 键必须存在于英文词典和全部语言的 `native-text.json` 中，两份 JSON 必须与词典一致，占位符在调用处与各语言词典中必须匹配。Android 端只按与 Swift 相同的模式修改，本机无法编译验证。
 
 原生集成测试使用本机隔离的 SSH/HTTP/WebSocket 测试服务，不执行用户远端命令：
 
