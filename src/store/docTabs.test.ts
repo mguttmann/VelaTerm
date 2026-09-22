@@ -30,6 +30,7 @@ vi.mock("../ipc/tree", () => {
     createdAt: 0,
   });
   return {
+    touchSessionActivity: vi.fn().mockResolvedValue(true),
     listTree: vi.fn().mockResolvedValue({
       projects: [
         { id: "p1", name: "P", rootPath: "/tmp", color: null, sortOrder: 0, collapsed: false, createdAt: 0 },

@@ -182,11 +182,9 @@ export function CenterPane() {
     [focusPane, splitNew],
   );
   const handleClose = useCallback(
-    (paneId: string, id: string) => {
-      focusPane(paneId, id);
-      closePane();
-    },
-    [focusPane, closePane],
+    // Close the named pane directly: focusing it first would record activity for the session being closed.
+    (paneId: string) => closePane(paneId),
+    [closePane],
   );
 
   // Active-tab layout: sessionId -> { rect, paneId }, plus dividers.
@@ -343,7 +341,7 @@ export function CenterPane() {
                 area={info ? rectToStyle(info.rect) : FULL}
                 hidden={!visible}
                 onActivate={info ? () => handleActivate(info.paneId, id) : undefined}
-                onClose={info ? () => handleClose(info.paneId, id) : undefined}
+                onClose={info ? () => handleClose(info.paneId) : undefined}
               />
             );
           }
