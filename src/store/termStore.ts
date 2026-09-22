@@ -30,6 +30,7 @@ import {
 import type { BackgroundRun } from "../ipc/runs";
 import { pushSetting } from "../ipc/settingsSync";
 import { isTauri } from "../ipc/transport";
+import { isShareSurface } from "../ipc/shareBase";
 import { env } from "../platform";
 import { genId } from "../genId";
 import type { SpawnRequest, StatusSignal } from "../ipc/events";
@@ -1122,6 +1123,14 @@ interface TermStore {
   composerInlineChips: ComposerChipId[];
   /** Revision of the default inline set the saved list has been migrated to. */
   composerInlineChipsRevision: number;
+  /** Sidebar order: on keeps the most recently active projects and sessions at the top, off is the manual order. */
+  sortByActivity: boolean;
+  /**
+   * Live copy of each persistent session's last activity in milliseconds, keyed by session id. Seeded from the
+   * tree snapshot's `lastActiveAt` and advanced immediately by `noteSessionActivity`, so the sidebar reorders
+   * without waiting for the coalesced backend write. Ids without activity are absent.
+   */
+  sessionActivity: Record<SessionId, number>;
 
   /** Saved agent launch configurations shown in the new-session menu, in menu order. */
   agentPresets: AgentPreset[];
@@ -1338,7 +1347,8 @@ interface TermStore {
   openSessionInPane: (sessionId: SessionId, paneId?: string) => void;
   /** Tile two to four existing sessions evenly in a new pinned tab, moving them out of their current tabs. */
   tileSessions: (sessionIds: SessionId[]) => void;
-  closePane: () => void;
+  /** Closes a pane of the active tab: the given one, or the focused pane when no id is passed. */
+  closePane: (paneId?: string) => void;
   closeSession: (sessionId: SessionId) => void;
   collapseToFocused: () => void;
   /** Persists an ephemeral session under its existing ID, preserving the running PTY and context. An optional
@@ -1513,6 +1523,18 @@ interface TermStore {
   toggleInfoSection: (id: string) => void;
   /** Replaces the ordered list of composer chips shown inline; chips left out are off. */
   setComposerInlineChips: (ids: ComposerChipId[]) => void;
+  /** Switches the sidebar between the activity order and the manual order, persisted like the other preferences. */
+  setSortByActivity: (v: boolean) => void;
+  /**
+   * Records activity on a persistent session: advances the live copy and asks the backend to persist the stamp.
+   * Called by the actions that express user intent (openSession, setActiveTab, focusPane, the terminal and chat
+   * input paths) and by the agent-state observer; passive focus changes (the layout restore at startup, the
+   * fallback focus after closing a tab or pane, a mirror following the desktop) write activeSessionId directly
+   * and never reach it. Calls for the same session within one second are ignored (one burst counts once); ids
+   * that are not in the tree (drafts, browser tabs) are ignored; on the share surface it does nothing. `now`
+   * exists for tests.
+   */
+  noteSessionActivity: (id: SessionId, now?: number) => void;
   /** Turns the backend's automatic usage polling on or off. */
   setUsageAutoRefresh: (v: boolean) => void;
   /** Sets how often the backend refreshes the usage snapshot, in seconds. */
@@ -1593,6 +1615,9 @@ const NOTIFY_STATES: AgentState[] = ["asking", "waiting", "background"];
  * Only the legacy arbitration path below reads this; the backend keeps its own copy for the same purpose.
  */
 const workingPulseAt = new Map<string, number>();
+/** Last time `noteSessionActivity` accepted a call per session; calls within this window are one burst. */
+const activityNotedAt = new Map<string, number>();
+const ACTIVITY_BURST_MS = 1000;
 
 /** Escape hatch: set `vlx-arbitration` to `frontend` to decide agent state in the client again. */
 const ARBITRATION_KEY = "vlx-arbitration";
@@ -1721,6 +1746,7 @@ function persistAndApplyVisual(getState: () => TermStore) {
     infoCollapsed: s.infoCollapsed,
     composerInlineChips: s.composerInlineChips,
     composerInlineChipsRevision: s.composerInlineChipsRevision,
+    sortByActivity: s.sortByActivity,
   };
   saveSettings(ps);
   applyVisual(visualOf(ps));
@@ -1911,6 +1937,7 @@ export const useTermStore = create<TermStore>((set, get) => ({
   projects: [],
   groups: [],
   sessions: [],
+  sessionActivity: {},
   archivedSessions: [],
   treeLoaded: false,
   runtimes: {},
@@ -2011,8 +2038,13 @@ export const useTermStore = create<TermStore>((set, get) => ({
     }
     set((state) => {
       const runtimes = { ...state.runtimes };
+      // Merge the persisted activity with the live copy: a stamp noted here moments ago may be newer than
+      // what the coalesced write has persisted, and sessions that left the tree drop out of the map.
+      const sessionActivity: Record<SessionId, number> = {};
       for (const s of t.sessions) {
         if (!runtimes[s.id]) runtimes[s.id] = { status: "idle" };
+        const at = Math.max(state.sessionActivity[s.id] ?? 0, s.lastActiveAt ?? 0);
+        if (at > 0) sessionActivity[s.id] = at;
       }
       let layoutPatch = {};
       if (!layoutRestored) {
@@ -2110,6 +2142,7 @@ export const useTermStore = create<TermStore>((set, get) => ({
         sessions: t.sessions,
         treeLoaded: true,
         runtimes,
+        sessionActivity,
         sidebarTreeViews,
         treeFilter: primaryView.treeFilter,
         statusFilter: primaryView.statusFilter,
@@ -2831,6 +2864,8 @@ export const useTermStore = create<TermStore>((set, get) => ({
       };
     });
     set((state) => ({ sessionOpenRequest: { sessionId: id, revision: (state.sessionOpenRequest?.revision ?? 0) + 1 } }));
+    // Opening a session is user activity for the sidebar's activity order.
+    get().noteSessionActivity(id);
     get().pruneEphemeral();
     saveLayoutTick();
   },
@@ -2856,6 +2891,10 @@ export const useTermStore = create<TermStore>((set, get) => ({
         focusedPaneId: leaf?.paneId ?? null,
       };
     });
+    // Activating a session tab is user activity for the session in its focused pane; document, browser and
+    // task tabs leave no active session and record nothing.
+    const activated = get().activeSessionId;
+    if (activated) get().noteSessionActivity(activated);
     saveLayoutTick();
   },
 
@@ -3284,6 +3323,8 @@ export const useTermStore = create<TermStore>((set, get) => ({
 
   focusPane: (paneId, sessionId) => {
     set({ activeSessionId: sessionId, focusedPaneId: paneId });
+    // Focusing a pane is user activity for the sidebar's activity order.
+    get().noteSessionActivity(sessionId);
     saveLayoutTick();
   },
 
@@ -3369,6 +3410,8 @@ export const useTermStore = create<TermStore>((set, get) => ({
     // Placing a session is an intent to run it, exactly like opening it.
     st.wakeSession(sessionId);
     set(placed);
+    // Placing focuses the session without openSession, so record the activity here.
+    get().noteSessionActivity(sessionId);
     traceSplit(opts?.source ?? "unknown", `${direction} split ${sessionId} beside ${paneId} in tab ${placed.activeTabId}`, {
       sessionIds: [sessionId],
       tabId: placed.activeTabId ?? undefined,
@@ -3414,6 +3457,8 @@ export const useTermStore = create<TermStore>((set, get) => ({
           }
         : {}),
     });
+    // Placing focuses the session without openSession, so record the activity here.
+    get().noteSessionActivity(sessionId);
     get().pruneEphemeral();
     saveLayoutTick();
   },
@@ -3434,6 +3479,8 @@ export const useTermStore = create<TermStore>((set, get) => ({
     const tiled = ids.slice(0, GRID_MAX);
     for (const id of tiled) st.wakeSession(id);
     set(placed);
+    // Tiling opens every placed session at once; record each without openSession.
+    for (const id of tiled) get().noteSessionActivity(id);
     traceSplit("tile", `tiled ${tiled.length} sessions in tab ${placed.activeTabId}`, {
       sessionIds: tiled,
       tabId: placed.activeTabId ?? undefined,
@@ -3442,12 +3489,15 @@ export const useTermStore = create<TermStore>((set, get) => ({
     saveLayoutTick();
   },
 
-  closePane: () => {
+  closePane: (paneId) => {
     const { activeTabId, focusedPaneId, paneTrees } = get();
-    if (!activeTabId || !focusedPaneId) return;
+    // A pane's close button names its pane so closing needs no focus change first: focusing would count as
+    // activity for the session the user is leaving.
+    const target = paneId ?? focusedPaneId;
+    if (!activeTabId || !target) return;
     const t = paneTrees[activeTabId];
     if (!t) return;
-    const removed = removeLeaf(t, focusedPaneId);
+    const removed = removeLeaf(t, target);
     if (removed === null) {
       // Closing the last pane closes the entire tab.
       get().closeTab(activeTabId);
@@ -4637,6 +4687,28 @@ export const useTermStore = create<TermStore>((set, get) => ({
   setComposerInlineChips: (ids) => {
     set({ composerInlineChips: sanitizeComposerInlineChips(ids) });
     persistAndApplyVisual(get);
+  },
+  setSortByActivity: (v) => {
+    set({ sortByActivity: v });
+    persistAndApplyVisual(get);
+    // Stamps other clients wrote while the mode was off were persisted without a broadcast; re-read the tree
+    // once so this client orders by the real history instead of its stale live copy.
+    if (v && get().treeLoaded) void get().loadTree().catch(() => {});
+  },
+  noteSessionActivity: (id, now = Date.now()) => {
+    // A share visitor's focus is not the host's activity, and the restricted share dispatch rejects the write,
+    // which would log one failed request per focus.
+    if (isShareSurface) return;
+    const state = get();
+    if (!state.sessions.some((s) => s.id === id)) return;
+    const noted = activityNotedAt.get(id);
+    if (noted !== undefined && now - noted < ACTIVITY_BURST_MS) return;
+    activityNotedAt.set(id, now);
+    if ((state.sessionActivity[id] ?? 0) < now) {
+      set({ sessionActivity: { ...state.sessionActivity, [id]: now } });
+    }
+    // The backend coalesces on its own clock and broadcasts the tree only on a real write.
+    tree.touchSessionActivity(id).catch(() => {});
   },
   setUsageAutoRefresh: (v) => {
     set({ usageAutoRefresh: v });
