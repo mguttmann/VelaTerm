@@ -1,10 +1,9 @@
 //! One observer for the agent half of the sidebar's activity record instead of a hook in every writer. The
 //! store's runtime map is written from four places (setRuntime, applyStatusSignal, applyScreenDetection,
 //! applySessionStates); subscribing to the store once covers them all without touching any of them. The user
-//! half is recorded by the actions that express intent themselves: openSession, setActiveTab and focusPane
-//! for focus, the terminal and chat input paths for input. Watching activeSessionId here instead would also
-//! count passive changes (the layout restore at startup, the fallback focus after closing a tab or pane, a
-//! mirror following the desktop), which are not something the user did.
+//! half is recorded by the two input paths (terminal input, chat submission) directly. Focus is deliberately
+//! not a signal: opening a session, switching to its tab or clicking into it is reading, and a session the
+//! user only looks at must keep its place in the order.
 
 import type { AgentState, SessionRuntime } from "../types";
 import { useTermStore } from "./termStore";

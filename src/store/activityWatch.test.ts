@@ -30,7 +30,6 @@ vi.mock("../notify", () => ({
 }));
 
 import type { Session } from "../types";
-import type { PaneNode } from "../layout/CenterPane/paneTree";
 import { isActivityTransition, startActivityWatch } from "./activityWatch";
 import { useTermStore } from "./termStore";
 
@@ -92,68 +91,15 @@ describe("activity record", () => {
     vi.useRealTimers();
   });
 
-  it("records the session the user opens, focuses or activates, and persists each once", () => {
+  it("does not count opening, activating or focusing a session: reading is not activity", () => {
     useTermStore.getState().openSession("a");
-    expect(useTermStore.getState().sessionActivity.a).toBe(base);
-    expect(treeMocks.touchSessionActivity).toHaveBeenCalledTimes(1);
-    expect(treeMocks.touchSessionActivity).toHaveBeenCalledWith("a");
-    vi.setSystemTime(new Date(base + 2_000));
-    useTermStore.getState().focusPane("pane-b", "b");
-    expect(useTermStore.getState().sessionActivity.b).toBe(base + 2_000);
-    // openSession("a") created the tab "a" whose single pane holds session a.
-    vi.setSystemTime(new Date(base + 4_000));
+    useTermStore.getState().openSessionInSplit("b", "horizontal");
+    useTermStore.getState().focusPane("pane-x", "b");
     useTermStore.getState().setActiveTab("a");
-    expect(useTermStore.getState().sessionActivity.a).toBe(base + 4_000);
-    expect(treeMocks.touchSessionActivity).toHaveBeenCalledTimes(3);
-  });
-
-  it("does not count a passive focus change: the layout restore and the fallback after a close write the active session directly", () => {
-    useTermStore.setState({ activeSessionId: "a" });
-    expect(useTermStore.getState().sessionActivity).toEqual({});
-    expect(treeMocks.touchSessionActivity).not.toHaveBeenCalled();
-  });
-
-  it("does not count the fallback focus after closing the active tab", () => {
-    useTermStore.getState().openSession("a");
-    vi.setSystemTime(new Date(base + 2_000));
-    useTermStore.getState().openSession("b", { newTab: true });
-    treeMocks.touchSessionActivity.mockClear();
-    vi.setSystemTime(new Date(base + 4_000));
-    // Closing b hands the focus to a without the user touching a.
-    useTermStore.getState().closeTab("b");
-    expect(useTermStore.getState().activeSessionId).toBe("a");
-    expect(useTermStore.getState().sessionActivity.a).toBe(base);
-    expect(treeMocks.touchSessionActivity).not.toHaveBeenCalled();
-  });
-
-  it("records sessions placed into a split or a grid, which focus them without openSession", () => {
-    useTermStore.getState().openSession("a");
-    treeMocks.touchSessionActivity.mockClear();
-    vi.setSystemTime(new Date(base + 2_000));
-    useTermStore.getState().openSessionInSplit("b", "horizontal");
-    expect(useTermStore.getState().activeSessionId).toBe("b");
-    expect(useTermStore.getState().sessionActivity.b).toBe(base + 2_000);
-    vi.setSystemTime(new Date(base + 4_000));
     useTermStore.getState().tileSessions(["a", "child"]);
-    expect(useTermStore.getState().sessionActivity.a).toBe(base + 4_000);
-    expect(useTermStore.getState().sessionActivity.child).toBe(base + 4_000);
-    expect(treeMocks.touchSessionActivity).toHaveBeenCalledTimes(3);
-  });
-
-  it("closing a named pane records nothing for the session being closed", () => {
-    useTermStore.getState().openSession("a");
-    useTermStore.getState().openSessionInSplit("b", "horizontal");
-    treeMocks.touchSessionActivity.mockClear();
-    const state = useTermStore.getState();
-    const findPane = (node: PaneNode): string | null => {
-      if (node.kind === "leaf") return node.sessionId === "a" ? node.paneId : null;
-      return findPane(node.a) ?? findPane(node.b);
-    };
-    const paneOfA = findPane(state.paneTrees[state.activeTabId!]);
-    expect(paneOfA).toBeTruthy();
-    vi.setSystemTime(new Date(base + 2_000));
-    useTermStore.getState().closePane(paneOfA!);
-    expect(useTermStore.getState().sessionActivity.a).toBe(base);
+    // The layout restore at startup and the fallback after a close write the active session directly.
+    useTermStore.setState({ activeSessionId: "child" });
+    expect(useTermStore.getState().sessionActivity).toEqual({});
     expect(treeMocks.touchSessionActivity).not.toHaveBeenCalled();
   });
 
@@ -204,7 +150,7 @@ describe("activity record", () => {
 
   it("ignores ids that are not persistent sessions, such as drafts and browser tabs", () => {
     useTermStore.getState().noteSessionActivity("draft-1");
-    useTermStore.getState().focusPane("pane-1", "browser-tab-1");
+    useTermStore.getState().noteSessionActivity("browser-tab-1");
     expect(treeMocks.touchSessionActivity).not.toHaveBeenCalled();
     expect(useTermStore.getState().sessionActivity).toEqual({});
   });
