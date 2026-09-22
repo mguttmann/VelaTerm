@@ -152,7 +152,7 @@ fn validate_selection(app: &AppCtx, agent: &str, model: &str, effort: &str) -> R
     // longer names must still retry (see claude_models::accepted_for_bin).
     let options = if agent == "claude" {
         let bin = process::executable(app, agent)?;
-        crate::agent::claude_models::accepted_for_bin(app, &bin)
+        crate::agent::claude_models::accepted_for_bin(app, &bin, Some(model))
             .into_iter()
             .map(|m| ModelOption {
                 id: m.id,

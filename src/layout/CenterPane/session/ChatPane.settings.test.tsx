@@ -627,6 +627,24 @@ it("re-reads the model list when the catalogue changes while the pane is open", 
   expect(await screen.findByRole("option", { name: "Fresh" })).toBeTruthy();
 });
 
+it("listens for catalogue changes only in Claude panes and stops listening on unmount", async () => {
+  // The mock's call log outlives a single test, so count from here on.
+  const count = () => vi.mocked(listen).mock.calls.filter(([name]) => name === "model-catalog://changed").length;
+  const start = count();
+  const subscribed = () => count() - start;
+  const codex = await mountPane("codex");
+  expect(subscribed()).toBe(0);
+  codex.unmount();
+  const claude = await mountPane();
+  expect(subscribed()).toBe(1);
+  claude.unmount();
+  const reads = () => vi.mocked(invoke).mock.calls.filter(([command]) => command === "chat_models").length;
+  const before = reads();
+  act(() => catalogChanged());
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  expect(reads()).toBe(before);
+});
+
 it("names the model the agent's default currently resolves to on the default entry", async () => {
   const previous = vi.mocked(invoke).getMockImplementation()!;
   vi.mocked(invoke).mockImplementation((command, args) => command === "chat_models"

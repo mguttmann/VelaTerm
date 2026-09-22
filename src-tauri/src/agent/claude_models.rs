@@ -247,12 +247,45 @@ pub fn list_for_bin(app: &AppCtx, bin: &str) -> Vec<ClaudeModel> {
     list_for_bin_with(app, bin, Probe::Allow)
 }
 
-/// What a stored selection may name: the offered catalogue plus the curated table. The CLI's list is a
-/// shortlist of what it offers, not everything it accepts, so a job saved with an identifier the menu no
-/// longer offers (for example `claude-opus-5` once Opus 5.5 became the default) keeps validating instead of
-/// failing its retry. Offering stays narrow; only acceptance widens.
-pub fn accepted_for_bin(app: &AppCtx, bin: &str) -> Vec<ClaudeModel> {
-    with_curated(list_for_bin(app, bin))
+/// What a stored selection may name: the offered catalogue, the curated table, and the stored identifier
+/// itself when it is a well-formed Claude model id. The CLI's list is a shortlist that moves with every
+/// release, so a job saved with a model the menu offered then (`claude-opus-5` before Opus 5.5, Opus 5.5
+/// after the next release) must keep validating instead of failing its retry; the CLI decides at start
+/// whether it still runs that model. Offering stays narrow; only acceptance widens.
+pub fn accepted_for_bin(app: &AppCtx, bin: &str, selected: Option<&str>) -> Vec<ClaudeModel> {
+    accepted(list_for_bin(app, bin), selected)
+}
+
+fn accepted(offered: Vec<ClaudeModel>, selected: Option<&str>) -> Vec<ClaudeModel> {
+    let mut out = with_curated(offered);
+    if let Some(id) = selected.map(str::trim).filter(|id| is_claude_model_id(id)) {
+        if !out.iter().any(|m| m.id == id) {
+            out.push(ClaudeModel {
+                id: id.to_string(),
+                label: label_for(id, ""),
+                description: String::new(),
+                // Unknown here, so every level a Claude model can take; the CLI rejects what does not fit.
+                effort_levels: EFFORT_XHIGH.iter().map(|s| s.to_string()).collect(),
+                context_window: None,
+                curated: false,
+                large_context: id.ends_with("[1m]"),
+                supports_fast_mode: false,
+                is_default: false,
+            });
+        }
+    }
+    out
+}
+
+/// A well-formed Anthropic model identifier as a stored selection carries it: `claude-` followed by
+/// lowercase letters, digits, dots and hyphens, with an optional `[1m]` suffix, at most 64 characters. It
+/// cannot start with a hyphen, so it is never read as a command-line flag.
+fn is_claude_model_id(id: &str) -> bool {
+    let base = id.strip_suffix("[1m]").unwrap_or(id);
+    id.len() <= 64
+        && base.len() > "claude-".len()
+        && base.starts_with("claude-")
+        && base.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-' || c == '.')
 }
 
 fn with_curated(mut offered: Vec<ClaudeModel>) -> Vec<ClaudeModel> {
@@ -692,6 +725,15 @@ mod tests {
         assert_eq!(normalize_with("claude-opus-5[1m]", &pairs), "claude-opus-5");
         // A row without resolvedModel still counts as CLI data and is never rewritten by the table.
         assert_eq!(normalize_with("opus", &[("opus".to_string(), "opus".to_string())]), "opus");
+        // A target offered only through the default row is an offered id too and keeps its spelling.
+        let default_only = cli_model_catalog::parse_rows(&[
+            serde_json::json!({"value": "default", "resolvedModel": "claude-opus-5[1m]", "displayName": "Default"}),
+            serde_json::json!({"value": "claude-fable-5-1", "resolvedModel": "claude-fable-5-1", "displayName": "Fable"}),
+        ]);
+        let default_pairs = cli_model_catalog::pairs_of(default_only.iter());
+        assert!(cli_models(&default_only).iter().any(|m| m.id == "claude-opus-5[1m]"));
+        assert_eq!(normalize_with("claude-opus-5[1m]", &default_pairs), "claude-opus-5[1m]");
+        assert!(!default_pairs.iter().any(|(value, _)| value == "default"));
         let mut with_opus_5 = pairs.clone();
         with_opus_5.push(("claude-opus-5".into(), "claude-opus-5".into()));
         assert_eq!(normalize_with("claude-opus-5[1m]", &with_opus_5), "claude-opus-5");
@@ -707,7 +749,7 @@ mod tests {
     #[test]
     fn accepted_selection_includes_the_curated_table() {
         let offered = cli_models(&fixture_rows());
-        let accepted = with_curated(offered.clone());
+        let accepted = accepted(offered.clone(), None);
         assert!(!offered.iter().any(|m| m.id == "claude-opus-5"));
         assert!(accepted.iter().any(|m| m.id == "claude-opus-5"));
         assert!(accepted.iter().any(|m| m.id == "claude-opus-5-5[1m]"));
@@ -716,6 +758,23 @@ mod tests {
         ids.sort();
         ids.dedup();
         assert_eq!(ids.len(), before, "no identifier appears twice");
+    }
+
+    /// The class, not the instance: whatever the menu offered when a job was saved keeps validating after
+    /// the CLI's shortlist moved on, as long as it is a well-formed Claude id; anything else stays out.
+    #[test]
+    fn accepted_selection_keeps_any_well_formed_stored_claude_id() {
+        let offered = with_curated(Vec::new());
+        assert!(!offered.iter().any(|m| m.id == "claude-opus-6-1[1m]"));
+        let kept = accepted(offered.clone(), Some("claude-opus-6-1[1m]"));
+        let row = kept.iter().find(|m| m.id == "claude-opus-6-1[1m]").expect("stored id accepted");
+        assert!(row.effort_levels.iter().any(|l| l == "xhigh"));
+        assert!(row.large_context && !row.curated);
+        for bad in ["--dangerously-skip-permissions", "gpt-5", "claude-", "claude-opus 5", "claude-opus-5;rm", "Claude-Opus-5", "claude-opus-5[2m]"] {
+            assert_eq!(accepted(offered.clone(), Some(bad)).len(), offered.len(), "{bad} must not be accepted");
+        }
+        // A curated id is not duplicated.
+        assert_eq!(accepted(offered.clone(), Some("claude-opus-5")).len(), offered.len());
     }
 
     /// AC5

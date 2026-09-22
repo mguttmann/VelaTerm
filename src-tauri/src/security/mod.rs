@@ -206,13 +206,13 @@ fn settings(app: &AppCtx, agent: &str) -> Result<Value> {
         .unwrap_or(json!({})))
 }
 fn models(app: &AppCtx, agent: &str) -> Result<Value> {
-    catalog(app, agent, false)
+    catalog(app, agent, false, None)
 }
 
 /// The catalogue a scan offers (`accept = false`) or accepts (`accept = true`). For Claude the accepted set
 /// also names the curated table, because the CLI's list is a shortlist and a scan saved with an identifier
 /// it no longer names must still start (see claude_models::accepted_for_bin).
-fn catalog(app: &AppCtx, agent: &str, accept: bool) -> Result<Value> {
+fn catalog(app: &AppCtx, agent: &str, accept: bool, selected: Option<&str>) -> Result<Value> {
     let defaults = settings(app, agent)?;
     let bin = defaults
         .get("path")
@@ -221,7 +221,7 @@ fn catalog(app: &AppCtx, agent: &str, accept: bool) -> Result<Value> {
         .filter(|s| !s.is_empty())
         .unwrap_or(agent);
     let rows = match agent {
-        "claude" if accept => serde_json::to_value(crate::agent::claude_models::accepted_for_bin(app, bin)),
+        "claude" if accept => serde_json::to_value(crate::agent::claude_models::accepted_for_bin(app, bin, selected)),
         "claude" => serde_json::to_value(crate::agent::claude_models::list_for_bin(app, bin)),
         "codex" => {
             let args = crate::agent::inject::split_extra_args(
@@ -287,7 +287,7 @@ fn start(app: &AppCtx, request: Request) -> Result<Run> {
             .as_deref()
             .is_some_and(|s| !s.trim().is_empty());
     let catalog = if explicit {
-        catalog(app, &request.agent, true)?
+        catalog(app, &request.agent, true, request.model.as_deref())?
     } else {
         json!([])
     };

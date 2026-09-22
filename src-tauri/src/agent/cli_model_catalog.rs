@@ -550,11 +550,22 @@ pub fn alias_pairs() -> Vec<(String, String)> {
     let guard = state().0.lock().unwrap();
     let mut snapshots: Vec<&Snapshot> = guard.snapshots.values().collect();
     snapshots.sort_by(|a, b| b.checked_at.cmp(&a.checked_at));
-    snapshots
-        .iter()
-        .flat_map(|s| s.models.iter())
-        .filter(|m| !m.disabled && m.value != "default")
-        .map(|m| (m.value.clone(), m.resolved_model.clone().unwrap_or_else(|| m.value.clone())))
+    pairs_of(snapshots.iter().flat_map(|s| s.models.iter()))
+}
+
+/// `alias_pairs` over explicit rows. The `default` row is not a value anyone passes, but its target is
+/// listed as a menu row of its own when no other row offers it (`cli_models`), so the target counts as an
+/// offered identifier and pairs with itself.
+pub(crate) fn pairs_of<'a>(rows: impl Iterator<Item = &'a CliModel>) -> Vec<(String, String)> {
+    rows.filter(|m| !m.disabled)
+        .filter_map(|m| {
+            let resolved = m.resolved_model.clone().unwrap_or_else(|| m.value.clone());
+            if m.value == "default" {
+                (resolved != "default").then(|| (resolved.clone(), resolved))
+            } else {
+                Some((m.value.clone(), resolved))
+            }
+        })
         .collect()
 }
 
