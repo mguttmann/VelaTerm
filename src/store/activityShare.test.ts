@@ -40,7 +40,7 @@ const session = (id: string): Session =>
   ({ id, projectId: "p1", groupId: null, name: id, kind: "terminal", collapsed: false, sortOrder: 0, createdAt: 0 }) as Session;
 
 describe("activity record on the share surface", () => {
-  it("records nothing for focus, input or agent state and never calls the backend", () => {
+  it("records nothing for input or agent state and never calls the backend", () => {
     useTermStore.setState({
       sessions: [session("a")],
       sessionActivity: {},
@@ -53,8 +53,6 @@ describe("activity record on the share surface", () => {
       notifications: {},
     });
     const stop = startActivityWatch();
-    // The share navigation opens the shared session through the same action a click uses.
-    useTermStore.getState().openSession("a");
     // The input paths call the record directly.
     useTermStore.getState().noteSessionActivity("a");
     // The agent-state observer runs here too.

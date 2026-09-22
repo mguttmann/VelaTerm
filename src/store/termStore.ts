@@ -1322,8 +1322,7 @@ interface TermStore {
   openSessionInPane: (sessionId: SessionId, paneId?: string) => void;
   /** Tile two to four existing sessions evenly in a new pinned tab, moving them out of their current tabs. */
   tileSessions: (sessionIds: SessionId[]) => void;
-  /** Closes a pane of the active tab: the given one, or the focused pane when no id is passed. */
-  closePane: (paneId?: string) => void;
+  closePane: () => void;
   closeSession: (sessionId: SessionId) => void;
   collapseToFocused: () => void;
   /** Persists an ephemeral session under its existing ID, preserving the running PTY and context. An optional
@@ -1500,12 +1499,11 @@ interface TermStore {
   setSortByActivity: (v: boolean) => void;
   /**
    * Records activity on a persistent session: advances the live copy and asks the backend to persist the stamp.
-   * Called by the actions that express user intent (openSession, setActiveTab, focusPane, the terminal and chat
-   * input paths) and by the agent-state observer; passive focus changes (the layout restore at startup, the
-   * fallback focus after closing a tab or pane, a mirror following the desktop) write activeSessionId directly
-   * and never reach it. Calls for the same session within one second are ignored (one burst counts once); ids
-   * that are not in the tree (drafts, browser tabs) are ignored; on the share surface it does nothing. `now`
-   * exists for tests.
+   * Called by the two input paths (terminal input, chat submission) and by the agent-state observer. Reading is
+   * not activity: opening a session, switching to its tab or focusing its pane records nothing, so a session
+   * the user only looks at keeps its place. Calls for the same session within one second are ignored (one
+   * burst counts once); ids that are not in the tree (drafts, browser tabs) are ignored; on the share surface
+   * it does nothing. `now` exists for tests.
    */
   noteSessionActivity: (id: SessionId, now?: number) => void;
   /** Turns the backend's automatic usage polling on or off. */
@@ -2981,8 +2979,6 @@ export const useTermStore = create<TermStore>((set, get) => ({
         focusedPaneId: leaf.paneId,
       };
     });
-    // Opening a session is user activity for the sidebar's activity order.
-    get().noteSessionActivity(id);
     get().pruneEphemeral();
     saveLayoutTick();
   },
@@ -3007,10 +3003,6 @@ export const useTermStore = create<TermStore>((set, get) => ({
         focusedPaneId: leaf?.paneId ?? null,
       };
     });
-    // Activating a session tab is user activity for the session in its focused pane; document, browser and
-    // task tabs leave no active session and record nothing.
-    const activated = get().activeSessionId;
-    if (activated) get().noteSessionActivity(activated);
     saveLayoutTick();
   },
 
@@ -3426,8 +3418,6 @@ export const useTermStore = create<TermStore>((set, get) => ({
 
   focusPane: (paneId, sessionId) => {
     set({ activeSessionId: sessionId, focusedPaneId: paneId });
-    // Focusing a pane is user activity for the sidebar's activity order.
-    get().noteSessionActivity(sessionId);
     saveLayoutTick();
   },
 
@@ -3513,8 +3503,6 @@ export const useTermStore = create<TermStore>((set, get) => ({
     // Placing a session is an intent to run it, exactly like opening it.
     st.wakeSession(sessionId);
     set(placed);
-    // Placing focuses the session without openSession, so record the activity here.
-    get().noteSessionActivity(sessionId);
     traceSplit(opts?.source ?? "unknown", `${direction} split ${sessionId} beside ${paneId} in tab ${placed.activeTabId}`, {
       sessionIds: [sessionId],
       tabId: placed.activeTabId ?? undefined,
@@ -3560,8 +3548,6 @@ export const useTermStore = create<TermStore>((set, get) => ({
           }
         : {}),
     });
-    // Placing focuses the session without openSession, so record the activity here.
-    get().noteSessionActivity(sessionId);
     get().pruneEphemeral();
     saveLayoutTick();
   },
@@ -3582,8 +3568,6 @@ export const useTermStore = create<TermStore>((set, get) => ({
     const tiled = ids.slice(0, GRID_MAX);
     for (const id of tiled) st.wakeSession(id);
     set(placed);
-    // Tiling opens every placed session at once; record each without openSession.
-    for (const id of tiled) get().noteSessionActivity(id);
     traceSplit("tile", `tiled ${tiled.length} sessions in tab ${placed.activeTabId}`, {
       sessionIds: tiled,
       tabId: placed.activeTabId ?? undefined,
@@ -3592,15 +3576,12 @@ export const useTermStore = create<TermStore>((set, get) => ({
     saveLayoutTick();
   },
 
-  closePane: (paneId) => {
+  closePane: () => {
     const { activeTabId, focusedPaneId, paneTrees } = get();
-    // A pane's close button names its pane so closing needs no focus change first: focusing would count as
-    // activity for the session the user is leaving.
-    const target = paneId ?? focusedPaneId;
-    if (!activeTabId || !target) return;
+    if (!activeTabId || !focusedPaneId) return;
     const t = paneTrees[activeTabId];
     if (!t) return;
-    const removed = removeLeaf(t, target);
+    const removed = removeLeaf(t, focusedPaneId);
     if (removed === null) {
       // Closing the last pane closes the entire tab.
       get().closeTab(activeTabId);

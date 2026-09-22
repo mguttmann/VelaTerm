@@ -10,7 +10,7 @@ vi.mock("../ipc/commands", () => ({
   ptyKill: vi.fn().mockResolvedValue(undefined),
   listShells: vi.fn().mockResolvedValue([]),
 }));
-vi.mock("../ipc/tree", () => ({ touchSessionActivity: vi.fn().mockResolvedValue(true), listTree: vi.fn() }));
+vi.mock("../ipc/tree", () => ({ listTree: vi.fn() }));
 vi.mock("../notify", () => ({ notify: vi.fn() }));
 vi.mock("../ipc/transport", () => ({ isTauri: true, invokeNative: vi.fn().mockResolvedValue(undefined) }));
 vi.mock("../platform", () => {
