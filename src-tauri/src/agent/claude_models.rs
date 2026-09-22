@@ -1,33 +1,33 @@
 //! The model catalogue offered to a Claude chat session.
 //!
-//! Claude Code has no command that prints its models, so the versioned entries below are a curated
-//! table rather than something the CLI reports. Two details make that table more than a list of
-//! aliases. First, a `[1m]` suffix is a model identifier in its own right when a family offers both
-//! standard and expanded contexts: passing `claude-opus-4-6[1m]` asks for the 1M-token window, so it
-//! stays separate from `claude-opus-4-6`. A model that is natively 1M, such as Opus 5, has only one
-//! selectable entry; retired suffixed spellings resolve to it. Second, newer models are rejected by
-//! older CLIs, so entries carry the version that introduced them and are filtered accordingly.
-//!
-//! Custom identifiers the user configured under `env` in `settings.json` are appended afterwards. That
-//! covers the case the curated table structurally cannot: a gateway identifier pointing at something
+//! The installed Claude CLI is the primary source: `cli_model_catalog` asks it for its models over the
+//! stream-json control protocol and caches the answer per binary and version, and a running conversation's
+//! own `list_models` answer refreshes that cache. When a CLI list is available it IS the list: a model the
+//! user's Claude Code does not offer is not offered here either. Without CLI data the website catalogue
+//! serves, and without that the versioned table below. Custom identifiers the user configured under `env`
+//! in `settings.json` are appended in every case; that covers a gateway identifier pointing at something
 //! other than Anthropic's own models.
 //!
-//! Explicit 1M-context variants stay beside their standard model, matching Paseo's catalogue. Asking for
-//! that expanded window can cost usage credits the account does not have, and the refusal is easy to miss:
-//! the CLI answers the turn with an ordinary assistant message carrying `API Error: Usage credits required
-//! for 1M context`, so nothing is actually run. Native 1M models do not carry the suffix and do not get a
-//! second menu row.
+//! Two details survive from the curated table. First, a `[1m]` suffix is a model identifier in its own
+//! right when a family offers both standard and expanded contexts: passing `claude-opus-4-6[1m]` asks for
+//! the 1M-token window, so it stays separate from `claude-opus-4-6`. Asking for that expanded window can
+//! cost usage credits the account does not have, and the refusal is easy to miss: the CLI answers the turn
+//! with an ordinary assistant message carrying `API Error: Usage credits required for 1M context`.
+//! Second, newer models are rejected by older CLIs, so table entries carry the version that introduced
+//! them and are filtered accordingly.
 //!
-//! Everything here reads files and spawns `claude --version`, so callers must stay off the main
-//! thread; dispatch already runs this inside a blocking worker.
+//! Everything here reads files and spawns `claude --version` or the probe, so callers must stay off the
+//! main thread; dispatch already runs this inside a blocking worker.
 
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use serde::Serialize;
 use serde_json::Value;
+
+use super::cli_model_catalog::{self, CliModel, Probe};
+use crate::host::AppCtx;
 
 /// How long `claude --version` may run before the catalogue gives up and lists everything.
 const VERSION_TIMEOUT: Duration = Duration::from_secs(5);
@@ -50,8 +50,9 @@ const SETTINGS_ENV_KEYS: &[&str] = &[
 /// and its canonical spelling are the same model, so resolving one to the other keeps the menu from
 /// listing both and lets old saved preferences continue to work.
 ///
-/// The right-hand side tracks what an alias currently resolves to, which moves when a new default
-/// ships: update these rows alongside the manifest whenever a family's newest release changes.
+/// This table is the fallback: with CLI data present, `normalize_id` follows the CLI's own
+/// `value -> resolvedModel` pairs and consults this table only when its target is a model the CLI
+/// offers. The right-hand side tracks what an alias resolved to when the table was last updated.
 const ALIASES: &[(&str, &str)] = &[
     ("opus", "claude-opus-5"),
     ("opus[1m]", "claude-opus-5"),
@@ -108,90 +109,18 @@ pub struct ClaudeModel {
     /// which does not know.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub supports_fast_mode: bool,
+    /// True for the model the CLI's `default` row currently resolves to, so the chip can name the default.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub is_default: bool,
 }
 
-/// Merge live model capabilities into the complete curated catalogue.
+/// The catalogue for a running conversation: the process's own `list_models` answer is the list.
 ///
-/// The live picker is a shortlist, not an exhaustive availability list. Omitted models remain selectable.
-/// Its `default` row is omitted because the menu already offers the agent default.
-/// The context window is not part of the answer, so it is borrowed from the curated table where the id
-/// matches, and left unknown otherwise.
-pub fn from_live(models: &[serde_json::Value]) -> Vec<ClaudeModel> {
-    let curated = list();
-    let live: Vec<ClaudeModel> = models
-        .iter()
-        .filter_map(|m| {
-            let value = m.get("value").and_then(serde_json::Value::as_str)?;
-            if value == "default"
-                || m.get("disabled").and_then(serde_json::Value::as_bool) == Some(true)
-            {
-                return None;
-            }
-            let resolved = m.get("resolvedModel").and_then(Value::as_str).unwrap_or(value);
-            let id = normalize_id(resolved).to_string();
-            let known = curated.iter().find(|c| c.id == id);
-            let label = known
-                .map(|c| c.label.clone())
-                .or_else(|| {
-                    m.get("displayName")
-                        .and_then(serde_json::Value::as_str)
-                        .filter(|s| !s.trim().is_empty())
-                        .map(str::to_string)
-                })
-                .unwrap_or_else(|| id.clone());
-            let description = m
-                .get("description")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_string)
-                .or_else(|| known.map(|c| c.description.clone()))
-                .unwrap_or_default();
-            let effort_levels: Vec<String> = m
-                .get("supportedEffortLevels")
-                .and_then(serde_json::Value::as_array)
-                .map(|levels| {
-                    levels
-                        .iter()
-                        .filter_map(serde_json::Value::as_str)
-                        .map(str::to_string)
-                        .collect()
-                })
-                .filter(|levels: &Vec<String>| !levels.is_empty())
-                .or_else(|| known.map(|c| c.effort_levels.clone()))
-                .unwrap_or_default();
-            Some(ClaudeModel {
-                large_context: id.contains("[1m]") || known.is_some_and(|c| c.large_context),
-                context_window: known.and_then(|c| c.context_window),
-                curated: known.is_some(),
-                supports_fast_mode: m
-                    .get("supportsFastMode")
-                    .and_then(serde_json::Value::as_bool)
-                    .unwrap_or(false),
-                id,
-                label,
-                description,
-                effort_levels,
-            })
-        })
-        .collect();
-    let mut merged = curated;
-    for model in live {
-        if let Some(existing) = merged.iter_mut().find(|entry| entry.id == model.id) {
-            *existing = model;
-        } else {
-            merged.push(model);
-        }
-    }
-    // An explicit refusal takes precedence; omission from the shortlist does not.
-    merged.retain(|entry| {
-        !models.iter().any(|model| {
-            model.get("disabled").and_then(Value::as_bool) == Some(true)
-                && model
-                    .get("resolvedModel").or_else(|| model.get("value"))
-                    .and_then(Value::as_str)
-                    .is_some_and(|id| normalize_id(id) == entry.id)
-        })
-    });
-    merged
+/// The `default` row is not listed; the model it resolves to is marked instead. Disabled rows are
+/// excluded. Without a usable row the fallbacks apply as for any other consumer.
+pub fn from_live(models: &[Value]) -> Vec<ClaudeModel> {
+    let rows = cli_model_catalog::parse_rows(models);
+    assemble(Some(&rows), None)
 }
 
 /// The curated table, in the order the menu shows it: newest first, each family's 1M variant beside it.
@@ -310,37 +239,67 @@ const MANIFEST: &[Entry] = &[
     },
 ];
 
-/// The models a Claude chat session can be switched to.
+/// Catalogue for one Claude executable, probing it when the cache is missing or stale.
 ///
-/// A failure to read the version or the settings file is not an error: the catalogue degrades to the
-/// full curated table, which is still usable, rather than leaving the chip empty.
-pub fn list() -> Vec<ClaudeModel> {
-    list_with_version(installed_version())
+/// A failure to probe, read the version or the settings file is not an error: the catalogue degrades to
+/// the website catalogue or the curated table, which is still usable, rather than leaving the chip empty.
+pub fn list_for_bin(app: &AppCtx, bin: &str) -> Vec<ClaudeModel> {
+    list_for_bin_with(app, bin, Probe::Allow)
 }
 
-/// Catalogue for the executable selected in application settings.
-pub fn list_for_bin(bin: &str) -> Vec<ClaudeModel> {
-    list_with_version(read_version_for_bin(bin))
+/// What a stored selection may name: the offered catalogue plus the curated table. The CLI's list is a
+/// shortlist of what it offers, not everything it accepts, so a job saved with an identifier the menu no
+/// longer offers (for example `claude-opus-5` once Opus 5.5 became the default) keeps validating instead of
+/// failing its retry. Offering stays narrow; only acceptance widens.
+pub fn accepted_for_bin(app: &AppCtx, bin: &str) -> Vec<ClaudeModel> {
+    with_curated(list_for_bin(app, bin))
 }
 
-fn list_with_version(version: Option<(u32, u32, u32)>) -> Vec<ClaudeModel> {
-    let usable: Vec<&Entry> = MANIFEST.iter().filter(|e| accepts(e, version)).collect();
-    let mut out: Vec<ClaudeModel> = usable
-        .iter()
-        .map(|e| ClaudeModel {
-            id: e.id.to_string(),
-            label: e.label.to_string(),
-            description: e.description.to_string(),
-            effort_levels: e.effort.iter().map(|s| s.to_string()).collect(),
-            context_window: Some(e.context_window),
-            curated: true,
-            large_context: e.wants_large_context(),
-            supports_fast_mode: false,
-        })
-        .collect();
-    if let Some(remote) = super::remote_model_catalog::models(version) { out = remote; }
-    for (id, origin) in settings_models() {
-        let id = normalize_id(&id).to_string();
+fn with_curated(mut offered: Vec<ClaudeModel>) -> Vec<ClaudeModel> {
+    for entry in bundled(None) {
+        if !offered.iter().any(|m| m.id == entry.id) {
+            offered.push(entry);
+        }
+    }
+    offered
+}
+
+/// Catalogue for one executable with an explicit probing policy; `CacheOnly` never spawns anything.
+pub fn list_for_bin_with(app: &AppCtx, bin: &str, probe: Probe) -> Vec<ClaudeModel> {
+    let snapshot = cli_model_catalog::ensure(app, bin, probe);
+    // The version filter for the bundled table: what this run read, else what the snapshot recorded.
+    let version = cli_model_catalog::cached_version(bin)
+        .or_else(|| snapshot.as_ref().and_then(|s| s.version.clone()))
+        .and_then(|v| parse_version(&v));
+    assemble(snapshot.as_ref().map(|s| s.models.as_slice()), version)
+}
+
+/// The one place the sources are ranked: CLI list (live or cached probe) > website catalogue > bundled
+/// table, then the identifiers from `settings.json`.
+fn assemble(cli: Option<&[CliModel]>, version: Option<(u32, u32, u32)>) -> Vec<ClaudeModel> {
+    assemble_with(
+        cli,
+        version,
+        super::remote_model_catalog::models(version),
+        &settings_models(),
+        &cli_model_catalog::alias_pairs(),
+    )
+}
+
+fn assemble_with(
+    cli: Option<&[CliModel]>,
+    version: Option<(u32, u32, u32)>,
+    website: Option<Vec<ClaudeModel>>,
+    settings: &[(String, String)],
+    pairs: &[(String, String)],
+) -> Vec<ClaudeModel> {
+    let mut out = cli
+        .map(cli_models)
+        .filter(|models| !models.is_empty())
+        .or(website)
+        .unwrap_or_else(|| bundled(version));
+    for (id, origin) in settings {
+        let id = normalize_with(id, pairs);
         if out.iter().any(|m| m.id == id) {
             continue;
         }
@@ -356,18 +315,170 @@ fn list_with_version(version: Option<(u32, u32, u32)>) -> Vec<ClaudeModel> {
             // A configured identifier may or may not ask for the large window; nothing here can tell.
             large_context: false,
             supports_fast_mode: false,
+            is_default: false,
         });
     }
     out
 }
 
-/// Resolve a short or retired alias to the identifier the CLI reports, leaving every other name untouched.
-pub(crate) fn normalize_id(id: &str) -> &str {
-    ALIASES
+/// The bundled table, filtered to what the installed version accepts.
+fn bundled(version: Option<(u32, u32, u32)>) -> Vec<ClaudeModel> {
+    MANIFEST
         .iter()
-        .find(|(alias, _)| *alias == id)
-        .map(|(_, full)| *full)
-        .unwrap_or(id)
+        .filter(|e| accepts(e, version))
+        .map(|e| ClaudeModel {
+            id: e.id.to_string(),
+            label: e.label.to_string(),
+            description: e.description.to_string(),
+            effort_levels: e.effort.iter().map(|s| s.to_string()).collect(),
+            context_window: Some(e.context_window),
+            curated: true,
+            large_context: e.wants_large_context(),
+            supports_fast_mode: false,
+            is_default: false,
+        })
+        .collect()
+}
+
+/// Menu rows from the CLI's own list. Rows are keyed by what they resolve to, so `opus[1m]` and
+/// `default`, which both resolve to the same identifier, become one row named after that identifier,
+/// which is also what the CLI reports back in `system/init`, so the chip finds the row without any
+/// further mapping. The `default` row itself is not listed; its target is marked `is_default`, and
+/// created from the default row when no other row offers it.
+fn cli_models(rows: &[CliModel]) -> Vec<ClaudeModel> {
+    let target = |row: &CliModel| row.resolved_model.clone().unwrap_or_else(|| row.value.clone());
+    let refused: Vec<String> = rows.iter().filter(|r| r.disabled).map(target).collect();
+    let default_row = rows.iter().find(|r| r.value == "default" && !r.disabled);
+    let default_id = default_row.map(target).filter(|id| id != "default" && !refused.contains(id));
+    let mut out: Vec<ClaudeModel> = Vec::new();
+    for row in rows.iter().filter(|r| !r.disabled && r.value != "default") {
+        let id = target(row);
+        if refused.contains(&id) || out.iter().any(|m| m.id == id) {
+            continue;
+        }
+        out.push(cli_model(&id, row, default_id.as_deref() == Some(id.as_str())));
+    }
+    if let (Some(id), Some(row)) = (&default_id, default_row) {
+        if !out.iter().any(|m| &m.id == id) {
+            out.insert(0, cli_model(id, row, true));
+        }
+    }
+    out
+}
+
+fn cli_model(id: &str, row: &CliModel, is_default: bool) -> ClaudeModel {
+    let known = MANIFEST.iter().find(|e| e.id == id);
+    let effort_levels = if !row.supported_effort_levels.is_empty() {
+        row.supported_effort_levels.clone()
+    } else {
+        known.map(|e| e.effort).unwrap_or(EFFORT_STANDARD).iter().map(|s| s.to_string()).collect()
+    };
+    let description = if row.description.trim().is_empty() {
+        known.map(|e| e.description.to_string()).unwrap_or_default()
+    } else {
+        row.description.clone()
+    };
+    let large_context = id.ends_with("[1m]");
+    ClaudeModel {
+        id: id.to_string(),
+        label: label_for(id, &row.display_name),
+        description,
+        effort_levels,
+        context_window: known.map(|e| e.context_window).or(large_context.then_some(1_000_000)),
+        curated: true,
+        large_context,
+        supports_fast_mode: row.supports_fast_mode,
+        is_default,
+    }
+}
+
+/// Chip and menu text for a CLI row. The CLI's display names are generic ("Opus (1M context)", "Fable"),
+/// so when the identifier tells the generation the label is derived from it; a display name that
+/// already names a version is kept.
+pub fn label_for(id: &str, display_name: &str) -> String {
+    let display_name = display_name.trim();
+    let mut depth = 0usize;
+    let outside_parens: String = display_name
+        .chars()
+        .filter(|c| {
+            match c {
+                '(' => depth += 1,
+                ')' => depth = depth.saturating_sub(1),
+                _ => {}
+            }
+            depth == 0 && *c != ')'
+        })
+        .collect();
+    let generic = !outside_parens.chars().any(|c| c.is_ascii_digit());
+    match (family_label(id), generic) {
+        (Some(label), true) => label,
+        (Some(_), false) => {
+            if id.ends_with("[1m]") && !display_name.to_ascii_lowercase().contains("1m") {
+                format!("{display_name} 1M")
+            } else {
+                display_name.to_string()
+            }
+        }
+        (None, _) if !display_name.is_empty() => display_name.to_string(),
+        (None, _) => id.to_string(),
+    }
+}
+
+/// "Opus 5.5 1M" for `claude-opus-5-5[1m]`, "Fable 5.1" for `claude-fable-5-1`; None for any other shape.
+fn family_label(id: &str) -> Option<String> {
+    let (base, large) = match id.strip_suffix("[1m]") {
+        Some(base) => (base, true),
+        None => (id, false),
+    };
+    let rest = base.strip_prefix("claude-")?;
+    let mut segments = rest.split('-');
+    let family = segments.next().filter(|f| !f.is_empty() && f.chars().all(|c| c.is_ascii_alphabetic()))?;
+    let version: Vec<&str> = segments.collect();
+    if version.is_empty() || version.len() > 2 || version.iter().any(|v| v.is_empty() || !v.chars().all(|c| c.is_ascii_digit())) {
+        return None;
+    }
+    let mut chars = family.chars();
+    let family = chars.next().map(|c| c.to_ascii_uppercase().to_string() + chars.as_str()).unwrap_or_default();
+    let mut label = format!("{family} {}", version.join("."));
+    if large {
+        label.push_str(" 1M");
+    }
+    Some(label)
+}
+
+/// Resolve a short or retired alias to the identifier the CLI reports, leaving every other name untouched.
+///
+/// The one chokepoint for the chat engine's launch, `set_model` and `system/init` paths. With CLI data the
+/// CLI's own pairs decide; without it the static table does.
+pub(crate) fn normalize_id(id: &str) -> String {
+    normalize_with(id, &cli_model_catalog::alias_pairs())
+}
+
+/// `normalize_id` over explicit `(value, resolvedModel)` pairs.
+///
+/// With pairs: an identifier the CLI offers is never rewritten; a value the CLI knows becomes what it
+/// resolves to; a retired full spelling from the static table (`claude-opus-5[1m]` for the natively 1M
+/// Opus 5) keeps the rewrite the table always applied, because its target is a real model id the CLI
+/// accepts even when its shortlist no longer names it, while the suffixed spelling may be refused or ask
+/// for usage credits; a short name such as `opus` is left to the CLI, which resolves it to its current
+/// generation and reports the result in `system/init`. Without pairs the static table applies as it
+/// always did.
+fn normalize_with(id: &str, pairs: &[(String, String)]) -> String {
+    let static_target = ALIASES.iter().find(|(alias, _)| *alias == id).map(|(_, full)| *full);
+    if pairs.is_empty() {
+        return static_target.unwrap_or(id).to_string();
+    }
+    if pairs.iter().any(|(_, resolved)| resolved == id) {
+        return id.to_string();
+    }
+    if let Some((_, resolved)) = pairs.iter().find(|(value, _)| value == id) {
+        return resolved.clone();
+    }
+    match static_target {
+        Some(target) if pairs.iter().any(|(_, resolved)| resolved == target) => target.to_string(),
+        Some(target) if id.starts_with("claude-") => target.to_string(),
+        _ => id.to_string(),
+    }
 }
 
 /// Whether an entry is old enough for the installed CLI. An unknown version lists everything, on the
@@ -379,28 +490,14 @@ fn accepts(entry: &Entry, version: Option<(u32, u32, u32)>) -> bool {
     }
 }
 
-/// The installed Claude Code version, resolved once per run.
-///
-/// Caching is safe here in the way that matters: an upgrade mid-run can only leave the catalogue
-/// listing slightly fewer models than the new binary accepts, and the next launch corrects it.
-fn installed_version() -> Option<(u32, u32, u32)> {
-    static CACHE: OnceLock<Option<(u32, u32, u32)>> = OnceLock::new();
-    *CACHE.get_or_init(read_version)
-}
-
-/// Run `claude --version` and parse the leading `major.minor.patch`.
-fn read_version() -> Option<(u32, u32, u32)> {
-    let bin = crate::agent::install::locate_installed_bin("claude")
-        .unwrap_or_else(|| "claude".to_string());
-    read_version_for_bin(&bin)
-}
-
-fn read_version_for_bin(bin: &str) -> Option<(u32, u32, u32)> {
+/// Run `claude --version` and return the `major.minor.patch` it prints, or None when it does not answer
+/// with a version within VERSION_TIMEOUT.
+pub(crate) fn read_version_for_bin(bin: &str) -> Option<String> {
     let mut cmd = crate::host::command(bin);
     cmd.arg("--version");
     cmd.env("NO_COLOR", "1");
     let text = capture(cmd)?;
-    parse_version(&text)
+    parse_version(&text).map(|(a, b, c)| format!("{a}.{b}.{c}"))
 }
 
 /// Read a short command's stdout, killing it once VERSION_TIMEOUT elapses.
@@ -486,46 +583,159 @@ fn config_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cli_model_catalog::testing::fixture_models;
 
+    fn fixture_rows() -> Vec<CliModel> {
+        cli_model_catalog::parse_rows(&fixture_models())
+    }
+
+    fn website(id: &str) -> Vec<ClaudeModel> {
+        vec![ClaudeModel {
+            id: id.into(),
+            label: "Website".into(),
+            description: String::new(),
+            effort_levels: vec![],
+            context_window: None,
+            curated: true,
+            large_context: false,
+            supports_fast_mode: false,
+            is_default: false,
+        }]
+    }
+
+    /// AC3, table-driven: the same ranking for every consumer, settings identifiers appended in every case.
     #[test]
-    fn live_shortlist_preserves_complete_catalogue_and_updates_capabilities() {
-        let live = vec![
-            serde_json::json!({"value":"default","displayName":"Default (recommended)"}),
-            serde_json::json!({"value":"claude-opus-5","displayName":"Opus (1M context)","description":"Best","supportedEffortLevels":["low","high"],"supportsFastMode":true}),
-            serde_json::json!({"value":"gateway-x","displayName":"Gateway","disabled":true}),
-            serde_json::json!({"value":"gateway-y","displayName":"Gateway Y"}),
+    fn precedence_table() {
+        let rows = fixture_rows();
+        let empty: Vec<CliModel> = vec![];
+        let disabled_only = vec![CliModel { value: "claude-opus-5".into(), disabled: true, ..Default::default() }];
+        let settings = vec![("my-gateway/opus".to_string(), "env.ANTHROPIC_MODEL".to_string())];
+        let cases: Vec<(Option<&[CliModel]>, Option<Vec<ClaudeModel>>, &str, &str)> = vec![
+            (Some(&rows), Some(website("test-website-model")), "claude-opus-5-5[1m]", "cli beats website"),
+            (Some(&rows), None, "claude-opus-5-5[1m]", "cli beats bundled"),
+            (Some(&empty), Some(website("test-website-model")), "test-website-model", "empty cli falls to website"),
+            (Some(&disabled_only), None, MANIFEST[0].id, "disabled-only cli falls to bundled"),
+            (None, Some(website("test-website-model")), "test-website-model", "website beats bundled"),
+            (None, None, MANIFEST[0].id, "bundled last"),
         ];
-        let models = from_live(&live);
-        assert!(models.iter().any(|m| m.id == "claude-opus-4-6"));
-        assert!(models.iter().any(|m| m.id == "claude-opus-4-6[1m]"));
-        assert!(models.iter().any(|m| m.id == "claude-fable-5-1"));
-        assert!(!models
-            .iter()
-            .any(|m| m.id == "default" || m.id == "gateway-x"));
-        assert_eq!(models.iter().filter(|m| m.id == "claude-opus-5").count(), 1);
-        assert_eq!(models[0].label, "Opus 5");
-        assert_eq!(models[0].effort_levels, vec!["low", "high"]);
-        assert!(models[0].supports_fast_mode);
-        assert!(
-            models[0].context_window.is_some(),
-            "borrowed from the curated table"
-        );
-        let gateway = models.iter().find(|m| m.id == "gateway-y").unwrap();
-        assert!(!gateway.curated);
-        assert!(gateway.context_window.is_none());
-        let disabled =
-            from_live(&[serde_json::json!({"value":"claude-sonnet-4-6","disabled":true})]);
-        assert!(!disabled.iter().any(|m| m.id == "claude-sonnet-4-6"));
-        assert!(disabled.iter().any(|m| m.id == "claude-sonnet-4-6[1m]"));
-        for entry in MANIFEST {
-            if accepts(entry, installed_version()) {
-                assert!(
-                    models.iter().any(|m| m.id == entry.id),
-                    "missing {}",
-                    entry.id
-                );
-            }
+        for (cli, site, first, why) in cases {
+            let models = assemble_with(cli, None, site, &settings, &[]);
+            assert_eq!(models[0].id, first, "{why}");
+            assert_eq!(models.iter().filter(|m| m.id == "my-gateway/opus").count(), 1, "{why}: settings appended once");
+            assert!(!models.iter().any(|m| m.id == "default"), "{why}");
         }
+        // The CLI list is the list: nothing from the table is merged underneath it.
+        let models = assemble_with(Some(&rows), None, None, &[], &[]);
+        assert_eq!(models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>(), ["claude-opus-5-5[1m]", "claude-fable-5-1"]);
+        assert!(!models.iter().any(|m| m.id == "claude-opus-4-6"));
+        let opus = &models[0];
+        assert!(opus.is_default, "the default row marks its target");
+        assert!(opus.large_context);
+        assert_eq!(opus.context_window, Some(1_000_000));
+        assert!(opus.supports_fast_mode);
+        assert_eq!(opus.effort_levels, ["low", "medium", "high", "xhigh", "max"]);
+        assert_eq!(opus.description, "Opus 5.5 with 1M context · Best for everyday, complex tasks");
+        assert!(!models[1].is_default);
+        assert!(!models[1].supports_fast_mode);
+        // A settings identifier already offered by the CLI is not duplicated.
+        let settings = vec![("claude-fable-5-1".to_string(), "env.ANTHROPIC_MODEL".to_string())];
+        assert_eq!(assemble_with(Some(&rows), None, None, &settings, &[]).len(), 2);
+        // A disabled row removes its model even when another row resolves to it.
+        let mut rows = fixture_rows();
+        rows.push(CliModel { value: "fable".into(), resolved_model: Some("claude-fable-5-1".into()), disabled: true, ..Default::default() });
+        assert!(!assemble_with(Some(&rows), None, None, &[], &[]).iter().any(|m| m.id == "claude-fable-5-1"));
+        // A default resolving to a model no other row offers is listed once, as the default.
+        let rows = vec![CliModel { value: "default".into(), resolved_model: Some("claude-sonnet-4-6".into()), display_name: "Default (recommended)".into(), description: "Sonnet".into(), ..Default::default() }];
+        let models = assemble_with(Some(&rows), None, None, &[], &[]);
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "claude-sonnet-4-6");
+        assert_eq!(models[0].label, "Sonnet 4.6");
+        assert!(models[0].is_default);
+        // The live path is the same assembly.
+        let live = from_live(&fixture_models());
+        assert_eq!(live.iter().filter(|m| m.curated).map(|m| m.id.as_str()).collect::<Vec<_>>(), ["claude-opus-5-5[1m]", "claude-fable-5-1"]);
+    }
+
+    /// The wiring behind `assemble_with`: the website module is consulted when no CLI list exists.
+    #[test]
+    fn website_catalogue_is_the_fallback_without_cli_data() {
+        let _serial = cli_model_catalog::TEST_LOCK.lock().unwrap();
+        let catalog = serde_json::json!({"schemaVersion": 1, "revision": 7, "models": [{
+            "id": "test-website-model", "label": "Website model", "description": "From the website",
+            "contextWindow": 200000, "effortLevels": ["low", "high"]
+        }]});
+        super::super::remote_model_catalog::set_for_tests(Some(&serde_json::to_vec(&catalog).unwrap()));
+        let models = assemble(None, None);
+        assert_eq!(models[0].id, "test-website-model");
+        let with_cli = assemble(Some(&fixture_rows()), None);
+        assert_eq!(with_cli[0].id, "claude-opus-5-5[1m]");
+        assert!(!with_cli.iter().any(|m| m.id == "test-website-model"));
+        super::super::remote_model_catalog::set_for_tests(None);
+        assert_eq!(assemble(None, None)[0].id, MANIFEST[0].id);
+    }
+
+    /// AC4: the CLI's own pairs decide before the static table.
+    #[test]
+    fn normalize_id_prefers_cli_pairs() {
+        let pairs: Vec<(String, String)> = fixture_rows()
+            .iter()
+            .filter(|r| r.value != "default")
+            .map(|r| (r.value.clone(), r.resolved_model.clone().unwrap()))
+            .collect();
+        assert_eq!(normalize_with("opus[1m]", &pairs), "claude-opus-5-5[1m]");
+        assert_eq!(normalize_with("claude-opus-5-5[1m]", &pairs), "claude-opus-5-5[1m]");
+        assert_eq!(normalize_with("claude-fable-5-1", &pairs), "claude-fable-5-1");
+        // The static table would pin the previous generation; the CLI resolves its own short names.
+        assert_eq!(normalize_with("opus", &pairs), "opus");
+        // A retired full spelling keeps the table's rewrite even when the CLI's shortlist no longer names
+        // the target: claude-opus-5 is a model id the CLI accepts, the suffixed spelling may be refused.
+        assert_eq!(normalize_with("claude-opus-5[1m]", &pairs), "claude-opus-5");
+        // A row without resolvedModel still counts as CLI data and is never rewritten by the table.
+        assert_eq!(normalize_with("opus", &[("opus".to_string(), "opus".to_string())]), "opus");
+        let mut with_opus_5 = pairs.clone();
+        with_opus_5.push(("claude-opus-5".into(), "claude-opus-5".into()));
+        assert_eq!(normalize_with("claude-opus-5[1m]", &with_opus_5), "claude-opus-5");
+        assert_eq!(normalize_with("my-gateway/opus", &pairs), "my-gateway/opus");
+        // Without CLI data the static table applies as before.
+        assert_eq!(normalize_with("opus", &[]), "claude-opus-5");
+        assert_eq!(normalize_with("claude-opus-5[1m]", &[]), "claude-opus-5");
+        assert_eq!(normalize_with("my-gateway/opus", &[]), "my-gateway/opus");
+    }
+
+    /// Acceptance is wider than the offer: a selection saved before the CLI's shortlist changed still
+    /// validates, and nothing the CLI offers is duplicated.
+    #[test]
+    fn accepted_selection_includes_the_curated_table() {
+        let offered = cli_models(&fixture_rows());
+        let accepted = with_curated(offered.clone());
+        assert!(!offered.iter().any(|m| m.id == "claude-opus-5"));
+        assert!(accepted.iter().any(|m| m.id == "claude-opus-5"));
+        assert!(accepted.iter().any(|m| m.id == "claude-opus-5-5[1m]"));
+        let mut ids: Vec<&str> = accepted.iter().map(|m| m.id.as_str()).collect();
+        let before = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), before, "no identifier appears twice");
+    }
+
+    /// AC5
+    #[test]
+    fn label_formatter() {
+        assert_eq!(label_for("claude-opus-5-5[1m]", "Opus (1M context)"), "Opus 5.5 1M");
+        assert_eq!(label_for("claude-fable-5-1", "Fable"), "Fable 5.1");
+        assert_eq!(label_for("claude-sonnet-4-6", "Sonnet"), "Sonnet 4.6");
+        assert_eq!(label_for("claude-haiku-4-5", "Haiku"), "Haiku 4.5");
+        assert_eq!(label_for("claude-opus-5-5[1m]", "Default (recommended)"), "Opus 5.5 1M");
+        assert_eq!(label_for("claude-opus-5", ""), "Opus 5");
+        // A display name that names the generation is kept, with the window added when the id asks for it.
+        assert_eq!(label_for("claude-opus-4-6", "Opus 4.6"), "Opus 4.6");
+        assert_eq!(label_for("claude-opus-4-6[1m]", "Opus 4.6"), "Opus 4.6 1M");
+        assert_eq!(label_for("claude-opus-4-6[1m]", "Opus 4.6 (1M)"), "Opus 4.6 (1M)");
+        // Unknown shapes fall back to the display name, then the id.
+        assert_eq!(label_for("claude-opus-4-8-20260101", "Opus"), "Opus");
+        assert_eq!(label_for("my-gateway/opus", "Gateway Opus"), "Gateway Opus");
+        assert_eq!(label_for("my-gateway/opus", ""), "my-gateway/opus");
+        assert_eq!(label_for("claude-opus-4-6", "Opus (1M context)"), "Opus 4.6");
     }
 
     #[test]
@@ -541,11 +751,12 @@ mod tests {
         assert!(accepts(opus5, Some((2, 1, 219))));
         // An unknown version must not hide anything.
         assert!(accepts(opus5, None));
+        assert!(!bundled(Some((2, 1, 200))).iter().any(|m| m.id == "claude-opus-5"));
     }
 
     #[test]
     fn keeps_large_context_variants_beside_their_standard_model() {
-        let models = list();
+        let models = assemble_with(None, None, None, &[], &[]);
         let expanded = models
             .iter()
             .position(|m| m.id == "claude-opus-4-8[1m]")
@@ -561,22 +772,19 @@ mod tests {
     fn resolves_short_and_retired_aliases_to_curated_identifiers() {
         let ids: Vec<&str> = MANIFEST.iter().map(|e| e.id).collect();
         for (alias, full) in ALIASES {
-            assert_eq!(normalize_id(alias), *full);
+            assert_eq!(normalize_with(alias, &[]), *full);
             assert!(
                 ids.contains(full),
                 "{full} is aliased but missing from the manifest"
             );
         }
-        // Anything that is not an alias passes through, gateway identifiers included.
-        assert_eq!(normalize_id("claude-opus-5[1m]"), "claude-opus-5");
-        assert_eq!(normalize_id("my-gateway/opus"), "my-gateway/opus");
     }
 
     #[test]
     fn offers_one_native_one_million_opus_5_entry() {
         let opus5: Vec<&str> = MANIFEST
             .iter()
-            .filter(|entry| normalize_id(entry.id) == "claude-opus-5")
+            .filter(|entry| normalize_with(entry.id, &[]) == "claude-opus-5")
             .map(|entry| entry.id)
             .collect();
         assert_eq!(opus5, vec!["claude-opus-5"]);
@@ -587,19 +795,5 @@ mod tests {
         let ids: Vec<&str> = MANIFEST.iter().map(|e| e.id).collect();
         assert!(ids.contains(&"claude-opus-4-6"));
         assert!(ids.contains(&"claude-opus-4-6[1m]"));
-    }
-
-    #[test]
-    fn live_alias_uses_the_resolved_version_without_removing_other_versions() {
-        let models = from_live(&[serde_json::json!({
-            "value": "opus", "resolvedModel": "test-future-opus",
-            "displayName": "Future Opus", "supportsFastMode": true
-        })]);
-        assert!(models.iter().any(|m| m.id == "test-future-opus" && m.supports_fast_mode));
-        assert!(models.iter().any(|m| m.id == "claude-opus-4-6"));
-        let disabled = from_live(&[serde_json::json!({
-            "value": "opus", "resolvedModel": "claude-opus-4-6", "disabled": true
-        })]);
-        assert!(!disabled.iter().any(|m| m.id == "claude-opus-4-6"));
     }
 }
