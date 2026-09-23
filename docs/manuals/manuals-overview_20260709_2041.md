@@ -27,7 +27,7 @@ Knowledge tools: [Local Notebooks](knowledge-notebooks_20260910.md),
 [Session Knowledge Base](global-memory_20260905_2027.md), and
 [Code Graph & Knowledge Base](codegraph_20260905_2027.md).
 
-Model catalogues: [Claude model catalogue from the installed CLI](claude-model-catalog_20260922.md)
+Model catalogues: [Claude model catalogue: website catalogue merged with the installed CLI](claude-model-catalog_20260922.md)
 and [Website model catalogue sync](model-catalog-sync_20260909.md).
 
 ## About the screenshots

@@ -1432,14 +1432,13 @@ pub fn chat_models_with(
         repo::get_session(&conn, session_id)?.ok_or("Session not found")?
     };
     match session.kind {
-        // A running process's own list wins; otherwise the session's binary is asked (or its cache).
-        SessionKind::Claude => serde_json::to_value(match ctx.chat().live_claude_models(session_id) {
-            Some(models) => models,
-            None => {
-                let bin = crate::agent::executable::for_session(ctx, &session);
-                crate::agent::claude_models::list_for_bin_with(ctx, &bin, probe)
-            }
-        }),
+        // The catalogue with the CLI merged in: a running process's own list for its own menu, otherwise
+        // the session's binary is asked (or its cache).
+        SessionKind::Claude => {
+            let bin = crate::agent::executable::for_session(ctx, &session);
+            let live = ctx.chat().live_claude_models(session_id);
+            serde_json::to_value(crate::agent::claude_models::list_for_session(ctx, &bin, probe, live.as_deref()))
+        }
         SessionKind::Codex => {
             let bin = crate::agent::executable::for_session(ctx, &session);
             let args = crate::agent::inject::split_extra_args(session.agent_args.as_deref());
@@ -1553,7 +1552,14 @@ pub fn chat_snapshot_window(
     let mut snapshot = ctx.chat().snapshot_window(session_id, window);
     if !snapshot.running {
         let session = session_settings::session(ctx, session_id)?;
-        let selection = session_settings::resolve(ctx, &session)?;
+        let mut selection = session_settings::resolve(ctx, &session)?;
+        if session.kind == SessionKind::Claude {
+            // A stored spelling (`claude-opus-5-5[1m]`, a dated id) names the same menu row as the
+            // catalogue's identifier; the chip compares identifiers, so it is shown folded. Only the
+            // spelling: this value goes back to the backend on the next send and is persisted, so aliases
+            // such as `opus` stay what the user chose instead of being pinned to today's model.
+            selection.model = selection.model.as_deref().map(crate::agent::claude_models::fold_stored);
+        }
         snapshot.model = selection.model.clone();
         snapshot.effort = selection.effort.clone();
         snapshot.selection = Some(selection);

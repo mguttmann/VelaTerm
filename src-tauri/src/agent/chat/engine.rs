@@ -2152,14 +2152,14 @@ impl ChatManager {
         Some(commands)
     }
 
-    /// The catalogue the running Claude process reported, or None before it has answered.
-    pub fn live_claude_models(&self, session_id: &str) -> Option<Vec<crate::agent::claude_models::ClaudeModel>> {
+    /// The raw `models` rows the running Claude process reported, or None before it has answered.
+    pub fn live_claude_models(&self, session_id: &str) -> Option<Vec<Value>> {
         let proc = self.sessions.lock().unwrap().get(session_id).cloned()?;
         if proc.kind != SessionKind::Claude {
             return None;
         }
         let list = proc.claude_models.lock().unwrap().clone();
-        (!list.is_empty()).then(|| crate::agent::claude_models::from_live(&list))
+        (!list.is_empty()).then_some(list)
     }
 
     /// Add a measured stream rate when this process observed matching output and usage events.
@@ -5254,9 +5254,9 @@ fn handle_control_response(
             if !models.is_empty() {
                 *proc.claude_models.lock().unwrap() = models.clone();
                 emit(app, session_id, json!({"type":"models"}));
-                // The process's list is also the freshest answer for every session that is not running:
-                // it replaces the probe cache for this binary. Off the reader thread, because recording
-                // may read `claude --version` once.
+                // Identifiers this process reports are remembered for its binary as additions, so a model
+                // it knows appears in the menus of sessions that are not running; its list never replaces
+                // the probe's. Off the reader thread, because recording may read `claude --version` once.
                 let (app, bin) = (app.clone(), proc.bin.clone());
                 std::thread::spawn(move || {
                     crate::agent::cli_model_catalog::record_live(&app, &bin, &models);

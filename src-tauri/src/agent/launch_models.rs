@@ -185,9 +185,12 @@ mod tests {
         assert_eq!(codex.models[1].effort_levels, ["low"]);
         let claude = list(&app, SessionKind::Claude, &context).unwrap();
         assert!(claude.models.iter().any(|m| !m.effort_levels.is_empty()));
-        // The fixture answers the CLI probe, and its list is the list offered.
-        assert_eq!(claude.models.iter().map(|m| m.id.as_str()).collect::<Vec<_>>()[..2], ["fixture-claude-model", "fixture-claude-model-b"]);
-        assert_eq!(claude.models[0].label, "Fixture Claude");
+        // The fixture answers the CLI probe; the identifiers only it knows are appended to the catalogue.
+        let ids: Vec<&str> = claude.models.iter().map(|m| m.id.as_str()).collect();
+        assert!(ids.contains(&"claude-opus-4-8"), "the catalogue stays the base");
+        let at = ids.iter().position(|id| *id == "fixture-claude-model").unwrap();
+        assert_eq!(ids[at..at + 2], ["fixture-claude-model", "fixture-claude-model-b"]);
+        assert_eq!(claude.models[at].label, "Fixture Claude");
         for kind in [SessionKind::Pi, SessionKind::Omp] {
             let result = list(&app, kind, &context).unwrap();
             assert_eq!(

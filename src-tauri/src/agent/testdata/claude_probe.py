@@ -3,7 +3,8 @@
 
 The test writes this file with CONFIG filled in: `version` is what `--version` prints, `models` is the
 list both control responses carry, `mode` is one of `ok`, `garbage`, `error`, `exit3`, and `sleep` delays
-the answers by that many seconds. Every invocation is logged to `calls.jsonl` beside the script, with the
+the answers by that many seconds, and `grandchild` starts a `sleep` child first and records its pid in
+`grandchild.pid`. Every invocation is logged to `calls.jsonl` beside the script, with the
 process id, the working directory, the arguments and the VelaTerm/Claude environment keys it received.
 """
 import json
@@ -26,6 +27,11 @@ if "--version" in sys.argv:
 mode = CONFIG.get("mode", "ok")
 if mode == "exit3":
     sys.exit(3)
+if CONFIG.get("grandchild"):
+    # A process the CLI starts, standing in for a hook or MCP server; the probe's timeout must end it too.
+    import subprocess
+    grandchild = subprocess.Popen(["sleep", "30"])
+    (base / "grandchild.pid").write_text(str(grandchild.pid))
 if CONFIG.get("sleep"):
     time.sleep(float(CONFIG["sleep"]))
 # A real CLI prints hook and system lines before answering; the parser must step over them.

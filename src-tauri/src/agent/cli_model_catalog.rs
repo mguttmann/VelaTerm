@@ -1,16 +1,19 @@
 //! Claude catalogue read from the installed CLI itself.
 //!
 //! Claude Code answers the stream-json control requests `initialize` and `list_models` with the models
-//! the installed version and the signed-in account can actually use. That list is the primary source of
-//! the Claude catalogue: a model appears in VelaTerm as soon as the user's Claude Code knows it, without
-//! anyone editing the bundled table or the website catalogue. Both of those remain fallbacks, see
-//! `claude_models::assemble`.
+//! the installed version and the signed-in account recommend. That list is merged into the website
+//! catalogue (or the bundled table), see `claude_models::assemble`: a model appears in VelaTerm as soon as
+//! the user's Claude Code knows it, without anyone editing the bundled table or the website catalogue, and
+//! the catalogue's other models stay selectable.
 //!
 //! One probe per binary is cached in app settings together with the CLI version string that produced
-//! it. The cache is reused until `claude --version` reports a different version (read at most once per
-//! run, or again on an explicit refresh), until the user presses Refresh, or until a running conversation
-//! answers `list_models`, which overwrites the same cache so every menu learns a new model as soon as one
-//! conversation has started. Probing is single-flight per binary and backs off after a failure.
+//! it. The probe runs in a private, empty directory, so no project's settings shape it. The cache is
+//! reused until `claude --version` reports a different version (read at most once per run, or again on an
+//! explicit refresh) or until the user presses Refresh. A running conversation's `list_models` answer may
+//! reflect that conversation's project settings, so it never replaces the probe's list: it shapes that
+//! conversation's own menu, and the identifiers it names are remembered per binary as additions only, so a
+//! model one conversation reports appears in every menu. Probing is single-flight per binary and backs off
+//! after a failure.
 //!
 //! Everything here spawns processes, so callers must stay off the main thread; dispatch and the Tauri
 //! command layer already run catalogue reads inside blocking workers.
@@ -102,9 +105,19 @@ pub struct Snapshot {
     pub version: Option<String>,
     /// Unix seconds of the probe or live answer.
     pub checked_at: u64,
-    /// `probe` for a headless probe, `live` for a running conversation's `list_models` answer.
+    /// `probe` for a headless probe; `live` while only running conversations have reported, before any
+    /// probe of this binary succeeded.
     pub origin: String,
+    /// The neutral probe's rows; empty while only running conversations have reported.
     pub models: Vec<CliModel>,
+    /// Rows running conversations reported, remembered as additions: they may add an identifier to the
+    /// catalogue, never change or remove an entry. Rows the probe itself lists are dropped from here.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub live: Vec<CliModel>,
+    /// The CLI version whose conversations reported `live`. Additions last until that version changes or
+    /// Refresh is pressed, so an identifier a conversation once named cannot stay in every menu forever.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live_version: Option<String>,
 }
 
 /// Whether a catalogue read may start a probe.
@@ -303,7 +316,21 @@ fn probe_command(bin: &str, cwd: &Path) -> std::process::Command {
     // in nor settings another local user could plant in a shared directory may shape the probe.
     cmd.current_dir(cwd);
     cmd.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null());
+    // Its own process group, so a timeout can end whatever the CLI started along with it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     cmd
+}
+
+/// End the probe and everything in its process group, then reap it. The same pattern as the memory
+/// runner's headless launch.
+fn kill_tree(child: &mut std::process::Child) {
+    // The crate's one process-tree kill (process group on unix, taskkill /T on Windows), then reap.
+    crate::host::kill_process_tree(child);
+    let _ = child.wait();
 }
 
 /// Ask the binary for its models over the control protocol, killing it once `timeout` elapses.
@@ -346,8 +373,7 @@ pub fn probe_with_timeout(bin: &str, cwd: &Path, timeout: Duration) -> Result<Ve
                 break;
             }
             Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 return Err(ProbeError::Timeout);
             }
         }
@@ -358,8 +384,7 @@ pub fn probe_with_timeout(bin: &str, cwd: &Path, timeout: Duration) -> Result<Ve
             Ok(Some(status)) => break Some(status),
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             _ => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 break None;
             }
         }
@@ -396,6 +421,12 @@ fn load(app: &AppCtx) {
         .unwrap_or_default();
     let mut guard = state().0.lock().unwrap();
     for (hash, snapshot) in parsed {
+        // The earlier rule stored a whole session answer (disabled rows included) as a "live" snapshot's
+        // models. That value is only as valid as the rule that wrote it, so it is dropped and re-derived by
+        // the next probe or conversation instead of being read as a probe list.
+        if snapshot.origin == "live" && !snapshot.models.is_empty() {
+            continue;
+        }
         guard.snapshots.entry(hash).or_insert(snapshot);
     }
     guard.loaded.insert(dir);
@@ -460,8 +491,12 @@ fn run(app: &AppCtx, bin: &str, probe: Probe) -> (Option<Snapshot>, Option<Probe
             // A matching version proves the cache current. Without a readable version nothing can tell an
             // update apart, so a snapshot this run produced is kept for the rest of the run instead of
             // probing again on every read; the next start probes afresh.
+            // Only a probe's list counts: what running conversations reported is no substitute for it.
             let current = snapshot.as_ref().is_some_and(|s| {
-                s.version == version && (version.is_some() || s.checked_at >= run_started())
+                s.origin == "probe"
+                    && !s.models.is_empty()
+                    && s.version == version
+                    && (version.is_some() || s.checked_at >= run_started())
             });
             let backing_off = guard
                 .attempts
@@ -494,11 +529,19 @@ fn run(app: &AppCtx, bin: &str, probe: Probe) -> (Option<Snapshot>, Option<Probe
         guard.in_flight.remove(&hash);
         let error = match &result {
             Ok(models) => {
+                // Additions the probe now lists itself are redundant; the rest are kept while the CLI version
+                // that reported them is unchanged. Refresh starts over, so a stale addition can be cleared.
+                let previous = guard.snapshots.get(&hash).filter(|s| probe != Probe::Force && s.live_version == version);
+                let live = previous
+                    .map(|s| s.live.iter().filter(|row| !models.iter().any(|m| m.value == row.value)).cloned().collect())
+                    .unwrap_or_default();
                 let snapshot = Snapshot {
                     version: version.clone(),
                     checked_at: now(),
                     origin: "probe".into(),
                     models: models.clone(),
+                    live,
+                    live_version: previous.and_then(|s| s.live_version.clone()),
                 };
                 guard.snapshots.insert(hash.clone(), snapshot);
                 persist(app, &guard.snapshots);
@@ -517,39 +560,74 @@ fn run(app: &AppCtx, bin: &str, probe: Probe) -> (Option<Snapshot>, Option<Probe
     (snapshot, error)
 }
 
-/// Store the `list_models` answer of a running conversation as this binary's cache, so menus of
-/// sessions that are not running, and `normalize_id`, learn the list the moment one conversation has
-/// started. The version is read once if this run has not read it yet.
+/// Remember the rows of a running conversation's `list_models` answer as additions for this binary, so
+/// menus of sessions that are not running learn a new model the moment one conversation has reported it
+/// (`normalize_id` does not read additions; its pairs come from the neutral probe only). The answer may depend on that conversation's project settings, so it
+/// never replaces the probe's list and never removes anything: disabled rows and the `default` row, whose
+/// target a project can change, are not remembered, and rows the probe already lists add nothing. The
+/// version is read once if this run has not read it yet.
 pub fn record_live(app: &AppCtx, bin: &str, rows: &[Value]) {
-    let models = parse_rows(rows);
-    if models.is_empty() {
+    let rows: Vec<CliModel> = parse_rows(rows).into_iter().filter(|r| !r.disabled && r.value != "default").collect();
+    if rows.is_empty() {
         return;
     }
     load(app);
     let version = version_of(bin, false);
-    {
+    let changed = {
         let mut guard = state().0.lock().unwrap();
-        let hash = bin_hash(bin);
-        guard.snapshots.insert(
-            hash.clone(),
-            Snapshot { version, checked_at: now(), origin: "live".into(), models },
-        );
-        if let Some(attempt) = guard.attempts.get_mut(&hash) {
-            attempt.error = None;
+        let snapshot = guard.snapshots.entry(bin_hash(bin)).or_insert_with(|| Snapshot {
+            version: version.clone(),
+            checked_at: now(),
+            origin: "live".into(),
+            models: Vec::new(),
+            live: Vec::new(),
+            live_version: None,
+        });
+        let mut changed = false;
+        // Additions from an older CLI version do not describe this binary any more.
+        if snapshot.live_version != version {
+            changed |= !snapshot.live.is_empty();
+            snapshot.live.clear();
+            snapshot.live_version = version.clone();
         }
-        persist(app, &guard.snapshots);
+        for row in rows {
+            if snapshot.models.iter().any(|m| m.value == row.value) {
+                continue;
+            }
+            match snapshot.live.iter_mut().find(|m| m.value == row.value) {
+                Some(known) if *known == row => {}
+                Some(known) => {
+                    *known = row;
+                    changed = true;
+                }
+                None => {
+                    snapshot.live.push(row);
+                    changed = true;
+                }
+            }
+        }
+        if changed {
+            persist(app, &guard.snapshots);
+        }
+        changed
+    };
+    if changed {
+        app.emit(EVENT, catalog_status(app));
     }
-    app.emit(EVENT, catalog_status(app));
 }
 
 /// Every `(value, resolvedModel)` pair the CLI has reported, newest snapshot first. A row without a
 /// `resolvedModel` resolves to its own value, exactly as the menu lists it (`cli_models` takes the same
-/// fallback), so an identifier the CLI offers is never rewritten by the static table. Empty only without
-/// CLI data, which is how `normalize_id` knows to fall back to that table.
+/// fallback), so an identifier the CLI offers is never rewritten by the static table. Empty until a probe
+/// of some binary has succeeded (conversations' answers do not count), which is how `normalize_id` knows
+/// to fall back to that table.
 pub fn alias_pairs() -> Vec<(String, String)> {
     let guard = state().0.lock().unwrap();
     let mut snapshots: Vec<&Snapshot> = guard.snapshots.values().collect();
     snapshots.sort_by(|a, b| b.checked_at.cmp(&a.checked_at));
+    // Only the neutral probe's rows: a conversation's answer depends on its project settings, so its
+    // value-to-model pairs must not decide how every other session's launch model is resolved. Its new
+    // identifiers still reach every menu as additions.
     pairs_of(snapshots.iter().flat_map(|s| s.models.iter()))
 }
 
@@ -860,8 +938,34 @@ mod tests {
         assert_eq!(probe_with_timeout(&bin, &dir, Duration::from_secs(1)).unwrap_err(), ProbeError::Timeout);
         assert!(started.elapsed() < Duration::from_secs(3));
         let pid = probe_calls(&dir)[0]["pid"].as_u64().unwrap();
-        let alive = std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success();
-        assert!(!alive, "the timed-out CLI must not survive the probe");
+        assert!(!alive(pid), "the timed-out CLI must not survive the probe");
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn alive(pid: u64) -> bool {
+        std::process::Command::new("kill").args(["-0", &pid.to_string()]).stderr(Stdio::null()).status().unwrap().success()
+    }
+
+    /// AC3: the timeout ends the CLI's whole process group, not only the direct child.
+    #[cfg(unix)]
+    #[test]
+    fn probe_timeout_kills_the_whole_process_group() {
+        let (app, dir) = headless("group");
+        let bin = fake_bin(&dir, serde_json::json!({"sleep": 30, "grandchild": true, "models": fixture_models()}));
+        assert_eq!(probe_with_timeout(&bin, &dir, Duration::from_secs(2)).unwrap_err(), ProbeError::Timeout);
+        let grandchild: u64 = std::fs::read_to_string(dir.join("grandchild.pid")).expect("the fake CLI started its grandchild").trim().parse().unwrap();
+        // The orphaned grandchild is reaped by init once killed; give that a moment.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while alive(grandchild) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        let survived = alive(grandchild);
+        if survived {
+            let _ = std::process::Command::new("kill").args(["-9", &grandchild.to_string()]).status();
+        }
+        assert!(!survived, "the CLI's grandchild must not survive the probe's timeout");
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -905,7 +1009,7 @@ mod tests {
     fn unreadable_version_probes_once_per_run() {
         let (app, dir) = headless("no-version");
         let bin = fake_bin(&dir, serde_json::json!({"version": "unknown", "models": fixture_models()}));
-        let old = Snapshot { version: None, checked_at: 1, origin: "probe".into(), models: vec![CliModel { value: "claude-opus-5".into(), ..Default::default() }] };
+        let old = Snapshot { version: None, checked_at: 1, origin: "probe".into(), models: vec![CliModel { value: "claude-opus-5".into(), ..Default::default() }], live: vec![], live_version: None };
         state().0.lock().unwrap().snapshots.insert(bin_hash(&bin), old);
         let first = ensure(&app, &bin, Probe::Allow).unwrap();
         assert!(first.version.is_none());
@@ -928,6 +1032,8 @@ mod tests {
             checked_at: 1,
             origin: "probe".into(),
             models: vec![CliModel { value: "claude-opus-5".into(), resolved_model: Some("claude-opus-5".into()), ..Default::default() }],
+            live: vec![],
+            live_version: None,
         };
         {
             let conn = app.db().conn.lock().unwrap();
@@ -935,8 +1041,8 @@ mod tests {
             crate::db::repo::set_app_settings(&conn, &HashMap::from([(KEY.to_string(), serde_json::to_string(&map).unwrap())])).unwrap();
         }
         let models = super::super::claude_models::list_for_bin(&app, &bin);
-        assert!(models.iter().any(|m| m.id == "claude-opus-5-5[1m]"), "the new list must replace the stale cache");
-        assert!(!models.iter().any(|m| m.id == "claude-opus-5"));
+        assert!(models.iter().any(|m| m.id == "claude-opus-5-5" && m.is_default), "the new list must replace the stale cache");
+        assert!(!models.iter().any(|m| m.id == "claude-opus-5-5[1m]"), "the CLI's spelling folds onto the catalogue's");
         let stored = {
             let conn = app.db().conn.lock().unwrap();
             crate::db::repo::get_app_settings(&conn).unwrap().remove(KEY).unwrap()
@@ -947,31 +1053,85 @@ mod tests {
         // A restart: memory is gone, the database is not. The same version reuses the cache.
         reset_for_tests(&app, &bin);
         let again = super::super::claude_models::list_for_bin(&app, &bin);
-        assert!(again.iter().any(|m| m.id == "claude-opus-5-5[1m]"));
+        assert!(again.iter().any(|m| m.id == "claude-opus-5-5" && m.is_default));
         assert_eq!(probe_calls(&dir).len(), 1, "same version, no second probe");
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    /// AC4: a running conversation's answer never replaces the probe's list. Its identifiers are
+    /// remembered as additions, which feed the alias pairs; disabled and `default` rows are not.
     #[cfg(unix)]
     #[test]
-    fn record_live_replaces_cache_and_aliases() {
+    fn record_live_only_adds_to_the_probe_snapshot() {
         let (app, dir) = headless("live");
         let bin = fake_bin(&dir, serde_json::json!({"version": "2.1.280"}));
-        record_live(&app, &bin, &fixture_models());
+        let new_model = serde_json::json!({"value": "claude-opus-6", "resolvedModel": "claude-opus-6", "displayName": "Opus"});
+        // Before any probe: the additions stand alone, and the probe is still owed.
+        record_live(&app, &bin, &[new_model.clone(), serde_json::json!({"value": "default", "resolvedModel": "claude-sonnet-5"})]);
         let snapshot = cached(&app, &bin).unwrap();
         assert_eq!(snapshot.origin, "live");
-        assert_eq!(snapshot.version.as_deref(), Some("2.1.280"));
-        assert_eq!(snapshot.models.len(), 3);
+        assert!(snapshot.models.is_empty());
+        assert_eq!(snapshot.live.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(), ["claude-opus-6"]);
+        assert_eq!(snapshot.live_version.as_deref(), Some("2.1.280"));
+        // A conversation's answer adds menu entries but never feeds the alias pairs of every session.
+        assert!(!alias_pairs().iter().any(|(v, _)| v == "claude-opus-6"));
+        // The probe's list arrives and keeps the additions it does not list itself.
+        let hash = bin_hash(&bin);
+        {
+            let mut guard = state().0.lock().unwrap();
+            let entry = guard.snapshots.get_mut(&hash).unwrap();
+            entry.origin = "probe".into();
+            entry.models = parse_rows(&fixture_models());
+        }
+        // A narrow answer (one row, one disabled row) neither shrinks nor disables anything.
+        record_live(&app, &bin, &[
+            serde_json::json!({"value": "claude-fable-5-1", "resolvedModel": "claude-fable-5-1"}),
+            serde_json::json!({"value": "opus[1m]", "resolvedModel": "claude-opus-5-5[1m]", "disabled": true}),
+        ]);
+        let snapshot = cached(&app, &bin).unwrap();
+        assert_eq!(snapshot.models.len(), 3, "the probe's rows are untouched");
+        assert_eq!(snapshot.live.len(), 1, "rows the probe lists and disabled rows are not remembered");
+        // The pairs come from the probe's rows.
         assert!(alias_pairs().contains(&("opus[1m]".to_string(), "claude-opus-5-5[1m]".to_string())));
         assert!(!alias_pairs().iter().any(|(v, _)| v == "default"));
-        // The engine's chokepoint reads these pairs from the shared state, not from a test-local table:
-        // a saved "opus[1m]" preference now follows the installed CLI instead of the static alias.
-        assert_eq!(super::super::claude_models::normalize_id("opus[1m]"), "claude-opus-5-5[1m]");
-        assert_eq!(super::super::claude_models::normalize_id("claude-opus-5-5[1m]"), "claude-opus-5-5[1m]");
-        // An empty answer never wipes a list.
+        // The engine's chokepoint reads these pairs from the shared state and folds the result.
+        assert_eq!(super::super::claude_models::normalize_id("opus[1m]"), "claude-opus-5-5");
+        assert_eq!(super::super::claude_models::normalize_id("claude-opus-5-5[1m]"), "claude-opus-5-5");
+        // An empty answer changes nothing.
         record_live(&app, &bin, &[]);
-        assert_eq!(cached(&app, &bin).unwrap().models.len(), 3);
+        assert_eq!(cached(&app, &bin).unwrap(), snapshot);
+        // Additions expire with the CLI version that reported them: a conversation of a newer binary starts
+        // over instead of inheriting identifiers an older version once named.
+        {
+            let mut guard = state().0.lock().unwrap();
+            guard.snapshots.get_mut(&hash).unwrap().live_version = Some("2.1.279".into());
+        }
+        record_live(&app, &bin, &[serde_json::json!({"value": "claude-sonnet-6", "resolvedModel": "claude-sonnet-6"})]);
+        let snapshot = cached(&app, &bin).unwrap();
+        assert_eq!(snapshot.live.iter().map(|m| m.value.as_str()).collect::<Vec<_>>(), ["claude-sonnet-6"]);
+        assert_eq!(snapshot.live_version.as_deref(), Some("2.1.280"));
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// A cache written by the earlier rule (a whole session answer stored as a "live" snapshot's models) is
+    /// dropped on load and re-derived, not read as a probe list; a current live snapshot survives.
+    #[test]
+    fn load_drops_snapshots_written_by_the_earlier_live_rule() {
+        let (app, dir) = headless("legacy-live");
+        let legacy = Snapshot { version: Some("2.1.280".into()), checked_at: 5, origin: "live".into(), models: parse_rows(&fixture_models()), live: vec![], live_version: None };
+        let current = Snapshot { version: Some("2.1.280".into()), checked_at: 6, origin: "live".into(), models: vec![], live: vec![CliModel { value: "claude-opus-6".into(), ..Default::default() }], live_version: Some("2.1.280".into()) };
+        {
+            let conn = app.db().conn.lock().unwrap();
+            let stored: HashMap<String, Snapshot> = HashMap::from([("legacy-hash".to_string(), legacy), ("current-hash".to_string(), current.clone())]);
+            crate::db::repo::set_app_settings(&conn, &HashMap::from([(KEY.to_string(), serde_json::to_string(&stored).unwrap())])).unwrap();
+        }
+        load(&app);
+        let guard = state().0.lock().unwrap();
+        assert!(!guard.snapshots.contains_key("legacy-hash"), "the old-rule snapshot is dropped");
+        assert_eq!(guard.snapshots.get("current-hash"), Some(&current));
+        drop(guard);
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -1005,20 +1165,22 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    /// AC9b: a running conversation's `list_models` answer is what `chat_models` returns for that
-    /// session, and it replaces the cache so a session of the same binary that is not running gets the
-    /// same list without a probe.
+    /// AC4 / AC9b: a running conversation's `list_models` answer shapes its own menu, merged into the
+    /// catalogue; a narrow answer does not shrink the menu of another session of the same binary, whose
+    /// menu comes from the neutral probe; and a new identifier the live answer names still appears there.
     #[cfg(unix)]
     #[test]
-    fn live_list_models_answer_replaces_cache_and_chat_models() {
+    fn live_answer_is_scoped_to_its_session_and_only_adds_elsewhere() {
         let (app, dir) = headless("ac9b");
         if let AppCtx::Headless(host) = &app {
             // The fixture never calls hooks; this endpoint does not open a listener.
             host.set_hooks(crate::agent::server::HookServer { port: 19191, token: "unused-fixture-token".into() });
         }
+        // The running session's answer: a new model as its default, and Fable disabled by its project.
         let rows = vec![
             serde_json::json!({"value": "default", "resolvedModel": "test-live-model", "displayName": "Default (recommended)"}),
             serde_json::json!({"value": "test-live-model", "resolvedModel": "test-live-model", "displayName": "Live", "description": "Live model", "supportedEffortLevels": ["low", "high"]}),
+            serde_json::json!({"value": "claude-fable-5-1", "resolvedModel": "claude-fable-5-1", "disabled": true}),
         ];
         let bin = fake_bin(&dir, serde_json::json!({"version": "2.1.280", "models": rows}));
         configure_bin(&app, &bin);
@@ -1037,23 +1199,75 @@ mod tests {
             assert!(Instant::now() < deadline, "the fixture never answered list_models");
             std::thread::sleep(Duration::from_millis(50));
         }
-        let ids = |value: Value| value.as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
+        let ids = |value: &Value| value.as_array().unwrap().iter().map(|m| m["id"].as_str().unwrap().to_string()).collect::<Vec<_>>();
         let running = crate::command_core::chat_models(&app, "running").unwrap();
-        assert_eq!(ids(running.clone()).iter().filter(|id| id.as_str() == "test-live-model").count(), 1);
-        assert_eq!(running[0]["isDefault"], true);
-        while !cached(&app, &bin).is_some_and(|s| s.origin == "live") {
+        let running_ids = ids(&running);
+        assert_eq!(running_ids.iter().filter(|id| id.as_str() == "test-live-model").count(), 1);
+        assert!(running_ids.contains(&"claude-opus-4-8".to_string()), "the catalogue stays the base");
+        assert!(!running_ids.contains(&"claude-fable-5-1".to_string()), "its own disabled row shapes its own menu");
+        let live_row = running.as_array().unwrap().iter().find(|m| m["id"] == "test-live-model").unwrap();
+        assert_eq!(live_row["isDefault"], true);
+        assert!(probe_calls(&dir).is_empty(), "a running session's menu spawns nothing");
+        while !cached(&app, &bin).is_some_and(|s| s.live.iter().any(|m| m.value == "test-live-model")) {
             assert!(Instant::now() < deadline, "the live answer never reached the cache");
             std::thread::sleep(Duration::from_millis(50));
         }
-        assert_eq!(cached(&app, &bin).unwrap().version.as_deref(), Some("2.1.280"));
-        // The idle session of the same binary answers from that cache, without a probe.
+        // The resting session: the neutral probe feeds its menu, now with a probe answer that does not
+        // know the new model and lists Fable. The live answer adds its model; it does not remove Fable.
+        let neutral = vec![serde_json::json!({"value": "claude-fable-5-1", "resolvedModel": "claude-fable-5-1", "displayName": "Fable"})];
+        fake_bin(&dir, serde_json::json!({"version": "2.1.280", "models": neutral}));
         let idle = crate::command_core::chat_models(&app, "idle").unwrap();
-        assert!(ids(idle).contains(&"test-live-model".to_string()));
-        assert!(probe_calls(&dir).is_empty(), "the live answer must satisfy the idle session without a probe");
+        let idle_ids = ids(&idle);
+        assert!(idle_ids.contains(&"test-live-model".to_string()), "a new model reported by one conversation appears in every menu");
+        assert!(idle_ids.contains(&"claude-fable-5-1".to_string()), "one session's narrow answer does not shrink another's menu");
+        assert!(idle_ids.contains(&"claude-opus-4-8".to_string()));
+        assert!(!idle.as_array().unwrap().iter().any(|m| m["isDefault"] == true && m["id"] == "test-live-model"), "another session's default is not this one's");
+        assert_eq!(probe_calls(&dir).len(), 1, "the resting session is served by the neutral probe");
         let status = catalog_status(&app);
         assert_eq!(status.source, "cli");
         assert_eq!(status.cli_version.as_deref(), Some("2.1.280"));
         let _ = app.chat().stop(&app, "running");
+        drop(app);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// AC2, the chip path: a resting Claude session whose stored selection uses another spelling of a
+    /// catalogue model shows the catalogue's identifier, so the chip matches the menu row. Other kinds
+    /// keep their stored spelling.
+    #[test]
+    fn resting_session_chip_shows_the_folded_stored_selection() {
+        let _serial = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let (app, dir) = headless("chip");
+        {
+            let conn = app.db().conn.lock().unwrap();
+            conn.execute("INSERT INTO projects(id,name,root_path,created_at) VALUES ('p','test',?1,0)", [dir.to_str().unwrap()]).unwrap();
+            for (id, kind, args) in [
+                ("opus", "claude", "--model claude-opus-5-5[1m]"),
+                ("haiku", "claude", "--model claude-haiku-4-5-20251001"),
+                ("expanded", "claude", "--model claude-opus-4-6[1m]"),
+                ("alias", "claude", "--model opus"),
+                ("codex", "codex", "--model claude-opus-5-5[1m]"),
+            ] {
+                conn.execute(
+                    "INSERT INTO sessions(id,project_id,name,kind,engine,permission_mode,agent_args,created_at) VALUES (?1,'p','test',?2,'chat','default',?3,0)",
+                    [id, kind, args],
+                )
+                .unwrap();
+            }
+        }
+        for (id, shown) in [
+            ("opus", "claude-opus-5-5"),
+            ("haiku", "claude-haiku-4-5"),
+            ("expanded", "claude-opus-4-6[1m]"),
+            // An alias is the user's choice: shown and later persisted as written, never pinned.
+            ("alias", "opus"),
+            ("codex", "claude-opus-5-5[1m]"),
+        ] {
+            let snapshot = crate::command_core::chat_snapshot(&app, id).unwrap();
+            assert!(!snapshot.running, "{id}");
+            assert_eq!(snapshot.model.as_deref(), Some(shown), "{id}");
+            assert_eq!(snapshot.selection.as_ref().and_then(|s| s.model.as_deref()), Some(shown), "{id}");
+        }
         drop(app);
         let _ = std::fs::remove_dir_all(dir);
     }
