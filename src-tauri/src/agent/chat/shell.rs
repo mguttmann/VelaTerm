@@ -12,10 +12,13 @@
 //!   and environment, streams both pipes into bounded tail buffers, and reports the exit;
 //! - the replay mapping: `map_replayed_rows` turns a recorded tagged user message back into a row.
 //!
-//! The tag format is an informed approximation of what the CLI binary emits; the exact template is not
-//! extractable from it. Builder and parser are consistent with each other, which is what the view needs.
+//! VelaTerm sends one combined context message. Claude Code 2.1.278 native shell mode instead records
+//! adjacent input/output messages; history joins those observed records while preserving their identities.
 
 use std::io::Read;
+
+#[cfg(windows)]
+mod windows;
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -28,13 +31,13 @@ use crate::models::SessionKind;
 /// How much of each stream the row and the agent keep. The tail is kept, the head is cut.
 pub const OUTPUT_CAP: usize = 200 * 1024;
 
-/// First line of a stream whose head was cut, in the message the agent receives.
-pub const TRUNCATED_NOTE: &str = "[VelaTerm: earlier output truncated]";
-const EXIT_PREFIX: &str = "Exit code ";
-const CANCELLED_LINE: &str = "Command cancelled by the user";
+const METADATA_START: &str = "\n<velaterm-shell-metadata>";
+const METADATA_END: &str = "</velaterm-shell-metadata>";
 
 /// How often a running command's row is refreshed while output keeps arriving.
-const UPSERT_INTERVAL: Duration = Duration::from_millis(100);
+const UPSERT_INTERVAL: Duration = Duration::from_millis(250);
+const LIVE_OUTPUT_CAP: usize = 8 * 1024;
+const PIPE_DRAIN_GRACE: Duration = Duration::from_millis(500);
 /// How often the wait thread checks whether the command has ended.
 const WAIT_POLL: Duration = Duration::from_millis(50);
 
@@ -48,11 +51,12 @@ pub struct ShellContext {
     pub command: String,
     pub stdout: String,
     pub stderr: String,
-    /// `None` when the command was cancelled: it never reported a code of its own.
+    /// `None` when no exit code was reported, including native or ambiguous legacy recordings.
     pub exit_code: Option<i32>,
     pub cancelled: bool,
     pub stdout_truncated: bool,
     pub stderr_truncated: bool,
+    pub output_incomplete: bool,
 }
 
 impl ShellContext {
@@ -90,37 +94,44 @@ impl TailBuffer {
     }
 }
 
+/// Shell execution has its own receipt namespace, so its eventual context message can use the row id
+/// without colliding with an ordinary chat submission. Only a digest is stored in the existing table.
+pub fn submission_id(message_id: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(format!("shell-execution\0{message_id}"));
+    let mut bytes = [0u8; 16];
+    bytes.copy_from_slice(&digest[..16]);
+    format!("msg-{}", uuid::Uuid::from_bytes(bytes))
+}
+
 // ─────────────────────────── Tag format ───────────────────────────
+
+/// VelaTerm-owned metadata in an ordinary provider user message. Byte lengths make the raw streams
+/// unambiguous without escaping their display or interpreting output as execution facts.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ContextMetadata {
+    version: u8,
+    command_bytes: usize,
+    stdout_bytes: usize,
+    stderr_bytes: usize,
+    exit_code: Option<i32>,
+    cancelled: bool,
+    stdout_truncated: bool,
+    stderr_truncated: bool,
+    output_incomplete: bool,
+}
 
 /// The one user message the agent receives when a command ends.
 pub fn build_context(ctx: &ShellContext) -> String {
-    let mut stdout = String::new();
-    if ctx.stdout_truncated {
-        stdout.push_str(TRUNCATED_NOTE);
-        stdout.push('\n');
-    }
-    stdout.push_str(&ctx.stdout);
-    let mut stderr = String::new();
-    if ctx.stderr_truncated {
-        stderr.push_str(TRUNCATED_NOTE);
-        stderr.push('\n');
-    }
-    stderr.push_str(&ctx.stderr);
-    let trailer = if ctx.cancelled {
-        Some(CANCELLED_LINE.to_string())
-    } else {
-        match ctx.exit_code {
-            Some(0) | None => None,
-            Some(code) => Some(format!("{EXIT_PREFIX}{code}")),
-        }
+    let metadata = ContextMetadata {
+        version: 1, command_bytes: ctx.command.len(), stdout_bytes: ctx.stdout.len(), stderr_bytes: ctx.stderr.len(),
+        exit_code: ctx.exit_code, cancelled: ctx.cancelled, stdout_truncated: ctx.stdout_truncated,
+        stderr_truncated: ctx.stderr_truncated, output_incomplete: ctx.output_incomplete,
     };
-    if let Some(line) = trailer {
-        if !stderr.is_empty() && !stderr.ends_with('\n') {
-            stderr.push('\n');
-        }
-        stderr.push_str(&line);
-    }
-    format!("<bash-input>{}</bash-input>\n<bash-stdout>{stdout}</bash-stdout><bash-stderr>{stderr}</bash-stderr>", ctx.command)
+    let metadata = serde_json::to_string(&metadata).expect("shell metadata contains only integers and booleans");
+    format!("<bash-input>{}</bash-input>\n<bash-stdout>{}</bash-stdout><bash-stderr>{}</bash-stderr>{METADATA_START}{metadata}{METADATA_END}",
+        ctx.command, ctx.stdout, ctx.stderr)
 }
 
 /// Whether a message is a shell-mode context message rather than prose.
@@ -128,57 +139,58 @@ pub fn is_tagged(text: &str) -> bool {
     text.trim_start().starts_with("<bash-input>")
 }
 
-/// Read a context message back. `None` for anything that is not one.
-///
-/// The tags are in-band, so command output may itself contain them (grepping this repository does).
-/// The builder always writes `</bash-input>` followed by a newline and `<bash-stdout>`, one
-/// `</bash-stdout><bash-stderr>` seam, and `</bash-stderr>` as the very end of the message; the parser
-/// anchors on exactly those: the first input seam, the LAST stdout/stderr seam and the closing tag at
-/// the end. Only output whose stderr contains the seam itself is misread, the same limit the terminal
-/// UI has, and not worth an escaping scheme the CLI does not use either.
+/// Read VelaTerm's length-delimited context, or an unambiguous legacy context with unknown facts.
+/// Malformed or future metadata stays raw; it must not silently fall back to a guessed legacy result.
 pub fn parse_context(text: &str) -> Option<ShellContext> {
-    let rest = text.trim_start().strip_prefix("<bash-input>")?;
-    let (command, rest) = rest.split_once("</bash-input>\n<bash-stdout>")
-        .or_else(|| rest.split_once("</bash-input><bash-stdout>"))?;
-    let rest = rest.trim_end();
-    let (stdout, stderr) = match rest.strip_suffix("</bash-stderr>") {
-        Some(body) => body.rsplit_once("</bash-stdout><bash-stderr>")?,
-        // A message without a stderr part: the stdout tag closes the message.
-        None => (rest.strip_suffix("</bash-stdout>")?, ""),
-    };
-    let (stdout, stdout_truncated) = strip_note(stdout);
-    let (stderr, stderr_truncated) = strip_note(stderr);
-    let mut ctx = ShellContext {
-        command: command.to_string(),
-        stdout: stdout.to_string(),
-        stderr: String::new(),
-        exit_code: Some(0),
-        cancelled: false,
-        stdout_truncated,
-        stderr_truncated,
-    };
-    let (body, last) = match stderr.rsplit_once('\n') {
-        Some((body, last)) => (body, last),
-        None => ("", stderr),
-    };
-    if last == CANCELLED_LINE {
-        ctx.cancelled = true;
-        ctx.exit_code = None;
-        ctx.stderr = body.to_string();
-    } else if let Some(code) = last.strip_prefix(EXIT_PREFIX).and_then(|n| n.parse::<i32>().ok()) {
-        ctx.exit_code = Some(code);
-        ctx.stderr = body.to_string();
-    } else {
-        ctx.stderr = stderr.to_string();
+    let text = text.trim_start();
+    if let Some(framed) = text.strip_suffix(METADATA_END) {
+        let (body, metadata) = framed.rsplit_once(METADATA_START)?;
+        if metadata.len() > 1024 { return None; }
+        let metadata: ContextMetadata = serde_json::from_str(metadata).ok()?;
+        if metadata.version != 1 { return None; }
+        let rest = body.strip_prefix("<bash-input>")?;
+        let (command, rest) = take_bytes(rest, metadata.command_bytes)?;
+        let rest = rest.strip_prefix("</bash-input>\n<bash-stdout>")?;
+        let (stdout, rest) = take_bytes(rest, metadata.stdout_bytes)?;
+        let rest = rest.strip_prefix("</bash-stdout><bash-stderr>")?;
+        let (stderr, rest) = take_bytes(rest, metadata.stderr_bytes)?;
+        if rest != "</bash-stderr>" { return None; }
+        return Some(ShellContext {
+            command: command.into(), stdout: stdout.into(), stderr: stderr.into(),
+            exit_code: metadata.exit_code, cancelled: metadata.cancelled,
+            stdout_truncated: metadata.stdout_truncated, stderr_truncated: metadata.stderr_truncated,
+            output_incomplete: metadata.output_incomplete,
+        });
     }
-    Some(ctx)
+    let rest = text.strip_prefix("<bash-input>")?;
+    let (command, rest) = rest.split_once("</bash-input>")?;
+    if contains_shell_tag(command) { return None; }
+    let output = rest.strip_prefix('\n').unwrap_or(rest);
+    legacy_context(command, output.trim_end())
 }
 
-fn strip_note(stream: &str) -> (&str, bool) {
-    match stream.strip_prefix(TRUNCATED_NOTE) {
-        Some(rest) => (rest.strip_prefix('\n').unwrap_or(rest), true),
-        None => (stream, false),
-    }
+fn take_bytes(text: &str, count: usize) -> Option<(&str, &str)> {
+    // str::get rejects out-of-range lengths and offsets inside a UTF-8 character without panicking.
+    Some((text.get(..count)?, text.get(count..)?))
+}
+
+fn contains_shell_tag(text: &str) -> bool {
+    ["<bash-input>", "</bash-input>", "<bash-stdout>", "</bash-stdout>", "<bash-stderr>", "</bash-stderr>"]
+        .iter().any(|tag| text.contains(tag))
+}
+
+/// The native input event supplies its own command boundary. Output tags without lengths are only
+/// usable if their streams contain no competing tags. Old status-looking lines remain literal data.
+pub(super) fn legacy_context(command: &str, output: &str) -> Option<ShellContext> {
+    let rest = output.strip_prefix("<bash-stdout>")?;
+    let (stdout, stderr) = match rest.strip_suffix("</bash-stderr>") {
+        Some(body) => body.split_once("</bash-stdout><bash-stderr>")?,
+        None => (rest.strip_suffix("</bash-stdout>")?, ""),
+    };
+    if contains_shell_tag(stdout) || contains_shell_tag(stderr) { return None; }
+    Some(ShellContext {
+        command: command.into(), stdout: stdout.into(), stderr: stderr.into(), ..Default::default()
+    })
 }
 
 /// The timeline row for a command, live or finished.
@@ -188,8 +200,10 @@ pub fn row(id: String, at: Option<i64>, ctx: &ShellContext, status: &'static str
         command: ctx.command.clone(),
         stdout: ctx.stdout.clone(),
         stderr: ctx.stderr.clone(),
+        source_text: build_context(ctx),
         stdout_truncated: ctx.stdout_truncated,
         stderr_truncated: ctx.stderr_truncated,
+        output_incomplete: ctx.output_incomplete,
         status,
         exit_code: if status == STATUS_RUNNING { None } else { ctx.exit_code },
         at,
@@ -207,7 +221,9 @@ pub fn map_replayed_rows(rows: &mut [ChatRow]) {
             continue;
         }
         let Some(ctx) = parse_context(text) else { continue };
+        let original = std::mem::take(text);
         *slot = row(std::mem::take(id), *at, &ctx, ctx.status());
+        if let ChatRow::Shell { source_text, .. } = slot { *source_text = original; }
     }
 }
 
@@ -219,6 +235,9 @@ pub struct ShellRun {
     pub command: String,
     pub started_at: i64,
     child: Mutex<Child>,
+    #[cfg(windows)]
+    job: windows::Job,
+    output_incomplete: AtomicBool,
     stdout: Arc<Mutex<TailBuffer>>,
     stderr: Arc<Mutex<TailBuffer>>,
     cancelled: AtomicBool,
@@ -226,12 +245,19 @@ pub struct ShellRun {
     /// agent that has been let go, which would start it again only to tell it.
     abandoned: AtomicBool,
     last_upsert: Mutex<Instant>,
+    drain_deadline: Mutex<Option<Instant>>,
 }
 
 impl ShellRun {
     pub fn cancel(&self) {
+        let mut child = self.child.lock().unwrap();
+        // A late click cannot relabel an already completed command or target a reused process id.
+        if matches!(child.try_wait(), Ok(Some(_))) { return; }
         self.cancelled.store(true, Ordering::Relaxed);
-        crate::host::kill_process_tree(&mut self.child.lock().unwrap());
+        #[cfg(windows)]
+        self.job.terminate();
+        #[cfg(unix)]
+        crate::host::kill_process_tree(&mut child);
     }
 
     pub fn abandon(&self) {
@@ -250,14 +276,24 @@ impl ShellRun {
     fn snapshot(&self, exit_code: Option<i32>) -> ShellContext {
         let stdout = self.stdout.lock().unwrap();
         let stderr = self.stderr.lock().unwrap();
+        let cap = if exit_code.is_none() { LIVE_OUTPUT_CAP } else { OUTPUT_CAP };
+        let tail = |buffer: &TailBuffer| {
+            let text = buffer.text();
+            let mut start = text.len().saturating_sub(cap);
+            while !text.is_char_boundary(start) { start += 1; }
+            (text[start..].to_string(), buffer.truncated() || start > 0)
+        };
+        let (stdout, stdout_truncated) = tail(&stdout);
+        let (stderr, stderr_truncated) = tail(&stderr);
         ShellContext {
             command: self.command.clone(),
-            stdout: stdout.text().to_string(),
-            stderr: stderr.text().to_string(),
+            stdout,
+            stderr,
             exit_code,
             cancelled: self.cancelled.load(Ordering::Relaxed),
-            stdout_truncated: stdout.truncated(),
-            stderr_truncated: stderr.truncated(),
+            stdout_truncated,
+            stderr_truncated,
+            output_incomplete: self.output_incomplete.load(Ordering::Relaxed),
         }
     }
 
@@ -316,7 +352,7 @@ pub fn spawn_run(
 ) -> Result<Arc<ShellRun>, String> {
     let shell = session_shell(app, kind, persisted_shell);
     let mut cmd = crate::host::command(&shell);
-    cmd.args(shell_args(&shell, command));
+    configure_shell_command(&mut cmd, &shell, command);
     if let Some(cwd) = cwd {
         cmd.current_dir(cwd);
     }
@@ -328,21 +364,40 @@ pub fn spawn_run(
         use std::os::unix::process::CommandExt;
         cmd.process_group(0);
     }
+    #[cfg(windows)]
+    let job = {
+        use std::os::windows::process::CommandExt;
+        use ::windows::Win32::System::Threading::{CREATE_NO_WINDOW, CREATE_SUSPENDED};
+        cmd.creation_flags(CREATE_NO_WINDOW.0 | CREATE_SUSPENDED.0);
+        windows::Job::new()?
+    };
     let mut child = cmd
         .spawn()
         .map_err(|e| format!("Failed to start the shell \"{shell}\": {e}"))?;
-    let stdout = child.stdout.take().ok_or("The shell has no output stream")?;
-    let stderr = child.stderr.take().ok_or("The shell has no error stream")?;
+    #[cfg(windows)]
+    if let Err(error) = job.assign_and_resume(&child) {
+        job.terminate();
+        let _ = child.kill();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while matches!(child.try_wait(), Ok(None)) && Instant::now() < deadline { std::thread::sleep(WAIT_POLL); }
+        return Err(error);
+    }
+    let stdout = child.stdout.take().ok_or("chat_shell_start_uncertain: The shell has no output stream")?;
+    let stderr = child.stderr.take().ok_or("chat_shell_start_uncertain: The shell has no error stream")?;
     let run = Arc::new(ShellRun {
         id: message_id.to_string(),
         command: command.to_string(),
         started_at: now_ms(),
         child: Mutex::new(child),
+        #[cfg(windows)]
+        job,
+        output_incomplete: AtomicBool::new(false),
         stdout: Arc::new(Mutex::new(TailBuffer::default())),
         stderr: Arc::new(Mutex::new(TailBuffer::default())),
         cancelled: AtomicBool::new(false),
         abandoned: AtomicBool::new(false),
         last_upsert: Mutex::new(Instant::now()),
+        drain_deadline: Mutex::new(None),
     });
     let on_update = Arc::new(on_update);
     let readers = [
@@ -359,9 +414,16 @@ pub fn spawn_run(
             }
             std::thread::sleep(WAIT_POLL);
         };
+        *waited.drain_deadline.lock().unwrap() = Some(Instant::now() + PIPE_DRAIN_GRACE);
+        // The parent may exit while a helper still owns the pipe. Readers poll this deadline and close
+        // their own handles, so even descendants outside our process group cannot retain these threads.
         for reader in readers {
             let _ = reader.join();
         }
+        #[cfg(unix)]
+        crate::host::kill_process_tree(&mut waited.child.lock().unwrap());
+        #[cfg(windows)]
+        waited.job.terminate();
         let exit_code = status.and_then(|s| s.code()).unwrap_or(-1);
         let mut ctx = waited.snapshot(Some(exit_code));
         if ctx.cancelled {
@@ -377,7 +439,7 @@ pub fn spawn_run(
 /// Chunks rather than lines: progress output without a newline would otherwise never show, and a
 /// multibyte character split across two reads is carried over instead of being replaced.
 fn spawn_pump(
-    mut pipe: impl Read + Send + 'static,
+    mut pipe: impl ShellPipe,
     run: Arc<ShellRun>,
     buffer: Arc<Mutex<TailBuffer>>,
     on_update: Arc<impl Fn(&ShellRun) + Send + Sync + 'static>,
@@ -386,11 +448,23 @@ fn spawn_pump(
         let mut bytes = [0u8; 4096];
         let mut pending: Vec<u8> = Vec::new();
         loop {
-            let n = match pipe.read(&mut bytes) {
+            if run.drain_deadline.lock().unwrap().is_some_and(|deadline| Instant::now() >= deadline) {
+                run.output_incomplete.store(true, Ordering::Relaxed);
+                break;
+            }
+            let available = match pipe_ready(&pipe, bytes.len()) {
+                Ok(0) => { std::thread::sleep(WAIT_POLL); continue; }
+                Ok(available) => available,
+                Err(error) => {
+                    if error.raw_os_error() != Some(109) { run.output_incomplete.store(true, Ordering::Relaxed); }
+                    break;
+                }
+            };
+            let n = match pipe.read(&mut bytes[..available]) {
                 Ok(0) => break,
                 Ok(n) => n,
                 Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => break,
+                Err(_) => { run.output_incomplete.store(true, Ordering::Relaxed); break; }
             };
             pending.extend_from_slice(&bytes[..n]);
             let valid = match std::str::from_utf8(&pending) {
@@ -418,6 +492,60 @@ fn spawn_pump(
             buffer.lock().unwrap().push(&String::from_utf8_lossy(&pending));
         }
     })
+}
+
+#[cfg(unix)]
+trait ShellPipe: Read + std::os::fd::AsRawFd + Send + 'static {}
+#[cfg(unix)]
+impl<T: Read + std::os::fd::AsRawFd + Send + 'static> ShellPipe for T {}
+#[cfg(windows)]
+trait ShellPipe: Read + std::os::windows::io::AsRawHandle + Send + 'static {}
+#[cfg(windows)]
+impl<T: Read + std::os::windows::io::AsRawHandle + Send + 'static> ShellPipe for T {}
+
+#[cfg(unix)]
+fn pipe_ready(pipe: &impl ShellPipe, capacity: usize) -> std::io::Result<usize> {
+    let mut descriptor = libc::pollfd { fd: pipe.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+    let ready = unsafe { libc::poll(&mut descriptor, 1, 0) };
+    if ready < 0 { return Err(std::io::Error::last_os_error()); }
+    Ok(if ready == 0 { 0 } else { capacity })
+}
+
+#[cfg(windows)]
+fn pipe_ready(pipe: &impl ShellPipe, capacity: usize) -> std::io::Result<usize> {
+    // Anonymous pipes do not support nonblocking ReadFile. Peek first: this thread is the sole reader,
+    // so reading at most the available byte count cannot wait for an inherited writer to close.
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn PeekNamedPipe(handle: *mut std::ffi::c_void, buffer: *mut std::ffi::c_void,
+            size: u32, read: *mut u32, available: *mut u32, left: *mut u32) -> i32;
+    }
+    let mut available = 0;
+    let ok = unsafe { PeekNamedPipe(pipe.as_raw_handle(), std::ptr::null_mut(), 0,
+        std::ptr::null_mut(), &mut available, std::ptr::null_mut()) };
+    if ok == 0 { return Err(std::io::Error::last_os_error()); }
+    Ok((available as usize).min(capacity))
+}
+
+fn configure_shell_command(cmd: &mut std::process::Command, shell: &str, command: &str) {
+    #[cfg(windows)]
+    {
+        use crate::agent::inject::{shell_kind, ShellKind};
+        use std::os::windows::process::CommandExt;
+        if matches!(shell_kind(shell), ShellKind::Cmd) {
+            // cmd.exe parses a command language, not the CRT argv grammar used by Command::arg.
+            cmd.raw_arg(format!("/D /S /C \"{command}\""));
+            return;
+        }
+        if matches!(shell_kind(shell), ShellKind::PowerShell | ShellKind::Pwsh) {
+            use base64::Engine;
+            let bytes: Vec<u8> = command.encode_utf16().flat_map(u16::to_le_bytes).collect();
+            cmd.args(["-NoLogo", "-NonInteractive", "-EncodedCommand"]);
+            cmd.arg(base64::engine::general_purpose::STANDARD.encode(bytes));
+            return;
+        }
+    }
+    cmd.args(shell_args(shell, command));
 }
 
 fn now_ms() -> i64 {
@@ -453,34 +581,45 @@ mod tests {
             cancelled,
             stdout_truncated: false,
             stderr_truncated: false,
+            output_incomplete: false,
         }
     }
 
     #[test]
-    fn a_clean_exit_round_trips_without_a_trailer() {
+    fn a_clean_exit_keeps_streams_raw_and_records_metadata() {
         let original = ctx("ls -la", "total 0\n", "", Some(0), false);
         let text = build_context(&original);
-        assert_eq!(text, "<bash-input>ls -la</bash-input>\n<bash-stdout>total 0\n</bash-stdout><bash-stderr></bash-stderr>");
+        assert!(text.starts_with("<bash-input>ls -la</bash-input>\n<bash-stdout>total 0\n</bash-stdout><bash-stderr></bash-stderr>"));
         assert_eq!(parse_context(&text), Some(original));
     }
 
     #[test]
-    fn a_failing_exit_adds_its_code_as_the_last_stderr_line() {
+    fn a_failing_exit_is_metadata_and_never_stderr() {
         let original = ctx("false", "", "warn", Some(3), false);
         let text = build_context(&original);
-        assert!(text.ends_with("<bash-stderr>warn\nExit code 3</bash-stderr>"), "{text}");
+        assert!(text.contains("<bash-stderr>warn</bash-stderr>"), "{text}");
         assert_eq!(parse_context(&text), Some(original));
-        // An empty stderr carries the code alone.
+        // An empty stderr remains empty.
         let alone = build_context(&ctx("exit 3", "", "", Some(3), false));
-        assert!(alone.ends_with("<bash-stderr>Exit code 3</bash-stderr>"));
+        assert!(alone.contains("<bash-stderr></bash-stderr>"));
         assert_eq!(parse_context(&alone).unwrap().exit_code, Some(3));
+    }
+
+    #[test]
+    fn metadata_preserves_existing_stderr_line_endings() {
+        for stderr in ["warn", "warn\n", "warn\r\n", "warn\n\n"] {
+            for (exit_code, cancelled) in [(Some(3), false), (None, true)] {
+                let original = ctx("command", "", stderr, exit_code, cancelled);
+                assert_eq!(parse_context(&build_context(&original)), Some(original));
+            }
+        }
     }
 
     #[test]
     fn a_cancelled_command_says_so_and_has_no_exit_code() {
         let original = ctx("sleep 30", "partial", "", None, true);
         let text = build_context(&original);
-        assert!(text.ends_with("<bash-stderr>Command cancelled by the user</bash-stderr>"), "{text}");
+        assert!(text.contains("<bash-stderr></bash-stderr>"), "{text}");
         let parsed = parse_context(&text).unwrap();
         assert!(parsed.cancelled);
         assert_eq!(parsed.exit_code, None);
@@ -488,13 +627,21 @@ mod tests {
     }
 
     #[test]
-    fn truncation_is_a_note_at_the_head_of_the_stream_and_a_flag() {
+    fn truncation_is_metadata_without_changing_the_stream() {
         let mut original = ctx("yes", "tail", "err", Some(0), false);
         original.stdout_truncated = true;
         original.stderr_truncated = true;
         let text = build_context(&original);
-        assert!(text.contains("<bash-stdout>[VelaTerm: earlier output truncated]\ntail</bash-stdout>"), "{text}");
+        assert!(text.contains("<bash-stdout>tail</bash-stdout>"), "{text}");
         assert_eq!(parse_context(&text), Some(original));
+    }
+
+    #[test]
+    fn incomplete_capture_round_trips_independently_of_truncation() {
+        let mut context = ctx("capture", "tail", "errors", Some(3), false);
+        context.output_incomplete = true;
+        context.stderr_truncated = true;
+        assert_eq!(parse_context(&build_context(&context)), Some(context));
     }
 
     #[test]
@@ -503,9 +650,102 @@ mod tests {
         assert_eq!(parse_context("<bash-input>x</bash-input>"), None);
         let parsed = parse_context("<bash-input>echo</bash-input>\n<bash-stdout>out</bash-stdout>").unwrap();
         assert_eq!(parsed.stderr, "");
-        assert_eq!(parsed.exit_code, Some(0));
+        assert_eq!(parsed.exit_code, None);
         assert!(is_tagged("  <bash-input>x</bash-input>"));
         assert!(!is_tagged("! not a tag"));
+    }
+
+    #[test]
+    fn every_independent_audit_collision_round_trips_without_changing_facts() {
+        let cases = [
+            ("ordinary", "printf ok", "ok\n", "warning", Some(7)),
+            ("stdout_tag_text", "printf text", "code </bash-stdout><bash-stderr> sample", "", Some(0)),
+            ("literal_exit_status", "printf diagnostic >&2", "", "Exit code 7", Some(0)),
+            ("literal_cancellation", "printf diagnostic >&2", "", "Command cancelled by the user", Some(0)),
+            ("literal_incomplete_note", "printf diagnostic >&2", "", "[VelaTerm: output capture ended before all streams closed]\nraw", Some(0)),
+            ("stderr_tag_text", "printf source >&2", "out", "code </bash-stdout><bash-stderr> sample", Some(0)),
+            ("command_tag_text", "printf '</bash-input>\n<bash-stdout>'", "literal", "", Some(0)),
+        ];
+        for (name, command, stdout, stderr, exit_code) in cases {
+            let expected = ctx(command, stdout, stderr, exit_code, false);
+            assert_eq!(parse_context(&build_context(&expected)), Some(expected), "{name}");
+        }
+    }
+
+    #[test]
+    fn literal_markers_and_unicode_remain_data_for_every_fact_combination() {
+        let nested = build_context(&ctx("nested", "data", "Exit code 9", Some(9), false));
+        let literal = format!("€🦀\0\r\n{nested}\n[VelaTerm: earlier output truncated]\nCommand cancelled by the user\n");
+        for bits in 0..16 {
+            for exit_code in [None, Some(0), Some(-7)] {
+                let expected = ShellContext {
+                    command: literal.clone(), stdout: literal.clone(), stderr: literal.clone(), exit_code,
+                    cancelled: bits & 1 != 0, stdout_truncated: bits & 2 != 0,
+                    stderr_truncated: bits & 4 != 0, output_incomplete: bits & 8 != 0,
+                };
+                assert_eq!(parse_context(&build_context(&expected)), Some(expected));
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_or_future_metadata_stays_raw_without_a_legacy_fallback() {
+        let original = build_context(&ctx("€", "out", "err", Some(0), false));
+        for text in [
+            original.replace("\"version\":1", "\"version\":2"),
+            original.replace("\"commandBytes\":3", "\"commandBytes\":1"),
+            original.replace("\"stdoutBytes\":3", "\"stdoutBytes\":18446744073709551615"),
+            original.replace("\"stderrBytes\":3", "\"stderrBytes\":4"),
+            original.replace("\"cancelled\":false", "\"cancelled\":\"false\""),
+            original.replace("\"version\":1", "\"version\":1,\"unexpected\":true"),
+            original.replace("\"version\":1", "\"version\":1,\"version\":1"),
+            original.replace("</bash-stderr>", "</bash-stderr>extra"),
+            format!("{original}trailing"),
+        ] {
+            assert_eq!(parse_context(&text), None, "{text}");
+            let mut rows = vec![ChatRow::User { id: "raw".into(), text: text.clone(), images: vec![], at: None }];
+            map_replayed_rows(&mut rows);
+            assert!(matches!(&rows[0], ChatRow::User { text: value, .. } if value == &text));
+        }
+    }
+
+    #[test]
+    fn truncated_metadata_never_recovers_guessed_execution_facts() {
+        let mut original = ctx("command", "stdout", "Exit code 7", Some(0), false);
+        original.output_incomplete = true;
+        let text = build_context(&original);
+        let marker = text.rfind(METADATA_START).unwrap();
+        for end in marker..text.len() {
+            let truncated = &text[..end];
+            if let Some(parsed) = parse_context(truncated) {
+                // A cut exactly before the metadata can look like an old message. Its data survives,
+                // but none of the absent execution facts may be inferred from that data.
+                assert_eq!(parsed, ctx("command", "stdout", "Exit code 7", None, false));
+            }
+        }
+        assert_eq!(parse_context(&text), Some(original));
+    }
+
+    #[test]
+    fn legacy_status_looking_lines_remain_literal_with_unknown_exit() {
+        for literal in ["Exit code 7", "Command cancelled by the user", "[VelaTerm: earlier output truncated]\ntail",
+            "[VelaTerm: output capture ended before all streams closed]\nraw"] {
+            let text = format!("<bash-input>legacy</bash-input>\n<bash-stdout>{literal}</bash-stdout><bash-stderr>{literal}</bash-stderr>");
+            assert_eq!(parse_context(&text), Some(ctx("legacy", literal, literal, None, false)));
+        }
+    }
+
+    #[test]
+    fn ambiguous_legacy_delimiters_preserve_the_original_message() {
+        for text in [
+            "<bash-input>printf '</bash-input>\n<bash-stdout>'</bash-input>\n<bash-stdout>literal</bash-stdout><bash-stderr></bash-stderr>",
+            "<bash-input>printf source</bash-input>\n<bash-stdout>out</bash-stdout><bash-stderr>code </bash-stdout><bash-stderr> sample</bash-stderr>",
+        ] {
+            assert_eq!(parse_context(text), None);
+            let mut rows = vec![ChatRow::User { id: "legacy".into(), text: text.into(), images: vec![], at: Some(12) }];
+            map_replayed_rows(&mut rows);
+            assert!(matches!(&rows[0], ChatRow::User { id, text: value, at: Some(12), .. } if id == "legacy" && value == text));
+        }
     }
 
     #[test]
@@ -582,6 +822,51 @@ mod tests {
             assert_eq!(ctx.exit_code, Some(0));
             assert!(!ctx.cancelled);
             assert_eq!(ctx.command, "echo hello; echo oops >&2");
+        }
+
+        #[test]
+        fn inherited_pipes_have_a_bounded_drain_and_report_incomplete_output() {
+            let started = Instant::now();
+            let (run, rx) = run("inherited-pipe", "sleep 30 & echo parent-finished");
+            let context = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(context.stdout.contains("parent-finished"));
+            assert!(context.output_incomplete);
+            assert_eq!(context.exit_code, Some(0));
+            run.cancel();
+            assert!(!run.cancelled.load(Ordering::Relaxed), "a late cancellation must not relabel completion");
+        }
+
+        #[test]
+        fn large_output_is_bounded_and_live_previews_are_small() {
+            let (tx, rx) = mpsc::channel();
+            let sizes = Arc::new(Mutex::new(Vec::new()));
+            let updates = sizes.clone();
+            let command = "head -c 400000 /dev/zero | tr '\\0' x; sleep 1; printf end";
+            let _run = spawn_run(&app("large"), "large", SessionKind::Claude, Some("/bin/sh"), Some("/"), "sh-large", command,
+                move |run| { let value = run.snapshot(None); updates.lock().unwrap().push(value.stdout.len()); },
+                move |_, value| { let _ = tx.send(value); }).unwrap();
+            let context = rx.recv_timeout(Duration::from_secs(10)).unwrap();
+            assert!(context.stdout.ends_with("end"));
+            assert!(context.stdout.len() <= OUTPUT_CAP);
+            assert!(context.stdout_truncated);
+            assert!(!context.output_incomplete);
+            let sizes = sizes.lock().unwrap();
+            assert!(sizes.len() <= 5, "updates are throttled: {sizes:?}");
+            assert!(sizes.iter().all(|size| *size <= LIVE_OUTPUT_CAP));
+        }
+
+        #[test]
+        fn configured_login_shell_reads_its_profile() {
+            let directory = std::env::temp_dir().join(format!("vlx-shell-login-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir_all(&directory).unwrap();
+            std::fs::write(directory.join(".zprofile"), "export VLX_LOGIN_PROBE=profile-loaded\n").unwrap();
+            let mut command = std::process::Command::new("/bin/zsh");
+            configure_shell_command(&mut command, "/bin/zsh", "printf %s \"$VLX_LOGIN_PROBE\"");
+            let output = command.env("ZDOTDIR", &directory).output().unwrap();
+            std::fs::remove_dir_all(directory).unwrap();
+            assert!(output.status.success());
+            assert_eq!(output.stdout, b"profile-loaded");
         }
 
         #[test]

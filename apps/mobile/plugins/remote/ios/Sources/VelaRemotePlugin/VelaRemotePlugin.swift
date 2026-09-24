@@ -97,7 +97,10 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
     private var browser: ProjectBrowser?
     private var prompts: TrustPromptCoordinator!
     public override func load() {
-        prompts = TrustPromptCoordinator { [weak self] request in guard let self else { return false }; return try await self.presentTrustAlert(request) }
+        prompts = TrustPromptCoordinator { [weak self] request, finish in
+            guard let self else { finish(false); return {} }
+            return self.presentTrustAlert(request, finish: finish)
+        }
         TaskNotifications.shared.activate()
         TaskNotifications.shared.onOpen = { [weak self] event in self?.notifyListeners("notificationOpen", data: event, retainUntilConsumed: true) }
     }
@@ -344,42 +347,59 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
             } catch { call.reject((error as? PushFailure)?.code ?? error.localizedDescription, "STORAGE_ERROR") }
         }
     }
-    // Concurrent challenges for one fingerprint share a single alert; distinct prompts wait until the previous one is dismissed.
-    private func approve(_ identity: String, _ fingerprint: String, _ changed: Bool) async -> Bool {
-        let epoch = generation
-        return await prompts.decide(.init(identity: identity, fingerprint: fingerprint, changed: changed)) { [weak self] in self?.generation == epoch }
+    @MainActor private func approve(_ identity: String, _ fingerprint: String, _ changed: Bool,
+                                    isCurrent: @escaping () -> Bool) async -> Bool {
+        let accepted = await prompts.decide(.init(identity: identity, fingerprint: fingerprint, changed: changed), isCurrent: isCurrent)
+        return accepted && !Task.isCancelled && isCurrent()
     }
-    // Top-most controller that is fully in the window hierarchy; retries on the main run loop for about 5 s while a presentation is still animating.
     @MainActor private func settledPresenter() async throws -> UIViewController {
         for _ in 0..<50 {
+            try Task.checkCancellation()
             var top = bridge?.viewController
             while let next = top?.presentedViewController { top = next }
             if let top, !(top is UIAlertController), !top.isBeingPresented, !top.isBeingDismissed, top.view.window != nil { return top }
-            try? await Task.sleep(nanoseconds: 100_000_000)
+            try await Task.sleep(nanoseconds: 100_000_000)
         }
         throw RemoteFailure("No view controller available for the fingerprint prompt")
     }
-    // Shows one fingerprint alert; the continuation is resumed exactly once, also when the alert never appears or vanishes without an action.
-    @MainActor private func presentTrustAlert(_ request: TrustPromptCoordinator.Request) async throws -> Bool {
-        let host = try await settledPresenter()
-        return await withCheckedContinuation { continuation in
-            var done = false, shown = false, ticks = 0, gone = 0
-            let finish: (Bool) -> Void = { value in guard !done else { return }; done = true; continuation.resume(returning: value) }
-            let alert = UIAlertController(title: MobileText.get(request.changed ? "mobile.native.trustChangedTitle" : "mobile.native.trustTitle"), message: MobileText.get(request.changed ? "mobile.native.trustChangedBody" : "mobile.native.trustBody", ["identity": request.identity, "fingerprint": request.fingerprint]), preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: MobileText.get("common.cancel"), style: .cancel) { _ in finish(false) })
-            let trust = UIAlertAction(title: MobileText.get("mobile.native.trustAccept"), style: .default) { _ in finish(true) }
-            alert.addAction(trust)
-            // Trusting a verified fingerprint is the expected action, so it carries the bold highlight instead of Cancel.
-            alert.preferredAction = trust
-            host.present(alert, animated: true) { shown = true }
-            func watch() {
-                guard !done else { return }
-                ticks += 1; if shown, alert.view.window == nil { gone += 1 }
-                // Not on screen after 5 s (presentation refused) or gone for 1 s without an action (dismissed with its presenter): answer false.
-                if (!shown && ticks >= 50) || gone >= 10 { finish(false); return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.1, execute: watch)
-            }
-            watch()
+    @MainActor private func presentTrustAlert(_ request: TrustPromptCoordinator.Request,
+                                              finish: @escaping @MainActor (Bool) -> Void) -> (() -> Void) {
+        var alert: UIAlertController?
+        let presentation = Task { @MainActor in
+            do {
+                let host = try await settledPresenter()
+                try Task.checkCancellation()
+                let identity = request.identity.hasPrefix("tls:")
+                    ? MobileText.get("mobile.native.tlsIdentity", ["identity": request.identity]) : request.identity
+                let view = UIAlertController(title: MobileText.get(request.changed ? "mobile.native.trustChangedTitle" : "mobile.native.trustTitle"), message: MobileText.get(request.changed ? "mobile.native.trustChangedBody" : "mobile.native.trustBody", ["identity": identity, "fingerprint": request.fingerprint]), preferredStyle: .alert)
+                alert = view
+                view.addAction(UIAlertAction(title: MobileText.get("common.cancel"), style: .cancel) { _ in finish(false) })
+                let trust = UIAlertAction(title: MobileText.get("mobile.native.trustAccept"), style: .default) { _ in finish(true) }
+                view.addAction(trust); view.preferredAction = trust
+                host.present(view, animated: true)
+                var shown = false, ticks = 0, gone = 0
+                while !Task.isCancelled {
+                    ticks += 1
+                    if view.view.window != nil { shown = true; gone = 0 } else if shown { gone += 1 }
+                    if (!shown && ticks >= 50) || gone >= 10 { finish(false); return }
+                    try await Task.sleep(nanoseconds: 100_000_000)
+                }
+            } catch { finish(false) }
+        }
+        return { presentation.cancel(); alert?.dismiss(animated: false); alert = nil }
+    }
+    @MainActor private func verifyHost(_ identity: String, _ fingerprint: String, epoch: Int) async throws {
+        guard generation == epoch else { throw RemoteFailure(MobileText.get("mobile.native.connectionCancelled")) }
+        let previous = (try vault.read()["keys"] as? [String: String])?[identity]
+        if previous == fingerprint { return }
+        state("confirming")
+        let current = { [weak self] in self?.generation == epoch }
+        guard await approve(identity, fingerprint, previous != nil, isCurrent: current), current() else {
+            throw RemoteFailure(MobileText.get("mobile.native.hostKeyRejected"))
+        }
+        try vault.update { updated in
+            guard current() else { return }
+            var keys = updated["keys"] as? [String: String] ?? [:]; keys[identity] = fingerprint; updated["keys"] = keys
         }
     }
     private func resource(_ name: String) throws -> String {
@@ -415,11 +435,7 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
         let host = string(row,"host"), sshPort = try port(row,"port"), username = string(row,"username")
         let identity = "\(host):\(sshPort)"
         let validator = HostValidator { fingerprint in
-            let store = try self.vault.read(); let previous = (store["keys"] as? [String: String])?[identity]
-            if previous == fingerprint { return }
-            self.state("confirming")
-            guard self.generation == epoch, await self.approve(identity, fingerprint, previous != nil), self.generation == epoch else { throw RemoteFailure(MobileText.get("mobile.native.hostKeyRejected")) }
-            try self.vault.update { updated in var keys = updated["keys"] as? [String: String] ?? [:]; keys[identity] = fingerprint; updated["keys"] = keys }
+            try await self.verifyHost(identity, fingerprint, epoch: epoch)
         }
         let authentication: SSHAuthenticationMethod
         if string(row,"auth") == "key" {
@@ -496,9 +512,9 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
         guard (response as? HTTPURLResponse)?.statusCode == 200 else { throw RemoteFailure(MobileText.get("mobile.native.healthCheckFailed")) }
         return (url,password)
     }
-    @objc func connect(_ call: CAPPluginCall) {
+    @MainActor @objc func connect(_ call: CAPPluginCall) {
         guard let id = call.getString("id") else { call.reject(MobileText.get("mobile.native.connectionIdMissing")); return }
-        generation += 1; let epoch = generation; task?.cancel(); activeID = id
+        generation += 1; browser?.invalidateTrust(); prompts.cancelInvalidRequests(); let epoch = generation; task?.cancel(); activeID = id
         let cleanup = detachTransport()
         task = Task { @MainActor in
             await cleanup()
@@ -515,12 +531,15 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
             } catch { if generation == epoch { let cleanup = detachTransport(); state("error"); Task { await cleanup() } }; call.reject(error.localizedDescription,"REMOTE_ERROR") }
         }
     }
-    @objc func disconnect(_ call: CAPPluginCall) {
-        generation += 1; task?.cancel(); activeID = nil
+    @MainActor @objc func disconnect(_ call: CAPPluginCall) {
+        generation += 1; browser?.invalidateTrust(); prompts.cancelInvalidRequests(); task?.cancel(); activeID = nil
         let cleanup = detachTransport()
         let current = browser; browser = nil
-        current?.stopLoading(); current?.dismiss(animated: false)
-        state("disconnected"); call.resolve()
+        current?.stopLoading()
+        // Dismiss from the parent so an alert still finishing its transition cannot consume this dismissal.
+        if let parent = current?.presentingViewController { parent.dismiss(animated: false) { call.resolve() } }
+        else { current?.dismiss(animated: false); call.resolve() }
+        state("disconnected")
         Task { await cleanup() }
     }
     @objc func status(_ call: CAPPluginCall) { call.resolve(["connected":client?.isConnected ?? (browser != nil),"id":activeID ?? ""]) }
@@ -535,7 +554,7 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
         }
         view.onClose = { [weak self, weak view] in
             guard let self, self.browser === view else { return }
-            self.generation += 1; self.task?.cancel(); self.browser = nil; self.activeID = nil
+            self.generation += 1; self.browser?.invalidateTrust(); self.prompts.cancelInvalidRequests(); self.task?.cancel(); self.browser = nil; self.activeID = nil
             let cleanup = self.detachTransport()
             self.state("disconnected")
             Task { await cleanup() }
@@ -543,7 +562,7 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
         view.onReconnect = { [weak self, weak view] in
             guard let self, let id = self.activeID, self.browser === view else { return }
             if id == "account" { view?.reloadAccount(); return }
-            self.generation += 1; let epoch = self.generation; self.task?.cancel()
+            self.generation += 1; self.browser?.invalidateTrust(); self.prompts.cancelInvalidRequests(); let epoch = self.generation; self.task?.cancel()
             let cleanup = self.detachTransport()
             self.task = Task { @MainActor in
                 await cleanup()
@@ -560,16 +579,36 @@ public class VelaRemotePlugin: CAPPlugin, CAPBridgedPlugin {
                 }
             }
         }
-        view.onCertificate = { [weak self, weak view] identity, fingerprint in
-            guard let self else { return false }
-            // A declined or failed prompt explains itself on the page, like Android does, instead of waiting for WebKit's error, which some builds report as a plain cancellation.
-            let declined: () async -> Bool = { await MainActor.run { view?.showError(MobileText.get("mobile.native.certificateRejected")) }; return false }
+        view.onTrustInvalidated = { [weak self] in self?.prompts.cancelInvalidRequests() }
+        view.onCertificate = { [weak self, weak view] identity, fingerprint, load in
+            guard let self, let view, self.browser === view else { return false }
+            let epoch = self.generation
+            let current = { [weak self, weak view] in
+                guard let self, let view else { return false }
+                return self.generation == epoch && self.browser === view && view.trustLoad.isCurrent(load)
+            }
+            guard current() else { return false }
             do {
-                let store=try self.vault.read();let previous=(store["keys"] as? [String:String])?[identity]
-                if previous==fingerprint {return true}
-                guard await self.approve(MobileText.get("mobile.native.tlsIdentity", ["identity": identity]),fingerprint,previous != nil) else{return await declined()}
-                try self.vault.update { updated in var keys=updated["keys"] as? [String:String] ?? [:];keys[identity]=fingerprint;updated["keys"]=keys };return true
-            } catch {return await declined()}
+                if let decision = view.trustLoad.decision(identity, fingerprint) { return decision && current() }
+                let previous = (try self.vault.read()["keys"] as? [String: String])?[identity]
+                if previous == fingerprint { return current() }
+                let accepted = await self.approve(identity, fingerprint, previous != nil, isCurrent: current)
+                guard current() else { return false }
+                view.trustLoad.record(accepted, identity: identity, fingerprint: fingerprint, epoch: load)
+                guard accepted else { view.showError(MobileText.get("mobile.native.certificateRejected")); return false }
+                try self.vault.update { updated in
+                    guard current() else { return }
+                    var keys = updated["keys"] as? [String: String] ?? [:]
+                    if keys[identity] != fingerprint { keys[identity] = fingerprint; updated["keys"] = keys }
+                }
+                return current()
+            } catch {
+                if current() {
+                    view.trustLoad.record(false, identity: identity, fingerprint: fingerprint, epoch: load)
+                    view.showError(MobileText.get("mobile.native.certificateRejected"))
+                }
+                return false
+            }
         }
         browser=view;view.modalPresentationStyle = .fullScreen
         bridge?.viewController?.present(view,animated:true)
@@ -582,22 +621,23 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
     var onSavePassword: ((String) throws -> Void)?
     var onClose: (() -> Void)?
     var onReconnect: (() -> Void)?
-    var onCertificate: ((String,String) async -> Bool)?
+    var onCertificate: (@MainActor (String, String, Int) async -> Bool)?
+    var onTrustInvalidated: (() -> Void)?
+    let trustLoad = TrustLoadState()
+    private var challenges: [UUID: (Task<Void, Never>, () -> Void)] = [:]
     private var target: URL
     private var password: String
     private var web: WKWebView!
     private let message = UILabel()
     private let recovery = ConnectionRecoveryView()
     private var navigationFailed = false
-    // Fingerprints the user declined during the current load: WebKit opens further connections after a refusal, and each would ask again. Cleared when a new load starts (retry).
-    private var declinedFingerprints = Set<String>()
     private var reconnecting = false
     private var loadTimeout: DispatchWorkItem?
     private var closed = false
     private var downloads: [ObjectIdentifier: URL] = [:]
     init(url:URL,password:String,title:String) {target=url;self.password=password;super.init(nibName:nil,bundle:nil);self.title=title}
     required init?(coder:NSCoder) {fatalError("Use init(url:password:title:)")}
-    func reloadAccount() { beginLoading(); web?.reload() }
+    func reloadAccount() { resetTrustLoad(); beginLoading(); web?.reload() }
     private var notificationConnection: String? {
         guard connectionID == "account" else { return connectionID }
         guard let url = web?.url, url.host == "velaterm.com", url.scheme == "https" else { return nil }
@@ -665,11 +705,11 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
         let readinessScript = (try? String(contentsOf: readinessURL, encoding: .utf8)) ?? ""
         let script="if(location.origin===\(expected)){window.__VELATERM_CONNECTION_MENU__=true;window.__VLX_AUTOLOGIN__=\(secret);\(loginScript)\n\(notificationScript)\n\(readinessScript)}"
         web.configuration.userContentController.addUserScript(WKUserScript(source:script,injectionTime:.atDocumentStart,forMainFrameOnly:true))
-        beginLoading(); message.text=title;web.load(URLRequest(url:target))
+        resetTrustLoad(); beginLoading(); message.text=title;web.load(URLRequest(url:target))
     }
     private func beginLoading() {
         guard !closed else { return }
-        loadTimeout?.cancel(); navigationFailed = false; declinedFingerprints.removeAll(); recovery.showLoading()
+        loadTimeout?.cancel(); navigationFailed = false; recovery.showLoading()
         let timeout = DispatchWorkItem { [weak self] in
             guard let self, !self.closed, !self.navigationFailed else { return }
             self.reconnecting = false
@@ -687,7 +727,19 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
         loadTimeout?.cancel(); loadTimeout = nil; recovery.isHidden = true; reconnecting = false
         reply(true, nil)
     }
+    private func resetTrustLoad() {
+        trustLoad.begin(); cancelChallenges()
+    }
+    private func cancelChallenges() {
+        let pending = challenges; challenges.removeAll()
+        for (_, (task, cancel)) in pending { task.cancel(); cancel() }
+        onTrustInvalidated?()
+    }
+    func invalidateTrust() {
+        trustLoad.close(); cancelChallenges()
+    }
     func stopLoading() {
+        invalidateTrust()
         closed = true; loadTimeout?.cancel(); loadTimeout = nil; web?.stopLoading()
     }
     func notification(_ message: WKScriptMessage, reply: @escaping (Any?, String?) -> Void) {
@@ -815,6 +867,7 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
         return nil
     }
     func webView(_ webView:WKWebView,didReceive challenge:URLAuthenticationChallenge,completionHandler:@escaping(URLSession.AuthChallengeDisposition,URLCredential?)->Void) {
+        guard !closed, trustLoad.isCurrent(trustLoad.generation), webView === web else { completionHandler(.cancelAuthenticationChallenge, nil); return }
         guard challenge.protectionSpace.authenticationMethod==NSURLAuthenticationMethodServerTrust,
               challenge.protectionSpace.host==target.host,
               challenge.protectionSpace.port==(target.port ?? 443),
@@ -823,9 +876,21 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
         guard let chain=SecTrustCopyCertificateChain(trust) as? [SecCertificate],let leaf=chain.first else {completionHandler(.cancelAuthenticationChallenge,nil);return}
         let fingerprint="SHA256:"+Data(SHA256.hash(data:SecCertificateCopyData(leaf) as Data)).base64EncodedString().replacingOccurrences(of:"=",with:"")
         let identity="tls:https://\(target.host!):\(target.port ?? 443)"
-        if declinedFingerprints.contains(fingerprint) {completionHandler(.cancelAuthenticationChallenge,nil);return}
-        Task {let accepted=await onCertificate?(identity,fingerprint) ?? false;await MainActor.run {if !accepted {self.declinedFingerprints.insert(fingerprint)};completionHandler(accepted ? .useCredential:.cancelAuthenticationChallenge,accepted ? URLCredential(trust:trust):nil)}}
+        guard !closed else { completionHandler(.cancelAuthenticationChallenge, nil); return }
+        let load = trustLoad.generation
+        if trustLoad.decision(identity, fingerprint) == false { completionHandler(.cancelAuthenticationChallenge, nil); return }
+        let id = UUID()
+        let task = Task { @MainActor in
+            let accepted = await onCertificate?(identity, fingerprint, load) ?? false
+            guard challenges.removeValue(forKey: id) != nil else { return }
+            let current = trustLoad.isCurrent(load) && !Task.isCancelled
+            if current { trustLoad.record(accepted, identity: identity, fingerprint: fingerprint, epoch: load) }
+            completionHandler(accepted && current ? .useCredential : .cancelAuthenticationChallenge,
+                              accepted && current ? URLCredential(trust: trust) : nil)
+        }
+        challenges[id] = (task, { completionHandler(.cancelAuthenticationChallenge, nil) })
     }
+
     private func failedNavigation(_ error: Error) {
         let failure = error as NSError
         if failure.domain == NSURLErrorDomain && failure.code == NSURLErrorCancelled { return }
@@ -836,8 +901,12 @@ private final class ProjectBrowser: UIViewController, WKNavigationDelegate, WKUI
     }
     func webView(_ webView:WKWebView,didFailProvisionalNavigation navigation:WKNavigation!,withError error:Error) { failedNavigation(error) }
     func webView(_ webView:WKWebView,didFail navigation:WKNavigation!,withError error:Error) { failedNavigation(error) }
-    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) { beginLoading() }
-    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { showError(MobileText.get("mobile.native.pageTerminated")) }
+    func webView(_ webView: WKWebView, didStartProvisionalNavigation navigation: WKNavigation!) {
+        guard !closed, !navigationFailed else { return }
+        if recovery.isHidden { resetTrustLoad() }
+        beginLoading()
+    }
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) { invalidateTrust(); showError(MobileText.get("mobile.native.pageTerminated")) }
     deinit {loadTimeout?.cancel(); NotificationCenter.default.removeObserver(self)}
 }
 

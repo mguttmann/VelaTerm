@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import DOMPurify from "dompurify";
-import { marked } from "marked";
+import { md } from "../../markdownEngine";
 import { dateLocale, t, type I18nKey } from "../../i18n";
 import { memoryNavigate } from "./navigation";
 
@@ -51,7 +51,7 @@ export function LoadState({ error, reload }: { error: string; reload: () => void
   </div>;
 }
 export function MemoryMarkdown({ content }: { content: string }) {
-  const html = useMemo(() => DOMPurify.sanitize(marked.parse(content, { async: false }) as string, {
+  const html = useMemo(() => DOMPurify.sanitize(md.parse(content, { async: false }) as string, {
     FORBID_TAGS: ["img", "video", "audio", "iframe", "form", "input", "style"], FORBID_ATTR: ["style"],
   }), [content]);
   return <div className="memory-markdown" dangerouslySetInnerHTML={{ __html: html }} onClick={(e) => {

@@ -44,6 +44,22 @@ impl Fixture {
             std::thread::sleep(Duration::from_millis(25));
         }
     }
+    /// Wait out a real model call, which takes far longer than a fixture's instant reply.
+    fn await_live_job(&self, id: &str) -> Value {
+        let start = Instant::now();
+        loop {
+            let result = runner::jobs(&self.app, &json!({"id":id})).unwrap();
+            let job = &result["jobs"][0];
+            if !["queued", "running", "cancelling"].contains(&job["status"].as_str().unwrap()) {
+                return job.clone();
+            }
+            assert!(
+                start.elapsed() < Duration::from_secs(600),
+                "job timed out: {job}"
+            );
+            std::thread::sleep(Duration::from_millis(200));
+        }
+    }
     fn status(&self, id: &str) -> String {
         self.app
             .db()
@@ -118,6 +134,58 @@ else: print(json.dumps({'structured_output':result,'is_error':False,'usage':{'in
         std::fs::write(&path, script).unwrap();
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
         self.app.db().conn.lock().unwrap().execute("INSERT OR REPLACE INTO app_settings(key,value,updated_at) VALUES('vlx-settings',?1,?2)",params![json!({"agentDefaults":{"claude":{"path":path},"codex":{"path":path}}}).to_string(),now()]).unwrap();
+    }
+    /// Install a fake CLI for an agent whose reply is ordinary text inside an event stream.
+    ///
+    /// The prompt arrives as the last argument rather than on stdin, and the answer is wrapped in a
+    /// fenced code block, which is how these agents actually answer: nothing constrains them to emit
+    /// bare JSON. `flaky` makes the first call of each step answer with prose instead, so the retry
+    /// is exercised on the same path a real unusable reply takes.
+    #[cfg(unix)]
+    fn stream_cli(&self, agent: &str, flaky: bool) {
+        use std::os::unix::fs::PermissionsExt;
+        let path = self.dir.join(format!("fake-{agent}"));
+        let script = format!(
+            "#!/usr/bin/env python3\nAGENT = {agent:?}\nFLAKY = {}\n{}",
+            if flaky { "True" } else { "False" },
+            r#"
+import sys,json,re,pathlib
+prompt=sys.argv[-1]
+root=pathlib.Path(__file__).parent
+calls=root/('calls-'+AGENT)
+seen=len(calls.read_text().splitlines()) if calls.exists() else 0
+with calls.open('a') as f: f.write(json.dumps(sys.argv[1:])+'\n')
+if 'CATALOG:\n' in prompt:
+ catalog=json.loads(prompt.split('CATALOG:\n',1)[1].split('\nSOURCE ',1)[0])
+ target=catalog[0]['id'] if catalog else ''
+ content=prompt.split('\nSOURCE ',1)[1].split(':\n',1)[1]
+else:
+ target=re.search(r'targetId=([a-z0-9-]+)',prompt).group(1)
+ content='\n'.join(t['content'] for t in json.loads(prompt.split('CONTRIBUTIONS:\n',1)[1]))
+result={'entries':[{'targetId':target,'title':'服务端口规范','summary':'本地服务配置','content':content,'tags':['技术'],'relatedTitles':[]}]}
+answer='Here you go:\n```json\n'+json.dumps(result,ensure_ascii=False)+'\n```'
+if FLAKY and seen==0: answer='I was unable to produce output for this segment.'
+if AGENT=='opencode':
+ print(json.dumps({'type':'step_start','part':{'type':'step-start'}}))
+ print(json.dumps({'type':'text','part':{'type':'text','text':answer}}))
+ print(json.dumps({'type':'step_finish','part':{'type':'step-finish','tokens':{'input':12,'output':8}}}))
+else:
+ print(json.dumps({'type':'message_update','assistantMessageEvent':{'type':'text_delta','delta':answer}}))
+ print(json.dumps({'type':'turn_end','message':{'role':'assistant','content':[{'type':'thinking','thinking':'ignored'},{'type':'text','text':answer}],'usage':{'input':12,'output':8}}}))
+"#
+        );
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+        self.app.db().conn.lock().unwrap().execute("INSERT OR REPLACE INTO app_settings(key,value,updated_at) VALUES('vlx-settings',?1,?2)",params![json!({"agentDefaults":{agent:{"path":path}}}).to_string(),now()]).unwrap();
+    }
+    /// Arguments of every call the fake CLI recorded, in order.
+    #[cfg(unix)]
+    fn recorded_calls(&self, agent: &str) -> Vec<Vec<String>> {
+        std::fs::read_to_string(self.dir.join(format!("calls-{agent}")))
+            .unwrap_or_default()
+            .lines()
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect()
     }
 }
 impl Drop for Fixture {
@@ -455,6 +523,85 @@ fn both_agents_isolate_sessions_and_replace_only_the_requested_collection() {
         assert_eq!(repo::get(&conn, &second.id).unwrap().unwrap().version, 1);
         assert_eq!(repo::all(&conn).unwrap().len(), 2);
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn agents_without_a_schema_flag_organize_from_their_event_streams() {
+    for agent in ["opencode", "pi", "omp"] {
+        let f = Fixture::new();
+        f.stream_cli(agent, false);
+        f.source("s1", "Session one: port 24680.");
+        f.failed_job("j1", "s1", agent);
+        let job = runner::retry(&f.app, "j1").unwrap();
+        let finished = f.await_job(job["id"].as_str().unwrap());
+        assert_eq!(finished["status"], "completed", "{agent}: {finished}");
+        let entries = repo::all(&f.app.db().conn.lock().unwrap()).unwrap();
+        assert_eq!(entries.len(), 1, "{agent}");
+        assert!(entries[0].content.contains("24680"), "{agent}");
+        // The schema has no CLI flag to carry it, so it has to reach the model in the prompt itself.
+        let calls = f.recorded_calls(agent);
+        let prompt = calls[0].last().unwrap();
+        assert!(prompt.contains("\"targetId\""), "{agent}");
+        assert!(prompt.contains("no code fences"), "{agent}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn an_unusable_reply_is_retried_before_the_job_fails() {
+    let f = Fixture::new();
+    f.stream_cli("pi", true);
+    f.source("s1", "Session one: port 24680.");
+    f.failed_job("j1", "s1", "pi");
+    let job = runner::retry(&f.app, "j1").unwrap();
+    let finished = f.await_job(job["id"].as_str().unwrap());
+    assert_eq!(finished["status"], "completed", "{finished}");
+    let entries = repo::all(&f.app.db().conn.lock().unwrap()).unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].content.contains("24680"));
+    // One rejected extract, its retry, then the merge: the prompt is repeated, not abandoned.
+    assert_eq!(f.recorded_calls("pi").len(), 3);
+}
+
+#[test]
+fn json_is_recovered_from_replies_that_were_not_constrained_to_the_schema() {
+    use runner::process::recover_json;
+    let wanted = json!({"entries":[{"title":"a"}]});
+    for reply in [
+        r#"{"entries":[{"title":"a"}]}"#,
+        "```json\n{\"entries\":[{\"title\":\"a\"}]}\n```",
+        "```\n{\"entries\":[{\"title\":\"a\"}]}\n```",
+        "Here you go:\n{\"entries\":[{\"title\":\"a\"}]}\nHope that helps.",
+    ] {
+        assert_eq!(recover_json(reply).unwrap(), wanted, "{reply:?}");
+    }
+    for reply in ["", "I could not do that.", "{\"entries\":", "}{"] {
+        assert!(recover_json(reply).is_err(), "{reply:?}");
+    }
+}
+
+#[test]
+fn every_offered_agent_has_an_invocation_and_a_display_name() {
+    for agent in runner::process::AGENTS {
+        let spec = runner::process::spec(agent).unwrap_or_else(|| panic!("{agent}"));
+        assert_eq!(spec.kind.as_str(), *agent);
+        // An argument-delivered prompt must fit the command line, so those agents cannot be the ones
+        // trusted with an unbounded prompt; the schema check pairs a shape with the right decoder.
+        assert_eq!(
+            spec.constrains_schema,
+            matches!(
+                spec.shape,
+                runner::process::Shape::ClaudeJson
+                    | runner::process::Shape::CodexEvents
+                    | runner::process::Shape::Plain
+            ),
+            "{agent}"
+        );
+        assert_ne!(runner::agent_label(agent), *agent, "{agent}");
+    }
+    assert!(runner::process::spec("cursor").is_none());
+    assert!(runner::process::spec("terminal").is_none());
 }
 
 #[cfg(unix)]
@@ -1044,4 +1191,49 @@ fn upgrading_removes_the_global_compiler_limit_without_losing_jobs() {
         .unwrap(),
         2
     );
+}
+
+/// End-to-end organization through the agent CLIs installed on this machine.
+///
+/// Ignored by default: it calls real models, so it costs money, needs each CLI to be signed in and
+/// cannot give the same answer twice. Run it with `cargo test --lib live_agents -- --ignored
+/// --nocapture` after changing how an agent is invoked, because nothing else proves the flags and the
+/// decoder match the CLI that is actually installed.
+#[cfg(unix)]
+#[test]
+#[ignore]
+fn live_agents_organize_a_real_session() {
+    let agents: Vec<String> = std::env::var("VLX_MEMORY_LIVE_AGENTS")
+        .unwrap_or_else(|_| "opencode,pi,omp".into())
+        .split(',')
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .collect();
+    let source = "## Message 1 · user · 2026-09-16T10:00:00Z\n\nOur backend listens on 24680 and the frontend on 24681. Why did localhost fail in the browser but curl worked?\n\n## Message 2 · assistant · 2026-09-16T10:01:00Z\n\nThe dev server bound the IPv6 address ::1 while the browser resolved localhost to 127.0.0.1. Binding 127.0.0.1 explicitly fixed it. The rule we settled on: bind IPv4 only, and verify with both 127.0.0.1 and localhost before calling it done.\n";
+    let mut failures = Vec::new();
+    for agent in &agents {
+        let f = Fixture::new();
+        let Ok(bin) = runner::process::executable(&f.app, agent) else {
+            failures.push(format!("{agent}: not installed"));
+            continue;
+        };
+        println!("{agent}: using {bin}");
+        f.source("s1", source);
+        f.failed_job("j1", "s1", agent);
+        let job = runner::retry(&f.app, "j1").unwrap();
+        let finished = f.await_live_job(job["id"].as_str().unwrap());
+        if finished["status"] != "completed" {
+            failures.push(format!("{agent}: {}", finished["error"]));
+            continue;
+        }
+        let entries = repo::all(&f.app.db().conn.lock().unwrap()).unwrap();
+        println!("{agent}: {} entries", entries.len());
+        for entry in &entries {
+            println!("  - {} | {}", entry.title, entry.summary);
+        }
+        if entries.is_empty() {
+            failures.push(format!("{agent}: completed with no entries"));
+        }
+    }
+    assert!(failures.is_empty(), "{failures:#?}");
 }

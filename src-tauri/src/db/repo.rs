@@ -357,9 +357,37 @@ pub fn create_session_full(
     // session used before the chat engine existed and what a plain terminal always uses.
     engine: Option<&str>,
 ) -> Result<Session, String> {
+    create_session_identified(conn, &new_id(), project_id, group_id, name, kind, shell, cwd,
+        init_cmd, parent_session_id, worktree_path, agent_args, permission_mode,
+        worktree_base_ref, agent_preset_id, agent_path, engine)
+}
+
+/// Insert a preallocated session identity inside the caller's result-binding transaction.
+#[allow(clippy::too_many_arguments)]
+pub fn create_session_identified(
+    conn: &Connection,
+    id: &str,
+    project_id: &str,
+    group_id: Option<&str>,
+    name: &str,
+    kind: SessionKind,
+    shell: Option<&str>,
+    cwd: Option<&str>,
+    init_cmd: Option<&str>,
+    parent_session_id: Option<&str>,
+    worktree_path: Option<&str>,
+    agent_args: Option<&str>,
+    permission_mode: Option<&str>,
+    worktree_base_ref: Option<&str>,
+    agent_preset_id: Option<&str>,
+    agent_path: Option<&str>,
+    // How the agent is driven. Empty or unrecognized means the terminal engine, which is what every
+    // session used before the chat engine existed and what a plain terminal always uses.
+    engine: Option<&str>,
+) -> Result<Session, String> {
     crate::agent::permission_catalog::validate(kind, permission_mode)?;
     let session = Session {
-        id: new_id(),
+        id: id.to_string(),
         project_id: project_id.to_string(),
         group_id: group_id.map(|s| s.to_string()),
         name: name.to_string(),

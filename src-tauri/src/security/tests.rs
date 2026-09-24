@@ -133,6 +133,7 @@ fn canceled_run_cannot_be_overwritten_and_orphaned_run_is_interrupted() {
         project_id: "project".into(),
         session_id: "session".into(),
         agent: "codex".into(),
+        agent_label: agent_label("codex"),
         root: f.root().into(),
         scope: "repository".into(),
         path: String::new(),
@@ -208,4 +209,42 @@ fn selection_rejects_unknown_models_and_unsupported_efforts() {
             .unwrap();
     assert!(request.model.is_none());
     assert!(request.effort.is_none());
+}
+
+#[test]
+fn audit_agents_come_from_the_shared_launch_catalogue() {
+    for agent in AUDIT_AGENTS {
+        let kind = audit_kind(agent).unwrap();
+        assert_eq!(kind.as_str(), *agent);
+        // The label has to come from the catalogue, or the picker and the run header disagree about
+        // what the same agent is called.
+        assert_eq!(agent_label(agent), crate::agent::launch_options::label(kind));
+        assert!(!agent_label(agent).is_empty());
+    }
+    // The audit attaches its MCP server through per-CLI arguments, so an agent without that wiring
+    // must be refused rather than started with no way to report findings.
+    for agent in ["opencode", "pi", "grok", "terminal", ""] {
+        assert!(audit_kind(agent).is_err(), "{agent}");
+        assert!(super::upstream::launch_args(
+            agent,
+            std::path::Path::new("/tmp/plugin"),
+            std::path::Path::new("/tmp/state"),
+            ""
+        )
+        .is_err(), "{agent}");
+    }
+}
+
+#[test]
+fn a_stored_run_reports_its_agent_label_after_an_agent_is_renamed() {
+    // The label is not read back from the stored row, so an older run shows the current name.
+    let stored = json!({
+        "id":"r","projectId":"p","sessionId":"s","agent":"claude","root":"/tmp","scope":"repository",
+        "path":"","status":"completed","phase":"report","createdAt":0,"updatedAt":0,"files":[],
+        "excluded":[],"reviewed":[],"findings":[],"threatModel":"","steps":[],"gaps":[],"error":""
+    });
+    let mut run: Run = serde_json::from_value(stored).unwrap();
+    assert_eq!(run.agent_label, "");
+    run.agent_label = agent_label(&run.agent);
+    assert_eq!(run.agent_label, crate::agent::launch_options::label(SessionKind::Claude));
 }

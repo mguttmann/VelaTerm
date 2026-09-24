@@ -24,6 +24,9 @@ mod models;
 mod memory;
 mod kb;
 mod knowledge;
+// GUI-only: remote windows download files through the local host, with a save dialog and progress.
+#[cfg(feature = "gui")]
+mod local_download;
 // Unix-only: imports the login shell's environment when the process was not started from a shell.
 #[cfg(unix)]
 pub mod login_env;
@@ -38,6 +41,9 @@ mod split_trace;
 pub mod diagnostics;
 #[cfg(feature = "gui")]
 mod native_menu;
+// GUI-only watchdog reporting stalls of the platform event loop, which are what a frozen window actually is.
+#[cfg(feature = "gui")]
+mod stall;
 // GUI-only vela-server provisioning: R2 download, minisign verification, and cache.
 #[cfg(feature = "gui")]
 mod server_supply;
@@ -312,6 +318,11 @@ pub fn run_codex_hook(args: &[String]) {
     agent::server::forward_notify(&url, &body);
 }
 
+/// Hidden Cursor status hook. Completes before GUI, database, or service initialization.
+pub fn run_cursor_hook(args: &[String]) -> ! {
+    agent::cursor::run(args)
+}
+
 /// Hidden Grok lifecycle-hook entry. Static `~/.grok/hooks/vlx-term.json` commands call this
 /// executable, while all dynamic callback values remain scoped to the managed Grok process.
 pub fn run_grok_hook(args: &[String]) {
@@ -389,6 +400,12 @@ pub fn run_stat(args: &[String]) -> ! {
     agent::cli_client::run_stat(args)
 }
 
+/// Hidden `--run` entry used by the PATH `vrun` shim. Start a long-running command, wait for it, and
+/// exit when it does, so the caller is woken by its own command returning.
+pub fn run_wait(args: &[String]) -> ! {
+    agent::run_wait::run(args)
+}
+
 pub fn run_knowledge(args: &[String]) -> ! {
     knowledge::agent::run(args)
 }
@@ -423,6 +440,13 @@ fn native_notify(
     body: String,
     sound: bool,
 ) -> bool {
+    // macOS posts this straight to UNUserNotificationCenter from the UI thread; Windows hands the toast to
+    // the main thread itself. Either way a delay here is a delay for the whole window.
+    let _slow = crate::diagnostics::Slow::new(
+        "ui_thread_slow",
+        crate::commands::UI_THREAD_REPORT_THRESHOLD,
+        serde_json::json!({"command":"native_notify"}),
+    );
     #[cfg(target_os = "macos")]
     {
         let _ = sound; // macOS uses the system default notification sound.
@@ -570,6 +594,7 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
                 .build(),
         )
         .plugin(fonts::plugin())
+        .plugin(local_download::plugin())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -899,6 +924,8 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
             // Start the random-port/token loopback hook service for agent status callbacks.
             let hooks = HookServer::start(AppCtx::Tauri(app.handle().clone()))?;
             app.manage(hooks);
+            // Track `vrun` commands by session, including ones that outlived the previous run of the app.
+            agent::runs::start(AppCtx::Tauri(app.handle().clone()));
             let _ = mobile_push::start(&AppCtx::Tauri(app.handle().clone()));
             let _ = web::public_relay::start(&AppCtx::Tauri(app.handle().clone()));
 
@@ -948,6 +975,10 @@ fn run_with_builder(builder: tauri::Builder<tauri::Wry>, initial_open_project: O
             // since startup.
             search::warm_index(AppCtx::Tauri(app.handle().clone()));
             memory::resume(&AppCtx::Tauri(app.handle().clone()));
+
+            // Watch the event loop for stalls. Start it last so the one-off cost of the setup above is not
+            // reported as a freeze, and keep it running for the process lifetime.
+            stall::start(app.handle().clone());
 
             // Install macOS session-aware notification click handling; unsupported builds skip it.
             #[cfg(target_os = "macos")]
@@ -1494,6 +1525,7 @@ fn serve_main(args: &ServeArgs) -> Result<(), String> {
     let host = std::sync::Arc::new(HeadlessHost::new(data_dir.clone(), db));
     let ctx = AppCtx::Headless(std::sync::Arc::clone(&host));
     host.set_hooks(HookServer::start(ctx.clone())?);
+    agent::runs::start(ctx.clone());
     let _ = mobile_push::start(&ctx);
 
     // Reuse the GUI web service. local-http is loopback plaintext, lan-http is LAN plaintext, and

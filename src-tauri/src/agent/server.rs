@@ -16,8 +16,8 @@ use crate::host::AppCtx;
 use crate::pty::{AgentState, StatusSignal};
 
 /// Request to spawn an independent child session, triggered by `vspawn` or Claude's `/vspawn` skill.
-/// `/spawn` parses and emits it so the frontend can create the child, open a worktree, start it,
-/// and submit the prompt.
+/// `/spawn` persists the request before notifying clients. Decisions, creation, and initial delivery
+/// are resumed by the backend using the same request identity.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SpawnRequest {
@@ -33,13 +33,13 @@ pub struct SpawnRequest {
     /// Images added while reviewing the initial task in the launch dialog.
     #[serde(default)]
     pub images: Vec<super::chat::protocol::ChatImage>,
-    /// Child kind (claude/codex/terminal); the frontend chooses a default when omitted.
+    /// Child kind (claude/codex/terminal); the backend inherits or resolves its default when omitted.
     #[serde(default)]
     pub kind: Option<String>,
-    /// Whether to create a dedicated Git worktree; the frontend defaults to true.
+    /// Whether to create a dedicated Git worktree; the backend defaults to true.
     #[serde(default)]
     pub worktree: Option<bool>,
-    /// Directory from which vspawn was invoked. The frontend uses it as the child cwd and as the
+    /// Directory from which vspawn was invoked. The backend uses it as the child cwd and as the
     /// repository context when a dedicated worktree is requested.
     #[serde(default)]
     pub cwd: Option<String>,
@@ -158,6 +158,17 @@ pub enum ReadRequest {
     /// loop must stay free for agent status callbacks.
     /// A status query, which in its waiting form parks for up to minutes.
     Stat(StatRequest),
+    /// `vrun` started or finished a command; rescanning the runs directory reads files.
+    Runs(RunsRequest),
+}
+
+/// Body of `/runs`, posted by `vrun` when it starts or finishes a command.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunsRequest {
+    /// The announcing session, echoed back; the rescan covers every session.
+    #[serde(default)]
+    pub session_id: String,
 }
 
 /// Handler for `/refer` and `/search`, returning `(status code, response body)`.
@@ -257,6 +268,16 @@ fn serve_loop(server: tiny_http::Server, app: AppCtx, token: String) {
         &token,
         Some(app.clone()),
         |sid, signal| {
+            // A turn that ends while the session's `vrun` work goes on does not make it idle: report
+            // working until that work is over. Everything downstream sees the adjusted state.
+            let signal = match signal {
+                StatusSignal::State { state, silent, authoritative } => StatusSignal::State {
+                    state: crate::agent::runs::hold(&sid, state),
+                    silent,
+                    authoritative,
+                },
+                other => other,
+            };
             // Keep the process-wide status view current before the event goes out, so anything blocked
             // in `status_watch::wait_for_change` (vstat, an orchestration's coordinator) sees the same
             // change the frontend is about to. Recording is a fast in-memory operation; this closure
@@ -338,11 +359,8 @@ fn serve_loop(server: tiny_http::Server, app: AppCtx, token: String) {
             verified
         },
         |req| {
-            // A new card supersedes any earlier answer to the same task: an agent retrying a request the
-            // user cancelled sends the identical parent and prompt, and a stale claim would make
-            // confirming the new card do nothing.
-            crate::command_core::release_spawn_claim(&req.parent_session_id, &req.prompt);
-            // Forward an in-session child-task request so the frontend can create and start it.
+            // The production route persists requests before publishing; this callback also serves
+            // the transport-only test harness.
             app_for_spawn.emit("spawn://request", req);
         },
         |req| {
@@ -355,6 +373,10 @@ fn serve_loop(server: tiny_http::Server, app: AppCtx, token: String) {
             ReadRequest::Refer(r) => handle_refer(&app_for_read, r),
             ReadRequest::Search(r) => handle_search(&app_for_read, r),
             ReadRequest::Stat(r) => handle_stat(&app_for_read, r),
+            ReadRequest::Runs(r) => {
+                crate::agent::runs::refresh(&app_for_read);
+                (200, serde_json::json!({ "sessionId": r.session_id }).to_string())
+            }
         }),
     );
 }
@@ -550,8 +572,22 @@ fn serve_with_app(
         }
 
         if let Some(req) = parse_spawn(&url, &body, token) {
-            // Validated request to spawn a child task from an agent session.
+            if let Some(app) = &app {
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    let result = super::spawn_requests::register(&app, req);
+                    let (code, payload) = match result {
+                        Ok(receipt) => (200, serde_json::to_string(&receipt).unwrap_or_default()),
+                        Err(error) => (400, error),
+                    };
+                    let _ = request.respond(tiny_http::Response::from_string(payload).with_status_code(code));
+                });
+                continue;
+            }
             on_spawn(req);
+        } else if url.split('?').next() == Some("/spawn") {
+            let _ = request.respond(tiny_http::Response::from_string("Invalid spawn request").with_status_code(400));
+            continue;
         } else if let Some((sid, signal)) = handle(&url, token) {
             // For a valid hook, capture any body session_id before reporting status. The callback
             // reports whether that ID belongs to the session's own foreground conversation.
@@ -830,7 +866,7 @@ fn parse_spawn(url: &str, body: &str, expected_token: &str) -> Option<SpawnReque
 /// Whether the URL path is a read handled off the accept loop.
 fn is_read_path(url: &str) -> bool {
     let path = url.split_once('?').map(|(p, _)| p).unwrap_or(url);
-    path == "/refer" || path == "/search" || path == "/stat"
+    path == "/refer" || path == "/search" || path == "/stat" || path == "/runs"
 }
 
 /// Validate `/refer` or `/search` plus their JSON body. Errors carry the status code and JSON body to
@@ -876,6 +912,10 @@ fn parse_read(url: &str, body: &str, expected_token: &str) -> Result<ReadRequest
                 return Err((400, error_body("missing sessionId")));
             }
             Ok(ReadRequest::Stat(req))
+        }
+        "/runs" => {
+            let req: RunsRequest = serde_json::from_str(body).map_err(|_| invalid_json())?;
+            Ok(ReadRequest::Runs(req))
         }
         _ => Err((404, error_body("unknown endpoint"))),
     }
@@ -2582,6 +2622,7 @@ mod tests {
                         200,
                         serde_json::json!({ "sessionId": r.session_id }).to_string(),
                     ),
+                    ReadRequest::Runs(_) => (200, "{}".to_string()),
                 }),
             );
         });

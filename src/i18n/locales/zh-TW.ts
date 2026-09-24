@@ -3,7 +3,7 @@
 import type en from "./en";
 
 const zhTW: typeof en = {
-  "tree.newPlanExecuteSession": "新增規劃與執行會話…",
+  "tree.newPlanExecuteSession": "新增規劃/執行會話…",
   "launch.splitTasks": "自動拆分多個任務",
   "launch.splitTasksHint": "由規劃會話拆分獨立任務；執行前可逐項確認任務說明、智慧體、模型和推理強度。",
   "launch.splitReview": "確認執行任務",
@@ -468,6 +468,9 @@ const zhTW: typeof en = {
   "spawn.launch": "啟動子會話",
   "spawn.remaining": (n: number) => `另有 ${n} 項待確認`,
   "spawn.notifyTitle": "子會話啟動待確認",
+  "spawn.requestUnavailable": "此請求缺少識別碼。請重新連線以還原請求，再進行確認或取消。",
+  "spawn.deliveryUncertain": "初始任務可能已經傳送。請先開啟既有會話檢查狀態，再繼續操作。系統不會自動重新傳送。",
+  "spawn.confirmedChoices": "此啟動請求已經確認。重試將沿用同一會話和啟動設定。",
   "orch.title": "批次啟動子會話",
   "orch.notifyTitle": "批次啟動待確認",
   "orch.coordinatorName": "會話狀態",
@@ -617,21 +620,21 @@ const zhTW: typeof en = {
   "settings.chatFont": "對話字型",
   "settings.chatFontSize": "對話字級",
   "settings.chatLineHeight": "對話行高",
-  "settings.composerChips": "Composer toolbar", // TODO translate
-  "settings.composerChipsHint": "Chips that are on always appear beside the message in this order, even while they have nothing to show: a chip whose feature is momentarily unavailable (no running agent process, no background tasks, an unresolved sign-in) is shown empty or disabled rather than hidden. Only a chip the current agent does not have at all is left out. When the chips do not fit, the ones that overflow move into a More menu together with the chips that are off. Chips that are off never appear in the row and stay available here and in that menu.", // TODO translate
-  "settings.composerChipUp": (chip: string) => `Move ${chip} up`, // TODO translate
-  "settings.composerChipDown": (chip: string) => `Move ${chip} down`, // TODO translate
-  "settings.composerChip.model": "Model", // TODO translate
-  "settings.composerChip.effort": "Thinking effort", // TODO translate
-  "settings.composerChip.collaboration": "Collaboration mode", // TODO translate
-  "settings.composerChip.permission": "Permission mode", // TODO translate
-  "settings.composerChip.fastMode": "Fast mode", // TODO translate
-  "settings.composerChip.serviceTier": "Speed", // TODO translate
-  "settings.composerChip.personality": "Tone", // TODO translate
-  "settings.composerChip.mcp": "MCP servers", // TODO translate
-  "settings.composerChip.tasks": "Background tasks", // TODO translate
-  "settings.composerChip.account": "Account", // TODO translate
-  "settings.composerChip.codexCredits": "Codex reset credits", // TODO translate
+  "settings.composerChips": "輸入工具列",
+  "settings.composerChipsHint": "已開啟的項目會依此處順序顯示在訊息旁。功能暫時無法使用時，例如智慧代理未執行、沒有背景工作或尚未完成登入，項目仍會顯示，但為空白或無法操作。目前智慧代理不支援的功能不顯示。空間不足時，無法容納的項目會移至「更多」選單。在此關閉的項目僅顯示於該選單中，仍可在此設定。",
+  "settings.composerChipUp": (chip: string) => `將${chip}上移`,
+  "settings.composerChipDown": (chip: string) => `將${chip}下移`,
+  "settings.composerChip.model": "模型",
+  "settings.composerChip.effort": "思考程度",
+  "settings.composerChip.collaboration": "協作模式",
+  "settings.composerChip.permission": "權限模式",
+  "settings.composerChip.fastMode": "快速模式",
+  "settings.composerChip.serviceTier": "速度",
+  "settings.composerChip.personality": "語氣",
+  "settings.composerChip.mcp": "MCP 伺服器",
+  "settings.composerChip.tasks": "背景工作",
+  "settings.composerChip.account": "帳戶",
+  "settings.composerChip.codexCredits": "Codex 額度重設券",
   "settings.fontDefault": "預設", // Default
   "settings.fontCustom": "自訂…", // Custom
   "settings.fontListUnavailable": "無法取得系統字型清單，可手動輸入字型名稱。",
@@ -669,6 +672,7 @@ const zhTW: typeof en = {
   "settings.scOpenProject": "開啟專案", // Open project
   "settings.scNewTab": "新增終端機", // New terminal
   "settings.scNewBrowserTab": "新增瀏覽器分頁", // New browser tab
+  "settings.scNewAgentSession": "建立智慧代理工作階段",
   "settings.scClosePane": "關閉窗格／分頁", // Close pane / tab
   "settings.scSplitRight": "向右分割", // Split right
   "settings.scSplitDown": "向下分割", // Split down
@@ -786,7 +790,7 @@ const zhTW: typeof en = {
   "tree.openNewTab": "在新分頁開啟", // Open in New Tab
   "tree.openSplitRight": "在右側分割開啟", // Open in Split Right
   "tree.openSplitDown": "在下方分割開啟", // Open in Split Down
-  "tree.openInFocusedPane": "在目前分割開啟", // Open in Focused Pane
+  "tree.openInFocusedPane": "在目前窗格開啟", // Open in Focused Pane
   "tree.tileSelected": "並排選取的會話", // Tile Selected Sessions
   "tree.tileSelectedTooMany": "並排選取的會話（最多 4 個）", // Tile Selected Sessions (up to 4)
   "tree.forkSession": "Fork 會話", // Fork Session
@@ -990,7 +994,7 @@ const zhTW: typeof en = {
   "importSessions.clearSearch": "清除搜尋",
   "importSessions.noHistory": "此專案目錄下沒有可匯入的歷史會話。",
   "importSessions.title": "匯入會話",
-  "importSessions.description": "尋找工作目錄與本專案一致的 Codex、Claude 和 OpenCode 歷史會話。選取並加入專案後，即可開啟並繼續對話。",
+  "importSessions.description": "尋找工作目錄與本專案一致的 Codex、Claude、OpenCode 和 Kiro 歷史會話。選取會話並加入專案後，即可開啟並繼續對話。目前僅支援檢視純文字的 Kiro 歷史記錄。",
   "importSessions.search": "搜尋標題、Agent 名稱或會話 ID",
   "importSessions.empty": "找不到符合條件的會話。",
   "importSessions.imported": "已匯入",
@@ -1233,7 +1237,7 @@ const zhTW: typeof en = {
   "files.deleteConfirm": (name) => `確定刪除「${name}」？此操作無法復原。`, // Delete "{name}"? This can't be undone.
 
   // ── File transfer (remote access) ──
-  "transfer.uploadsTitle": "上傳", // Uploads
+  "transfer.title": "傳輸", // Transfers
   "transfer.download": "下載", // Download
   "transfer.upload": "上傳檔案…", // Upload Files…
   "transfer.uploadTooltip": "把檔案上傳到這個目錄", // Upload files to this folder
@@ -1241,6 +1245,8 @@ const zhTW: typeof en = {
   "transfer.cancelled": "已取消", // Cancelled
   "transfer.failed": "失敗", // Failed
   "transfer.stalled": "正在重新連線…", // Reconnecting…
+  "transfer.downloading": "正在下載…", // Downloading…
+  "transfer.savedToDownloads": "已儲存至下載資料夾", // Saved to Downloads
   "transfer.foldersUnsupported": "資料夾傳不了。", // Folders can't be uploaded.
 
   // ── Status bar ──
@@ -1335,10 +1341,25 @@ const zhTW: typeof en = {
   "errlog.close": "關閉",
 
   // ── Mobile ──
-  "mobile.backConnections": "返回連線列表",
-  "mobile.loadSlow": "載入時間較長，你可以重試或返回連線列表。",
+  "agentPicker.title": "建立智慧代理工作階段",
+  "agentPicker.search": "搜尋智慧代理與預設",
+  "agentPicker.sibling": "同層級",
+  "agentPicker.child": "子工作階段",
+  "agentPicker.targetSibling": (session: string, location: string) => `在 ${location} 中建立與「${session}」同層級的工作階段。`,
+  "agentPicker.targetChild": (session: string, location: string) => `在 ${location} 的「${session}」下建立子工作階段。`,
+  "agentPicker.targetProject": (project: string) => `在 ${project} 中建立工作階段。`,
+  "agentPicker.noProject": "請選取或開啟專案，再建立智慧代理工作階段。",
+  "agentPicker.selectProject": "選取專案",
+  "agentPicker.recent": "上次使用",
+  "agentPicker.noResults": (query: string) => `找不到符合「${query}」的智慧代理或預設。`,
+  "agentPicker.loadFailed": "無法載入智慧代理與預設，請重試。",
+  "agentPicker.placementHint": "在搜尋欄中按 Tab 切換層級、↑/↓ 選取、Enter 建立；按 Esc 關閉。",
+  "agentPicker.invalidTarget": "所選群組或父工作階段已無法使用，請重新選取專案。",
+  "agentPicker.creating": "正在建立…",
+  "mobile.backConnections": "返回連線清單",
+  "mobile.loadSlow": "載入時間比預期長，可重試或返回連線清單。",
   "mobile.connectionUnavailable": "連線暫時無法使用",
-  "mobile.pushTitle": "任務通知",
+  "mobile.pushTitle": "工作通知",
   "mobile.pushHint": "通知會顯示工作階段名稱和簡短回覆摘要，支援前景、背景及鎖定畫面提醒。velaterm.com 和推播服務會接收這些文字，不會接收連線密碼或 SSH 私密金鑰。",
   "mobile.pushEnable": "開啟通知",
   "mobile.pushDisable": "關閉通知",
@@ -1353,71 +1374,70 @@ const zhTW: typeof en = {
   "mobile.pushHostUnavailable": "遠端尚未啟用背景通知，請更新遠端並重新連線。",
   "mobile.pushDisclosure": "背景通知使用個推和裝置製造商的推播服務。為了傳送通知，這些服務會處理裝置識別碼、網路資訊、工作階段名稱和簡短回覆摘要，不會接收連線密碼或 SSH 私密金鑰。",
   "mobile.pushConnectHint": "開啟後，請分別開啟需要接收提醒的連線，完成通知訂閱。",
-  "mobile.pushTarget": "測試連線",
+  "mobile.pushTarget": "接收測試通知的連線",
   "mobile.copyConnection": "複製並編輯",
-  "mobile.copyConnectionHint": "以此連線為基礎修改設定，安全沿用已儲存的憑證。原連線保持不變；設定完全相同時，仍只保留一份。",
+  "mobile.copyConnectionHint": "以此連線為基礎修改設定，安全沿用已儲存的認證資訊。原連線保持不變；設定完全相同時，沿用現有連線。",
   "mobile.copyConnectionReused": "此設定已儲存，已保留現有連線。",
   "mobile.inputOptions": "輸入選項",
   "mobile.connections": "連線管理",
   "mobile.more": "更多操作",
   "mobile.toDesktop": "切換到桌面版", // Switch to desktop
-  "mobile.empty1": "暫無會話。", // No sessions.
-  "mobile.noMatch": "沒有符合的會話", // No matching sessions
-  "mobile.empty2": "在桌面端或電腦瀏覽器端建立後，這裡會自動出現。", // Create one on the desktop app or a computer browser…
+  "mobile.empty1": "尚無工作階段。", // No sessions.
+  "mobile.noMatch": "沒有符合的工作階段", // No matching sessions
+  "mobile.empty2": "在桌面應用程式或電腦瀏覽器中建立工作階段後，此處會自動顯示。", // Create one on the desktop app or a computer browser…
   "mobile.back": "‹ 返回", // ‹ Back
   "mobile.selCopy": "複製", // Copy
   "mobile.selCancel": "取消", // Cancel
 
   // ── Mobile connection client (apps/mobile start page) ──
-  "mobile.phaseConnecting": "正在建立 SSH 連線…", // Connecting over SSH…
+  "mobile.phaseConnecting": "正在透過 SSH 連線…", // Connecting over SSH…
   "mobile.phaseConfirming": "請確認主機指紋", // Confirm the host fingerprint
   "mobile.phasePreparing": "正在檢查或準備遠端服務…", // Checking or preparing the remote service…
-  "mobile.phaseForwarding": "正在建立 SSH 隧道…", // Opening the SSH tunnel…
-  "mobile.phaseReady": "連線已建立", // Connected
+  "mobile.phaseForwarding": "正在建立 SSH 通道…", // Opening the SSH tunnel…
+  "mobile.phaseReady": "已連線", // Connected
   "mobile.phaseDisconnected": "連線已中斷", // Disconnected
   "mobile.phaseError": "連線失敗", // Connection failed
-  "mobile.accountAndLogin": "帳號與登入", // Account and sign-in
-  "mobile.connectionService": "連線服務", // Connection service unavailable
-  "mobile.nativeOnly": "請在 iOS 或 Android App 中使用連線功能。瀏覽器僅用於檢查介面。", // Connecting is only available in the iOS or Android app. The browser is only for previewing the interface.
+  "mobile.accountAndLogin": "帳戶與登入", // Account and sign-in
+  "mobile.connectionService": "連線服務無法使用", // Connection service unavailable
+  "mobile.nativeOnly": "連線功能僅限 iOS 或 Android 應用程式使用，瀏覽器僅支援預覽介面。", // Connecting is only available in the iOS or Android app. The browser is only for previewing the interface.
   "mobile.managedRemotely": "專案與工作階段由遠端服務管理。", // Projects and sessions are managed by the remote service.
-  "mobile.buildInfo": (version: string, time: string) => `App v${version} · 建置 ${time}`,
+  "mobile.buildInfo": (version: string, time: string) => `應用程式 v${version} · 建置時間 ${time}`,
   "mobile.myDevices": "我的裝置", // My devices
-  "mobile.account": "帳號", // Account
-  "mobile.signedInHint": "已登入。可查看同帳號裝置共享的空間、專案和工作階段。", // Signed in. You can view the workspaces, projects, and sessions shared by devices on this account.
-  "mobile.manageAccount": "管理帳號", // Manage account
+  "mobile.account": "帳戶", // Account
+  "mobile.signedInHint": "已登入，可查看此帳戶下裝置共用的工作空間、專案和工作階段。", // Signed in. You can view the workspaces, projects, and sessions shared by devices on this account.
+  "mobile.manageAccount": "管理帳戶", // Manage account
   "mobile.signOut": "登出", // Sign out
   "mobile.viewMyDevices": "查看我的裝置", // View my devices
-  "mobile.noDevices": "此帳號尚未登入任何裝置。", // No devices are signed in to this account yet.
+  "mobile.noDevices": "尚無裝置登入此帳戶。", // No devices are signed in to this account yet.
   "mobile.online": "線上", // Online
   "mobile.offline": "離線", // Offline
-  "mobile.deviceNotSharing": "此裝置尚未共享內容。", // The device is not sharing anything yet.
+  "mobile.deviceNotSharing": "此裝置尚未共用內容。", // The device is not sharing anything yet.
   "mobile.scopeMachine": "整個工作空間", // Entire workspace
   "mobile.scopeProject": "專案", // Project
   "mobile.scopeSession": "工作階段", // Session
-  "mobile.sharingNotReady": "共享內容尚未就緒，請在該裝置上檢查共享設定。", // Shared content is not ready yet. Check the sharing settings on that device.
+  "mobile.sharingNotReady": "共用內容尚未就緒，請在該裝置上檢查共用設定。", // Shared content is not ready yet. Check the sharing settings on that device.
   "mobile.deviceOffline": "裝置已離線，請在該裝置上開啟 VelaTerm 並保持網路連線。", // The device is offline. Open VelaTerm on that device and keep it connected to the network.
-  "mobile.viewShared": "查看共享內容 →", // View shared content →
-  "mobile.devicesUnavailable": "無法取得裝置列表，請重試。", // Could not load the device list. Please try again.
-  "mobile.accountUnavailable": "無法取得帳號狀態，請檢查網路後重試。", // Could not load the account status. Check your network and try again.
+  "mobile.viewShared": "查看共用內容 →", // View shared content →
+  "mobile.devicesUnavailable": "無法取得裝置清單，請重試。", // Could not load the device list. Please try again.
+  "mobile.accountUnavailable": "無法取得帳戶狀態，請檢查網路連線後重試。", // Could not load the account status. Check your network and try again.
   "mobile.signInTitle": "登入 VelaTerm", // Sign in to VelaTerm
-  "mobile.signInHint": "透過電子郵件密碼或第三方帳號登入，查看你的裝置和共享內容。", // Sign in with your email and password or a third-party account to see your devices and shared content.
+  "mobile.signInHint": "使用電子郵件和密碼或第三方帳戶登入，查看你的裝置和共用內容。", // Sign in with your email and password or a third-party account to see your devices and shared content.
   "mobile.signIn": "登入", // Sign in
-  "mobile.checkSignIn": "檢查登入結果", // Check sign-in status
+  "mobile.checkSignIn": "檢查登入狀態", // Check sign-in status
   "mobile.waitingSignIn": "正在等待登入確認…", // Waiting for sign-in confirmation…
   "mobile.workspaceTitle": "你的工作空間", // Your workspace
-  "mobile.workspaceHint": "連線至遠端主機，繼續專案中的工作。", // Connect to a remote host and pick up where you left off.
+  "mobile.workspaceHint": "連線至遠端主機，繼續工作。", // Connect to a remote host and pick up where you left off.
   "mobile.newSsh": "＋ SSH 連線", // + SSH connection
   "mobile.newUrl": "＋ URL 連線", // + URL connection
-  "mobile.remote": "Remote", // My devices
   "mobile.scanToConnect": "掃碼連線", // Scan QR code to connect
-  "mobile.noConnections": "尚未儲存連線。可新增 SSH、URL 連線，或透過 Remote 查看同帳號裝置的共享內容。", // No saved connections yet. Add an SSH or URL connection, or open Remote to see content shared by devices on your account.
+  "mobile.noConnections": "尚未儲存連線。可新增 SSH 或 URL 連線，或開啟「我的裝置」查看同帳戶裝置共用的內容。", // No saved connections yet. Add an SSH or URL connection, or open My devices to see content shared by devices on your account.
   "mobile.tapToConnect": "點選連線 →", // Tap to connect →
-  "mobile.webPasswordSaved": "服務密碼已儲存", // Access password saved
+  "mobile.webPasswordSaved": "服務存取密碼已儲存", // Access password saved
   "mobile.deleteConnectionTitle": "刪除連線", // Delete connection
-  "mobile.deleteConnectionConfirm": (name: string) => `刪除「${name}」及其儲存的憑證？遠端專案不會被刪除。`,
+  "mobile.deleteConnectionConfirm": (name: string) => `刪除「${name}」及其儲存的認證資訊？遠端專案不會被刪除。`,
   "mobile.connectionMissing": "連線不存在", // Connection not found
   "mobile.editConnection": "編輯連線", // Edit connection
-  "mobile.addSshHost": "新增 SSH 主機", // Add SSH connection
+  "mobile.addSshHost": "新增 SSH 連線", // Add SSH connection
   "mobile.addUrlConnection": "新增 URL 連線", // Add URL connection
   "mobile.connectionName": "連線名稱", // Connection name
   "mobile.serviceUrl": "服務位址", // Service address
@@ -1425,12 +1445,12 @@ const zhTW: typeof en = {
   "mobile.openingCamera": "正在開啟相機…", // Opening the camera…
   "mobile.scanCancelled": "已取消掃碼", // Scan cancelled
   "mobile.scanDone": "已辨識服務位址，請確認後儲存並連線。", // Service address detected. Check it, then save and connect.
-  "mobile.scanNativeOnly": "請在手機 App 中使用相機掃碼。", // QR scanning is only available in the iOS or Android app.
-  "mobile.webPasswordOptional": "服務密碼（選填）", // Access password (optional)
-  "mobile.keepPassword": "留空保留原密碼", // Leave empty to keep the current password
-  "mobile.webPasswordLater": "也可進入網頁後登入", // You can also enter it after connecting
-  "mobile.webPasswordSavedHint": "服務密碼已儲存，重新連線時會自動使用。留空不會清除已儲存的密碼。", // The access password is saved and used automatically when you reconnect. Leaving the field empty keeps the saved password.
-  "mobile.webPasswordStorageHint": "密碼儲存在手機安全儲存空間中，也可在登入時選擇記住密碼。", // The password is kept in the phone’s secure storage. You can also choose to remember it when you enter it after connecting.
+  "mobile.scanNativeOnly": "掃碼功能僅限 iOS 或 Android 應用程式使用。", // QR scanning is only available in the iOS or Android app.
+  "mobile.webPasswordOptional": "服務存取密碼（選填）", // Access password (optional)
+  "mobile.keepPassword": "留空保留目前的密碼", // Leave empty to keep the current password
+  "mobile.webPasswordLater": "也可在連線後輸入", // You can also enter it after connecting
+  "mobile.webPasswordSavedHint": "服務存取密碼已儲存，重新連線時會自動使用。留空不會清除已儲存的密碼。", // The access password is saved and used automatically when you reconnect. Leaving the field empty keeps the saved password.
+  "mobile.webPasswordStorageHint": "密碼儲存在手機的安全儲存空間中，也可在連線後輸入密碼時選擇記住密碼。", // The password is kept in the phone’s secure storage. You can also choose to remember it when you enter it after connecting.
   "mobile.sshHost": "SSH 主機", // SSH host
   "mobile.sshHostPlaceholder": "主機名稱或 IP 位址", // Hostname or IP address
   "mobile.sshPort": "SSH 連接埠", // SSH port
@@ -1441,27 +1461,27 @@ const zhTW: typeof en = {
   "mobile.authKey": "私密金鑰（OpenSSH Ed25519）", // Private key (OpenSSH Ed25519)
   "mobile.sshPassword": "SSH 密碼", // SSH password
   "mobile.privateKey": "私密金鑰", // Private key
-  "mobile.keepPrivateKey": "留空保留已儲存私密金鑰", // Leave empty to keep the saved private key
+  "mobile.keepPrivateKey": "留空保留已儲存的私密金鑰", // Leave empty to keep the saved private key
   "mobile.pastePrivateKey": "貼上 OpenSSH 私密金鑰", // Paste an OpenSSH private key
   "mobile.passphraseOptional": "私密金鑰通關密語（選填）", // Key passphrase (optional)
-  "mobile.keepPassphrase": "留空保留原通關密語", // Leave empty to keep the current passphrase
-  "mobile.sshSecretSavedHint": "SSH 憑證已儲存在手機安全儲存空間中，編輯時留空即可保留。", // SSH credentials are kept in the phone’s secure storage. Leave the fields empty while editing to keep them.
+  "mobile.keepPassphrase": "留空保留目前的通關密語", // Leave empty to keep the current passphrase
+  "mobile.sshSecretSavedHint": "SSH 認證資訊已儲存在手機的安全儲存空間中，編輯時留空即可保留。", // SSH credentials are kept in the phone’s secure storage. Leave the fields empty while editing to keep them.
   "mobile.remoteService": "遠端服務", // Remote service
   "mobile.serviceAuto": "自動尋找 VelaTerm 服務", // Find the VelaTerm service automatically
   "mobile.serviceManual": "指定既有服務連接埠", // Use an existing service port
   "mobile.remotePort": "遠端回送 HTTP 服務連接埠", // Remote loopback HTTP port
-  "mobile.webPasswordAutoHint": "服務密碼已儲存，重新連線時會自動使用。", // The access password is saved and used automatically when you reconnect.
-  "mobile.prepareService": "沒有可用服務時，允許下載並啟動 VelaTerm 服務", // Download and start the VelaTerm service when none is available
-  "mobile.prepareServiceHint": "自動準備會在遠端 ~/.velaterm/ 寫入經過簽章驗證的程式、設定和日誌，並保留執行服務。需要 Python 3 和支援 Ed25519 的 OpenSSL；重複使用既有服務或指定連接埠不需要安裝這些工具。", // Automatic preparation writes a signature-verified binary, configuration, and logs to ~/.velaterm/ on the remote host and keeps the service running. It needs Python 3 and an OpenSSL with Ed25519 support; reusing an existing service or specifying its port does not.
+  "mobile.webPasswordAutoHint": "服務存取密碼已儲存，重新連線時會自動使用。", // The access password is saved and used automatically when you reconnect.
+  "mobile.prepareService": "沒有可用服務時，下載並啟動 VelaTerm 服務", // Download and start the VelaTerm service when none is available
+  "mobile.prepareServiceHint": "自動準備會在遠端主機的 ~/.velaterm/ 中寫入經過簽章驗證的程式、設定和日誌，並讓服務持續執行。此程序需要 Python 3 和支援 Ed25519 的 OpenSSL；重複使用既有服務或指定其連接埠不需要這些工具。", // Automatic preparation writes a signature-verified binary, configuration, and logs to ~/.velaterm/ on the remote host and keeps the service running. It needs Python 3 and an OpenSSL with Ed25519 support; reusing an existing service or specifying its port does not.
   "mobile.saveConnection": "儲存連線", // Save connection
   "mobile.saveAndConnect": "儲存並連線", // Save and connect
-  "mobile.loginOpening": "正在開啟登入視窗…", // Opening the sign-in page in your browser…
-  "mobile.loginFinishInBrowser": "請在登入視窗中完成登入，然後返回 App。", // Complete the sign-in in the browser window, then return to the app.
-  "mobile.loginChecking": "正在檢查登入結果…", // Checking sign-in status…
+  "mobile.loginOpening": "正在瀏覽器中開啟登入頁面…", // Opening the sign-in page in your browser…
+  "mobile.loginFinishInBrowser": "請在瀏覽器視窗中完成登入，然後返回應用程式。", // Complete the sign-in in the browser window, then return to the app.
+  "mobile.loginChecking": "正在檢查登入狀態…", // Checking sign-in status…
   "mobile.loginSuccess": "登入成功。", // Signed in.
-  "mobile.loginWaiting": "等待登入確認。完成後將自動更新帳號和裝置列表。", // Waiting for sign-in confirmation. Your account and device list update automatically once sign-in completes.
-  "mobile.loginExpired": "登入請求已失效，請重新登入。", // The sign-in request has expired. Please sign in again.
-  "mobile.loginRetrying": "暫時無法連線至帳號服務，正在重試。無需重新登入。", // The account service is temporarily unreachable. Retrying. You do not need to sign in again.
+  "mobile.loginWaiting": "正在等待登入確認。完成後將自動更新帳戶和裝置清單。", // Waiting for sign-in confirmation. Your account and device list update automatically once sign-in completes.
+  "mobile.loginExpired": "登入請求已過期，請重新登入。", // The sign-in request has expired. Please sign in again.
+  "mobile.loginRetrying": "暫時無法連線至帳戶服務，正在重試。無需重新登入。", // The account service is temporarily unreachable. Retrying. You do not need to sign in again.
 
   // ── Other shared components ──
   "splitter.dragToResize": "拖曳調整大小", // Drag to resize
@@ -1690,16 +1710,17 @@ const zhTW: typeof en = {
   "chat.attach.tooLarge": (name: string, mb: number) => `${name} 超過 ${mb} MB，未加入附件`,
   "chat.attach.unreadable": (name: string) => `無法讀取 ${name}`,
   // ── Shell mode: `!` runs a command in the session's shell ──
-  "chat.shell.title": "Shell command", // TODO translate
-  "chat.shell.running": "Running…", // TODO translate
-  "chat.shell.cancel": "Cancel", // TODO translate
-  "chat.shell.cancelled": "Cancelled", // TODO translate
-  "chat.shell.exitCode": (code: number) => `Exit code ${code}`, // TODO translate
-  "chat.shell.stderr": "stderr", // TODO translate
-  "chat.shell.truncated": "Earlier output was cut; only the last part is kept", // TODO translate
-  "chat.shell.emptyCommand": "Type a command after ! to run it in the shell", // TODO translate
-  "chat.shell.noImages": "Shell commands cannot carry images. Remove the attachment or send it as a message.", // TODO translate
-  "chat.shell.alreadyRunning": "A shell command is still running in this conversation. Cancel it or wait for it to finish.", // TODO translate
+  "chat.shell.title": "Shell 指令",
+  "chat.shell.running": "執行中…",
+  "chat.shell.cancel": "取消",
+  "chat.shell.cancelled": "已取消",
+  "chat.shell.exitCode": (code: number) => `結束代碼 ${code}`,
+  "chat.shell.stderr": "stderr",
+  "chat.shell.truncated": "較早的輸出已截斷，僅保留最新部分。",
+  "chat.shell.outputIncomplete": "部分輸出串流尚未關閉時，已停止擷取，輸出可能不完整。",
+  "chat.shell.emptyCommand": "在 ! 後輸入要在 Shell 中執行的指令。",
+  "chat.shell.noImages": "Shell 指令無法附加圖片。請移除附件，或將其作為訊息傳送。",
+  "chat.shell.alreadyRunning": "此對話中仍有 Shell 指令正在執行。請取消該指令，或等待執行結束。",
   // Compacting the conversation… / Context compacted / Context compacted automatically
   "chat.compaction.running": "正在壓縮上下文…",
   "chat.compaction.manual": "上下文已壓縮",
@@ -1842,30 +1863,31 @@ const zhTW: typeof en = {
   "chat.tasks.backgroundAll": "將執行中的作業移至背景",
   "chat.tasks.none": "沒有背景工作",
   "chat.tasks.stop": "停止",
-  "chat.chipAgentNotRunning": "The agent process is not running. Send a message to start it.", // TODO translate
-  "chat.tasks.open": "Open task", // TODO translate
-  "chat.tasks.tabTooltip": "Background task", // TODO translate
-  "chat.tasks.status.running": "Running", // TODO translate
-  "chat.tasks.status.completed": "Completed", // TODO translate
-  "chat.tasks.status.failed": "Failed", // TODO translate
-  "chat.tasks.status.canceled": "Stopped", // TODO translate
-  "chat.tasks.status.ended": "Ended", // TODO translate
-  "chat.tasks.stale": "No longer reported by the agent", // TODO translate
-  "chat.tasks.elapsed": "Elapsed", // TODO translate
-  "chat.tasks.tokens": "Tokens", // TODO translate
-  "chat.tasks.toolUses": "Tool calls", // TODO translate
-  "chat.tasks.currentAgent": "Current agent", // TODO translate
-  "chat.tasks.started": "Started", // TODO translate
-  "chat.tasks.finished": "Finished", // TODO translate
-  "chat.tasks.summary": "Summary", // TODO translate
-  "chat.tasks.outputFile": "Output file", // TODO translate
-  "chat.tasks.phases": "Phases", // TODO translate
-  "chat.tasks.noProgress": "This task reports no per-agent progress.", // TODO translate
-  "chat.tasks.attempt": (n: number) => `attempt ${n}`, // TODO translate
-  "chat.tasks.prompt": "Prompt", // TODO translate
-  "chat.tasks.result": "Result", // TODO translate
-  "chat.tasks.agentState.start": "running", // TODO translate
-  "chat.tasks.agentState.done": "done", // TODO translate
+  "chat.chipAgentNotRunning": "智慧代理程序尚未執行。傳送訊息即可啟動。",
+  "chat.tasks.open": "開啟工作",
+  "chat.tasks.tabTooltip": "背景工作",
+  "chat.tasks.status.running": "執行中",
+  "chat.tasks.status.completed": "已完成",
+  "chat.tasks.status.failed": "失敗",
+  "chat.tasks.status.canceled": "已停止",
+  "chat.tasks.status.ended": "已結束",
+  "chat.tasks.stale": "智慧代理已不再回報此工作",
+  "chat.tasks.elapsed": "經過時間",
+  "chat.tasks.tokens": "Token 數",
+  "chat.tasks.toolUses": "工具呼叫次數",
+  "chat.tasks.lastTool": "最近回報的工具",
+  "chat.tasks.lastUpdatedAgent": "最近回報的智慧代理",
+  "chat.tasks.started": "開始時間",
+  "chat.tasks.finished": "結束時間",
+  "chat.tasks.summary": "摘要",
+  "chat.tasks.outputFile": "輸出檔案",
+  "chat.tasks.phases": "階段",
+  "chat.tasks.noProgress": "此工作未回報各智慧代理的進度。",
+  "chat.tasks.attempt": (n: number) => `第 ${n} 次嘗試`,
+  "chat.tasks.prompt": "提示詞",
+  "chat.tasks.result": "結果",
+  "chat.tasks.agentState.start": "執行中",
+  "chat.tasks.agentState.done": "已完成",
   "chat.retry.line": (attempt: number, max: number, seconds: number, message: string) =>
     `${seconds} 秒後重試（${attempt}/${max}）：${message}`,
   "chat.notify.dismiss": "關閉",
@@ -1879,93 +1901,106 @@ const zhTW: typeof en = {
   // Native texts of the mobile remote plugin (iOS, Android, download bridge). They reach the apps through native-text.json; {name} placeholders are replaced natively.
   "mobile.native.trustTitle": "確認遠端指紋",
   "mobile.native.trustChangedTitle": "遠端指紋已變更",
-  "mobile.native.trustBody": "{identity}\n\n{fingerprint}\n\n請與主機管理員核對。",
-  "mobile.native.trustChangedBody": "{identity}\n\n{fingerprint}\n\n請與主機管理員核對。原有的信任記錄將被取代。",
-  "mobile.native.trustAccept": "確認並信任",
+  "mobile.native.trustBody": "{identity}\n\n{fingerprint}\n\n繼續前，請與主機管理員核對此指紋。",
+  "mobile.native.trustChangedBody": "{identity}\n\n{fingerprint}\n\n此指紋與先前信任的指紋不同。繼續前，請與主機管理員核對。先前信任的指紋將被取代。",
+  "mobile.native.trustAccept": "信任並繼續",
   "mobile.native.tlsIdentity": "HTTPS 憑證 · {identity}",
   "mobile.native.ok": "確定",
   "mobile.native.reconnect": "重新連線",
   "mobile.native.switchConnection": "切換連線",
   "mobile.native.currentServer": "目前伺服器",
-  "mobile.native.navigationBlocked": "已阻止離開目前服務的導覽：{host}",
-  "mobile.native.pageUnavailable": "遠端頁面暫時無法使用（HTTP {code}），請重試或返回連線列表。",
-  "mobile.native.pageLoadFailed": "無法載入遠端頁面，請檢查網路後重試，或返回連線列表。",
-  "mobile.native.pageLoadFailedReason": "無法載入遠端頁面，請檢查網路後重試，或返回連線列表。\n\n{reason}\n{domain} {code}",
-  "mobile.native.pageTerminated": "頁面已停止運作，請重新連線，或返回連線列表。",
-  "mobile.native.certificateRejected": "無法驗證遠端憑證，請重新連線，或返回連線列表。",
-  "mobile.native.webViewOutdated": "請更新 Android System WebView 後重試，或返回連線列表。",
+  "mobile.native.navigationBlocked": "已阻止前往目前服務以外的位址：{host}",
+  "mobile.native.pageUnavailable": "遠端頁面暫時無法使用（HTTP {code}）。請重試或返回連線清單。",
+  "mobile.native.pageLoadFailed": "無法載入遠端頁面。請檢查網路後重試，或返回連線清單。",
+  "mobile.native.pageLoadFailedReason": "無法載入遠端頁面。請檢查網路後重試，或返回連線清單。\n\n{reason}\n{domain} {code}",
+  "mobile.native.pageTerminated": "頁面已停止運作。請重新連線或返回連線清單。",
+  "mobile.native.certificateRejected": "無法驗證遠端憑證。請重新連線或返回連線清單。",
+  "mobile.native.webViewOutdated": "請更新 Android System WebView 後重試，或返回連線清單。",
   "mobile.native.downloadFailedTitle": "下載失敗",
-  "mobile.native.downloadRetry": "下載失敗，請重試",
-  "mobile.native.downloadTooLarge": "手機檔案匯出目前僅支援不超過 64 MB 的檔案",
+  "mobile.native.downloadRetry": "下載失敗，請重試。",
+  "mobile.native.downloadTooLarge": "行動裝置目前支援匯出不超過 64 MB 的檔案。",
   "mobile.native.downloadFileFailed": "檔案下載失敗，請重試。",
-  "mobile.native.downloadCreateFailed": "無法建立下載檔案",
-  "mobile.native.saveLocationFailed": "無法開啟儲存位置",
+  "mobile.native.downloadCreateFailed": "無法建立下載檔案。",
+  "mobile.native.saveLocationFailed": "無法開啟儲存位置。",
   "mobile.native.fileSaved": "檔案已儲存",
-  "mobile.native.fileSaveFailed": "檔案儲存失敗，請重試",
-  "mobile.native.savePickerFailed": "無法開啟檔案儲存介面",
-  "mobile.native.scanHint": "將 URL QR Code 對準取景框",
-  "mobile.native.scanPrompt": "掃描服務位址 QR Code；按返回鍵取消",
-  "mobile.native.scanBusy": "正在掃描，請先關閉目前的掃描視窗",
-  "mobile.native.scanUnavailable": "無法開啟掃描視窗，請返回連線首頁後重試",
-  "mobile.native.scannerNotReady": "掃描功能尚未就緒",
-  "mobile.native.scanCancelled": "掃描已取消",
-  "mobile.native.cameraPermissionDenied": "尚未開啟相機權限，請在系統設定中允許 VelaTerm 使用相機",
-  "mobile.native.cameraUnavailable": "無法使用相機，請檢查裝置與相機權限",
-  "mobile.native.cameraBusy": "相機無法使用，請關閉其他使用相機的應用程式後重試",
-  "mobile.native.qrOutputUnavailable": "此裝置無法辨識 QR Code",
-  "mobile.native.qrTypeUnavailable": "此裝置不支援 QR Code 辨識",
-  "mobile.native.qrTooLong": "QR Code 中的 URL 過長",
-  "mobile.native.qrInvalid": "QR Code 不是可用的服務位址，請掃描不含帳號密碼的 HTTPS URL",
+  "mobile.native.fileSaveFailed": "檔案儲存失敗，請重試。",
+  "mobile.native.savePickerFailed": "無法開啟檔案儲存對話框。",
+  "mobile.native.scanHint": "將相機對準 URL QR Code",
+  "mobile.native.scanPrompt": "掃描服務位址 QR Code。按返回鍵取消。",
+  "mobile.native.scanBusy": "正在掃描，請先關閉目前的掃描視窗。",
+  "mobile.native.scanUnavailable": "無法開啟掃描視窗，請返回連線清單後重試。",
+  "mobile.native.scannerNotReady": "掃描功能尚未就緒。",
+  "mobile.native.scanCancelled": "掃描已取消。",
+  "mobile.native.cameraPermissionDenied": "尚未允許存取相機。請在系統設定中允許 VelaTerm 使用相機。",
+  "mobile.native.cameraUnavailable": "無法使用相機，請檢查裝置與相機權限。",
+  "mobile.native.cameraBusy": "相機無法使用，請關閉其他使用相機的應用程式後重試。",
+  "mobile.native.qrOutputUnavailable": "此裝置無法辨識 QR Code。",
+  "mobile.native.qrTypeUnavailable": "此裝置不支援掃描 QR Code。",
+  "mobile.native.qrTooLong": "QR Code 中的 URL 過長。",
+  "mobile.native.qrInvalid": "QR Code 中沒有有效的服務位址。請掃描不含使用者名稱或密碼的 HTTPS URL。",
   "mobile.native.urlConnectionName": "URL 連線",
-  "mobile.native.keychainReadFailed": "無法讀取系統鑰匙圈（{code}）",
-  "mobile.native.keychainWriteFailed": "無法儲存系統鑰匙圈（{code}）",
-  "mobile.native.secureStorageWriteFailed": "無法儲存安全儲存空間",
-  "mobile.native.hostKeyUnreadable": "無法讀取主機公鑰",
-  "mobile.native.portRange": "連接埠必須介於 1 和 65535 之間",
-  "mobile.native.addressInvalid": "請輸入不含帳號密碼的 HTTP 或 HTTPS 位址",
-  "mobile.native.httpsRequired": "URL 連線請使用 HTTPS；HTTP 僅允許本機 SSH 通道",
-  "mobile.native.nameRequired": "請輸入連線名稱",
-  "mobile.native.sshHostInvalid": "請輸入有效的 SSH 主機和使用者名稱",
-  "mobile.native.sshHostNameInvalid": "請輸入有效的 SSH 主機名稱",
-  "mobile.native.sshUsernameRequired": "請輸入 SSH 使用者名稱",
-  "mobile.native.sshCredentialsRequired": "請輸入 SSH 密碼或私密金鑰",
-  "mobile.native.privateKeyRequired": "請輸入私密金鑰",
-  "mobile.native.sshPasswordRequired": "請輸入 SSH 密碼",
-  "mobile.native.serviceModeRequired": "請選擇服務連線方式",
-  "mobile.native.modeUnsupported": "不支援的連線方式",
-  "mobile.native.connectionMissing": "連線不存在",
-  "mobile.native.connectionConfigMissing": "缺少連線設定",
-  "mobile.native.connectionIdMissing": "缺少連線 ID",
-  "mobile.native.accountServiceUnavailable": "帳號服務無法使用，請重試",
-  "mobile.native.loginRequestExpired": "登入請求已失效，請重新登入。",
-  "mobile.native.sessionExpired": "登入已失效，請重新登入。",
-  "mobile.native.accountWindowBusy": "無法開啟帳號視窗，請先關閉目前的視窗",
-  "mobile.native.loginResponseInvalid": "無效的登入回應",
-  "mobile.native.loginRestart": "請重新發起登入",
-  "mobile.native.signInFirst": "請先登入",
-  "mobile.native.deviceInvalid": "無效的客戶端",
-  "mobile.native.grantInvalid": "無效的共用範圍",
-  "mobile.native.connectResponseInvalid": "無效的連線回應",
-  "mobile.native.remoteWindowFailed": "無法開啟遠端視窗",
-  "mobile.native.accountActionInvalid": "無效的帳號操作",
-  "mobile.native.accountAddressInvalid": "無效的帳號位址",
-  "mobile.native.loginRequestInvalid": "無效的登入請求",
-  "mobile.native.loginStateUpdateFailed": "無法更新登入狀態",
-  "mobile.native.loginFailed": "登入失敗",
-  "mobile.native.connectionFailed": "連線失敗",
-  "mobile.native.resourceMissing": "缺少遠端準備資源",
-  "mobile.native.hostKeyRejected": "未信任 SSH 主機指紋",
-  "mobile.native.rsaUnsupported": "目前的 iOS SSH 程式庫不支援 RSA SHA-2 驗證；請使用 Ed25519 私密金鑰或密碼",
-  "mobile.native.privateKeyUnreadable": "無法讀取私密金鑰；請檢查密碼。支援 OpenSSH Ed25519，私密金鑰加密格式為 AES-CTR",
-  "mobile.native.connectionCancelled": "連線已取消",
-  "mobile.native.sourceConnectionMissing": "來源連線已不存在，請返回連線清單後重試",
-  "mobile.native.pythonRequired": "遠端準備需要 Python 3；也可指定已執行服務的連接埠",
-  "mobile.native.localPortFailed": "無法分配 SSH 本機連接埠",
-  "mobile.native.healthCheckFailed": "遠端服務未通過健康檢查",
-  "mobile.native.connectionClosed": "連線已關閉",
-  "mobile.native.responseTooLarge": "遠端回應過大",
+  "mobile.native.keychainReadFailed": "無法讀取系統鑰匙圈（{code}）。",
+  "mobile.native.keychainWriteFailed": "無法儲存至系統鑰匙圈（{code}）。",
+  "mobile.native.secureStorageWriteFailed": "無法儲存至安全儲存空間。",
+  "mobile.native.hostKeyUnreadable": "無法讀取主機公鑰。",
+  "mobile.native.portRange": "連接埠必須介於 1 和 65535 之間。",
+  "mobile.native.addressInvalid": "請輸入不含使用者名稱或密碼的 HTTP 或 HTTPS 位址。",
+  "mobile.native.httpsRequired": "URL 連線請使用 HTTPS；HTTP 僅允許用於本機 SSH 通道。",
+  "mobile.native.nameRequired": "請輸入連線名稱。",
+  "mobile.native.sshHostInvalid": "請輸入有效的 SSH 主機和使用者名稱。",
+  "mobile.native.sshHostNameInvalid": "請輸入有效的 SSH 主機名稱。",
+  "mobile.native.sshUsernameRequired": "請輸入 SSH 使用者名稱。",
+  "mobile.native.sshCredentialsRequired": "請輸入 SSH 密碼或私密金鑰。",
+  "mobile.native.privateKeyRequired": "請輸入私密金鑰。",
+  "mobile.native.sshPasswordRequired": "請輸入 SSH 密碼。",
+  "mobile.native.serviceModeRequired": "請選擇服務連線方式。",
+  "mobile.native.modeUnsupported": "不支援此連線方式。",
+  "mobile.native.connectionMissing": "此連線不存在。",
+  "mobile.native.connectionConfigMissing": "缺少連線設定。",
+  "mobile.native.connectionIdMissing": "缺少連線 ID。",
+  "mobile.native.accountServiceUnavailable": "帳戶服務無法使用，請重試。",
+  "mobile.native.loginRequestExpired": "登入請求已過期，請重新登入。",
+  "mobile.native.sessionExpired": "登入狀態已過期，請重新登入。",
+  "mobile.native.accountWindowBusy": "無法開啟帳戶視窗，請先關閉目前的視窗。",
+  "mobile.native.loginResponseInvalid": "登入回應無效。",
+  "mobile.native.loginRestart": "請重新開始登入程序。",
+  "mobile.native.signInFirst": "請先登入。",
+  "mobile.native.deviceInvalid": "裝置 ID 無效。",
+  "mobile.native.grantInvalid": "共用範圍無效。",
+  "mobile.native.connectResponseInvalid": "連線回應無效。",
+  "mobile.native.remoteWindowFailed": "無法開啟遠端視窗。",
+  "mobile.native.accountActionInvalid": "帳戶操作無效。",
+  "mobile.native.accountAddressInvalid": "帳戶服務 URL 無效。",
+  "mobile.native.loginRequestInvalid": "登入請求無效。",
+  "mobile.native.loginStateUpdateFailed": "無法更新登入狀態。",
+  "mobile.native.loginFailed": "登入失敗。",
+  "mobile.native.connectionFailed": "連線失敗。",
+  "mobile.native.resourceMissing": "缺少遠端初始化所需的資源。",
+  "mobile.native.hostKeyRejected": "未信任 SSH 主機指紋。",
+  "mobile.native.rsaUnsupported": "iOS SSH 程式庫不支援 RSA SHA-2 驗證。請使用 Ed25519 私密金鑰或密碼。",
+  "mobile.native.privateKeyUnreadable": "無法讀取私密金鑰，請檢查金鑰密碼。支援 OpenSSH Ed25519 金鑰；加密金鑰須使用 AES-CTR。",
+  "mobile.native.connectionCancelled": "連線已取消。",
+  "mobile.native.sourceConnectionMissing": "來源連線已無法使用，請返回連線清單後重試。",
+  "mobile.native.pythonRequired": "遠端初始化需要 Python 3，也可指定已在執行的服務連接埠。",
+  "mobile.native.localPortFailed": "無法分配 SSH 本機連接埠。",
+  "mobile.native.healthCheckFailed": "遠端服務未通過健康檢查。",
+  "mobile.native.connectionClosed": "連線已關閉。",
+  "mobile.native.responseTooLarge": "遠端回應過大。",
+  "mobile.native.cameraUsageDescription": "VelaTerm 使用相機掃描服務位址的 QR Code。",
+  "mobile.native.localNetworkUsageDescription": "VelaTerm 連線至區域網路中的 VelaTerm 服務和 SSH 主機。",
 
 
+  "term.runs.label": "背景指令",
+  "term.runs.elapsed": (time) => `已執行 ${time}`,
+  "term.runs.viewLog": "日誌",
+  "term.runs.stop": "停止",
+  "term.runs.confirmStop": "確認停止",
+  "term.runs.stopFailed": "無法停止",
+  "term.runs.logTitle": (label) => `日誌：${label}`,
+  "term.runs.logRunning": "執行中",
+  "term.runs.logFinished": (code) => `已結束，結束代碼 ${code}`,
+  "term.runs.logEnded": "已結束",
+  "term.runs.logEmpty": "尚無輸出",
 };
 
 export default zhTW;

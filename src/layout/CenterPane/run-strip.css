@@ -1,0 +1,118 @@
+/* The row above a terminal listing the session's running vrun commands, and the log dialog it opens. */
+
+.run-strip {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  background: var(--bg-term);
+  font-size: 12px;
+  flex-shrink: 0;
+}
+
+.run-strip-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  height: 22px;
+}
+
+.run-strip-label {
+  font-weight: 600;
+  color: var(--text);
+  white-space: nowrap;
+}
+
+.run-strip-elapsed {
+  color: var(--text-dim);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.run-strip-command {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-faint);
+  font-family: var(--font-mono);
+}
+
+.run-strip-failure {
+  color: var(--red);
+  white-space: nowrap;
+}
+
+.run-strip-action {
+  flex-shrink: 0;
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.run-strip-action:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+
+.run-strip-action.is-confirming {
+  border-color: var(--red);
+  color: var(--red);
+}
+
+.run-log {
+  display: flex;
+  flex-direction: column;
+  width: min(880px, 90vw);
+  height: min(560px, 80vh);
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.run-log-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.run-log-title {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.run-log-status {
+  flex: 1;
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.run-log-text {
+  flex: 1;
+  margin: 0;
+  padding: 10px 14px;
+  overflow: auto;
+  background: var(--bg-term);
+  color: var(--text);
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.run-log-failure {
+  padding: 14px;
+  color: var(--red);
+}

@@ -3,7 +3,7 @@
 import type en from "./en";
 
 const fr: typeof en = {
-  "tree.newPlanExecuteSession": "Nouvelle session de planification et d’exécution…",
+  "tree.newPlanExecuteSession": "Nouvelle session planification/exécution…",
   "launch.splitTasks": "Diviser automatiquement en plusieurs tâches",
   "launch.splitTasksHint": "La session de planification propose des tâches indépendantes. Vérifiez les instructions, les agents, les modèles et l’effort de raisonnement avant de lancer l’exécution.",
   "launch.splitReview": "Vérifier les tâches à exécuter",
@@ -472,6 +472,9 @@ const fr: typeof en = {
   "spawn.launch": "Démarrer la session",
   "spawn.remaining": (n: number) => `${n} autres demandes à examiner`,
   "spawn.notifyTitle": "Session enfant en attente de confirmation",
+  "spawn.requestUnavailable": "Cette demande n’a pas d’identifiant. Reconnectez-vous pour la récupérer avant d’y répondre.",
+  "spawn.deliveryUncertain": "La tâche initiale a peut-être déjà été envoyée. Ouvrez la session existante pour vérifier son état avant de continuer. Elle ne sera pas renvoyée automatiquement.",
+  "spawn.confirmedChoices": "Ce démarrage a déjà été confirmé. Une nouvelle tentative utilisera la même session et les mêmes paramètres de démarrage.",
   "orch.title": "Démarrer plusieurs sessions",
   "orch.notifyTitle": "Démarrage groupé en attente de confirmation",
   "orch.coordinatorName": "État des sessions",
@@ -627,21 +630,21 @@ const fr: typeof en = {
   "settings.chatFont": "Police de la conversation",
   "settings.chatFontSize": "Taille de police de la conversation",
   "settings.chatLineHeight": "Interligne de la conversation",
-  "settings.composerChips": "Composer toolbar", // TODO translate
-  "settings.composerChipsHint": "Chips that are on always appear beside the message in this order, even while they have nothing to show: a chip whose feature is momentarily unavailable (no running agent process, no background tasks, an unresolved sign-in) is shown empty or disabled rather than hidden. Only a chip the current agent does not have at all is left out. When the chips do not fit, the ones that overflow move into a More menu together with the chips that are off. Chips that are off never appear in the row and stay available here and in that menu.", // TODO translate
-  "settings.composerChipUp": (chip: string) => `Move ${chip} up`, // TODO translate
-  "settings.composerChipDown": (chip: string) => `Move ${chip} down`, // TODO translate
-  "settings.composerChip.model": "Model", // TODO translate
-  "settings.composerChip.effort": "Thinking effort", // TODO translate
-  "settings.composerChip.collaboration": "Collaboration mode", // TODO translate
-  "settings.composerChip.permission": "Permission mode", // TODO translate
-  "settings.composerChip.fastMode": "Fast mode", // TODO translate
-  "settings.composerChip.serviceTier": "Speed", // TODO translate
-  "settings.composerChip.personality": "Tone", // TODO translate
-  "settings.composerChip.mcp": "MCP servers", // TODO translate
-  "settings.composerChip.tasks": "Background tasks", // TODO translate
-  "settings.composerChip.account": "Account", // TODO translate
-  "settings.composerChip.codexCredits": "Codex reset credits", // TODO translate
+  "settings.composerChips": "Barre d’outils de saisie",
+  "settings.composerChipsHint": "Les éléments activés s’affichent à côté du message dans l’ordre indiqué. Si une fonction est temporairement indisponible (agent arrêté, aucune tâche en arrière-plan ou connexion au compte en attente), son élément reste visible, mais vide ou désactivé. Les fonctions non prises en charge par l’agent actuel sont omises. Les éléments qui ne tiennent pas dans la barre passent dans le menu Plus. Les éléments désactivés ici apparaissent uniquement dans ce menu et restent configurables ici.",
+  "settings.composerChipUp": (chip: string) => `Monter ${chip}`,
+  "settings.composerChipDown": (chip: string) => `Descendre ${chip}`,
+  "settings.composerChip.model": "Modèle",
+  "settings.composerChip.effort": "Effort de réflexion",
+  "settings.composerChip.collaboration": "Mode de collaboration",
+  "settings.composerChip.permission": "Mode d’autorisation",
+  "settings.composerChip.fastMode": "Mode rapide",
+  "settings.composerChip.serviceTier": "Vitesse",
+  "settings.composerChip.personality": "Ton",
+  "settings.composerChip.mcp": "Serveurs MCP",
+  "settings.composerChip.tasks": "Tâches en arrière-plan",
+  "settings.composerChip.account": "Compte",
+  "settings.composerChip.codexCredits": "Crédits de réinitialisation Codex",
   "settings.fontDefault": "Default", // TODO translate
   "settings.fontCustom": "Custom…", // TODO translate
   "settings.fontListUnavailable": "Impossible de récupérer la liste des polices système. Vous pouvez saisir un nom de police manuellement.",
@@ -681,6 +684,7 @@ const fr: typeof en = {
   "settings.scOpenProject": "Ouvrir un projet", // Open project
   "settings.scNewTab": "Nouveau terminal", // New terminal
   "settings.scNewBrowserTab": "Nouvel onglet navigateur", // New browser tab
+  "settings.scNewAgentSession": "Nouvelle session d’agent",
   "settings.scClosePane": "Fermer le volet / l'onglet", // Close pane / tab
   "settings.scSplitRight": "Diviser à droite", // Split right
   "settings.scSplitDown": "Diviser en bas", // Split down
@@ -1013,7 +1017,7 @@ const fr: typeof en = {
   "importSessions.clearSearch": "Effacer la recherche",
   "importSessions.noHistory": "Aucune session antérieure trouvée pour le répertoire de ce projet.",
   "importSessions.title": "Importer des sessions",
-  "importSessions.description": "Recherchez les sessions Codex, Claude et OpenCode dont le répertoire de travail correspond à ce projet. Sélectionnez les sessions à ajouter au projet, puis ouvrez-en une pour reprendre la conversation.",
+  "importSessions.description": "Recherchez les sessions Codex, Claude, OpenCode et Kiro dont le répertoire de travail correspond à ce projet. Sélectionnez les sessions à ajouter au projet, puis ouvrez-en une pour reprendre la conversation. Pour Kiro, seuls les historiques contenant uniquement du texte peuvent être affichés pour le moment.",
   "importSessions.search": "Rechercher par titre, agent ou ID de session",
   "importSessions.empty": "Aucune session correspondante.",
   "importSessions.imported": "Déjà importée",
@@ -1284,7 +1288,7 @@ const fr: typeof en = {
     `Supprimer « ${name} » ? Cette action est irréversible.`, // Delete "{name}"? This can't be undone.
 
   // ── File transfer (remote access) ──
-  "transfer.uploadsTitle": "Envois", // Uploads
+  "transfer.title": "Transferts", // Transfers
   "transfer.download": "Télécharger", // Download
   "transfer.upload": "Envoyer des fichiers…", // Upload Files…
   "transfer.uploadTooltip": "Envoyer des fichiers dans ce dossier", // Upload files to this folder
@@ -1292,6 +1296,8 @@ const fr: typeof en = {
   "transfer.cancelled": "Annulé", // Cancelled
   "transfer.failed": "Échec", // Failed
   "transfer.stalled": "Reconnexion…", // Reconnecting…
+  "transfer.downloading": "Téléchargement…", // Downloading…
+  "transfer.savedToDownloads": "Enregistré dans Téléchargements", // Saved to Downloads
   "transfer.foldersUnsupported": "Les dossiers ne peuvent pas être envoyés.", // Folders can't be uploaded.
 
   // ── Status bar ──
@@ -1395,6 +1401,21 @@ const fr: typeof en = {
   "errlog.close": "Fermer", // Close
 
   // ── Mobile ──
+  "agentPicker.title": "Nouvelle session d’agent",
+  "agentPicker.search": "Rechercher des agents et des préréglages",
+  "agentPicker.sibling": "Même niveau",
+  "agentPicker.child": "Session enfant",
+  "agentPicker.targetSibling": (session: string, location: string) => `Créer au même niveau que « ${session} » dans ${location}.`,
+  "agentPicker.targetChild": (session: string, location: string) => `Créer sous « ${session} » dans ${location}.`,
+  "agentPicker.targetProject": (project: string) => `Créer dans ${project}.`,
+  "agentPicker.noProject": "Sélectionnez ou ouvrez un projet pour créer une session d’agent.",
+  "agentPicker.selectProject": "Sélectionner un projet",
+  "agentPicker.recent": "Dernier choix",
+  "agentPicker.noResults": (query: string) => `Aucun agent ni préréglage ne correspond à « ${query} ».`,
+  "agentPicker.loadFailed": "Impossible de charger les agents et les préréglages. Réessayez.",
+  "agentPicker.placementHint": "Dans la recherche : Tab change le niveau ; ↑/↓ sélectionne ; Enter crée. Esc ferme.",
+  "agentPicker.invalidTarget": "Le groupe ou la session parente sélectionnés ne sont plus disponibles. Sélectionnez à nouveau un projet.",
+  "agentPicker.creating": "Création en cours…",
   "mobile.backConnections": "Retour aux connexions",
   "mobile.loadSlow": "Le chargement prend plus de temps que prévu. Vous pouvez réessayer ou revenir à vos connexions.",
   "mobile.connectionUnavailable": "Connexion indisponible",
@@ -1424,105 +1445,104 @@ const fr: typeof en = {
   "mobile.empty1": "Aucune session.", // No sessions.
   "mobile.noMatch": "Aucune session correspondante", // No matching sessions
   "mobile.empty2":
-    "Créez-en une sur l'application bureau ou un navigateur d'ordinateur, elle apparaîtra ici automatiquement.", // Create one on the desktop app or a computer browser…
+    "Créez une session dans l’application de bureau ou dans le navigateur d’un ordinateur. Elle apparaîtra ici automatiquement.", // Create one on the desktop app or a computer browser…
   "mobile.back": "‹ Retour", // ‹ Back
   "mobile.selCopy": "Copier", // Copy
   "mobile.selCancel": "Annuler", // Cancel
 
   // ── Mobile connection client (apps/mobile start page) ──
-  "mobile.phaseConnecting": "Connecting over SSH…", // TODO translate
-  "mobile.phaseConfirming": "Confirm the host fingerprint", // TODO translate
-  "mobile.phasePreparing": "Checking or preparing the remote service…", // TODO translate
-  "mobile.phaseForwarding": "Opening the SSH tunnel…", // TODO translate
-  "mobile.phaseReady": "Connected", // TODO translate
-  "mobile.phaseDisconnected": "Disconnected", // TODO translate
-  "mobile.phaseError": "Connection failed", // TODO translate
-  "mobile.accountAndLogin": "Account and sign-in", // TODO translate
-  "mobile.connectionService": "Connection service unavailable", // TODO translate
-  "mobile.nativeOnly": "Connecting is only available in the iOS or Android app. The browser is only for previewing the interface.", // TODO translate
-  "mobile.managedRemotely": "Projects and sessions are managed by the remote service.", // TODO translate
-  "mobile.buildInfo": (version: string, time: string) => `App v${version} · Built ${time}`, // TODO translate
-  "mobile.myDevices": "My devices", // TODO translate
-  "mobile.account": "Account", // TODO translate
-  "mobile.signedInHint": "Signed in. You can view the workspaces, projects, and sessions shared by devices on this account.", // TODO translate
-  "mobile.manageAccount": "Manage account", // TODO translate
-  "mobile.signOut": "Sign out", // TODO translate
-  "mobile.viewMyDevices": "View my devices", // TODO translate
-  "mobile.noDevices": "No devices are signed in to this account yet.", // TODO translate
-  "mobile.online": "Online", // TODO translate
-  "mobile.offline": "Offline", // TODO translate
-  "mobile.deviceNotSharing": "The device is not sharing anything yet.", // TODO translate
-  "mobile.scopeMachine": "Entire workspace", // TODO translate
-  "mobile.scopeProject": "Project", // TODO translate
-  "mobile.scopeSession": "Session", // TODO translate
-  "mobile.sharingNotReady": "Shared content is not ready yet. Check the sharing settings on that device.", // TODO translate
-  "mobile.deviceOffline": "The device is offline. Open VelaTerm on that device and keep it connected to the network.", // TODO translate
-  "mobile.viewShared": "View shared content →", // TODO translate
-  "mobile.devicesUnavailable": "Could not load the device list. Please try again.", // TODO translate
-  "mobile.accountUnavailable": "Could not load the account status. Check your network and try again.", // TODO translate
-  "mobile.signInTitle": "Sign in to VelaTerm", // TODO translate
-  "mobile.signInHint": "Sign in with your email and password or a third-party account to see your devices and shared content.", // TODO translate
-  "mobile.signIn": "Sign in", // TODO translate
-  "mobile.checkSignIn": "Check sign-in status", // TODO translate
-  "mobile.waitingSignIn": "Waiting for sign-in confirmation…", // TODO translate
-  "mobile.workspaceTitle": "Your workspace", // TODO translate
-  "mobile.workspaceHint": "Connect to a remote host and pick up where you left off.", // TODO translate
-  "mobile.newSsh": "+ SSH connection", // TODO translate
-  "mobile.newUrl": "+ URL connection", // TODO translate
-  "mobile.remote": "My devices", // TODO translate
-  "mobile.scanToConnect": "Scan QR code to connect", // TODO translate
-  "mobile.noConnections": "No saved connections yet. Add an SSH or URL connection, or open Remote to see content shared by devices on your account.", // TODO translate
-  "mobile.tapToConnect": "Tap to connect →", // TODO translate
-  "mobile.webPasswordSaved": "Access password saved", // TODO translate
-  "mobile.deleteConnectionTitle": "Delete connection", // TODO translate
-  "mobile.deleteConnectionConfirm": (name: string) => `Delete “${name}” and its saved credentials? Remote projects are not deleted.`, // TODO translate
-  "mobile.connectionMissing": "Connection not found", // TODO translate
-  "mobile.editConnection": "Edit connection", // TODO translate
-  "mobile.addSshHost": "Add SSH connection", // TODO translate
-  "mobile.addUrlConnection": "Add URL connection", // TODO translate
-  "mobile.connectionName": "Connection name", // TODO translate
-  "mobile.serviceUrl": "Service address", // TODO translate
-  "mobile.scanToFill": "Fill in from QR code", // TODO translate
-  "mobile.openingCamera": "Opening the camera…", // TODO translate
-  "mobile.scanCancelled": "Scan cancelled", // TODO translate
-  "mobile.scanDone": "Service address detected. Check it, then save and connect.", // TODO translate
-  "mobile.scanNativeOnly": "QR scanning is only available in the iOS or Android app.", // TODO translate
-  "mobile.webPasswordOptional": "Access password (optional)", // TODO translate
-  "mobile.keepPassword": "Leave empty to keep the current password", // TODO translate
-  "mobile.webPasswordLater": "You can also enter it after connecting", // TODO translate
-  "mobile.webPasswordSavedHint": "The access password is saved and used automatically when you reconnect. Leaving the field empty keeps the saved password.", // TODO translate
-  "mobile.webPasswordStorageHint": "The password is kept in the phone’s secure storage. You can also choose to remember it when you enter it after connecting.", // TODO translate
-  "mobile.sshHost": "SSH host", // TODO translate
-  "mobile.sshHostPlaceholder": "Hostname or IP address", // TODO translate
-  "mobile.sshPort": "SSH port", // TODO translate
-  "mobile.username": "Username", // TODO translate
-  "mobile.authMethod": "Authentication", // TODO translate
-  "mobile.authPassword": "Password", // TODO translate
-  "mobile.authKeyAndroid": "Private key (OpenSSH Ed25519 / RSA)", // TODO translate
-  "mobile.authKey": "Private key (OpenSSH Ed25519)", // TODO translate
-  "mobile.sshPassword": "SSH password", // TODO translate
-  "mobile.privateKey": "Private key", // TODO translate
-  "mobile.keepPrivateKey": "Leave empty to keep the saved private key", // TODO translate
-  "mobile.pastePrivateKey": "Paste an OpenSSH private key", // TODO translate
-  "mobile.passphraseOptional": "Key passphrase (optional)", // TODO translate
-  "mobile.keepPassphrase": "Leave empty to keep the current passphrase", // TODO translate
-  "mobile.sshSecretSavedHint": "SSH credentials are kept in the phone’s secure storage. Leave the fields empty while editing to keep them.", // TODO translate
-  "mobile.remoteService": "Remote service", // TODO translate
-  "mobile.serviceAuto": "Find the VelaTerm service automatically", // TODO translate
-  "mobile.serviceManual": "Use an existing service port", // TODO translate
-  "mobile.remotePort": "Remote loopback HTTP port", // TODO translate
-  "mobile.webPasswordAutoHint": "The access password is saved and used automatically when you reconnect.", // TODO translate
-  "mobile.prepareService": "Download and start the VelaTerm service when none is available", // TODO translate
-  "mobile.prepareServiceHint": "Automatic preparation writes a signature-verified binary, configuration, and logs to ~/.velaterm/ on the remote host and keeps the service running. It needs Python 3 and an OpenSSL with Ed25519 support; reusing an existing service or specifying its port does not.", // TODO translate
-  "mobile.saveConnection": "Save connection", // TODO translate
-  "mobile.saveAndConnect": "Save and connect", // TODO translate
-  "mobile.loginOpening": "Opening the sign-in page in your browser…", // TODO translate
-  "mobile.loginFinishInBrowser": "Complete the sign-in in the browser window, then return to the app.", // TODO translate
-  "mobile.loginChecking": "Checking sign-in status…", // TODO translate
-  "mobile.loginSuccess": "Signed in.", // TODO translate
-  "mobile.loginWaiting": "Waiting for sign-in confirmation. Your account and device list update automatically once sign-in completes.", // TODO translate
-  "mobile.loginExpired": "The sign-in request has expired. Please sign in again.", // TODO translate
-  "mobile.loginRetrying": "The account service is temporarily unreachable. Retrying. You do not need to sign in again.", // TODO translate
+  "mobile.phaseConnecting": "Connexion SSH en cours…",
+  "mobile.phaseConfirming": "Confirmez l’empreinte de l’hôte",
+  "mobile.phasePreparing": "Vérification ou préparation du service distant…",
+  "mobile.phaseForwarding": "Ouverture du tunnel SSH…",
+  "mobile.phaseReady": "Connecté",
+  "mobile.phaseDisconnected": "Déconnecté",
+  "mobile.phaseError": "Échec de la connexion",
+  "mobile.accountAndLogin": "Compte et connexion",
+  "mobile.connectionService": "Service de connexion indisponible",
+  "mobile.nativeOnly": "Les connexions sont disponibles uniquement dans l’application iOS ou Android. Le navigateur permet seulement de prévisualiser l’interface.",
+  "mobile.managedRemotely": "Les projets et les sessions sont gérés par le service distant.",
+  "mobile.buildInfo": (version: string, time: string) => `Application v${version} · Compilée le ${time}`,
+  "mobile.myDevices": "Mes appareils",
+  "mobile.account": "Compte",
+  "mobile.signedInHint": "Vous êtes connecté. Vous pouvez consulter les espaces de travail, projets et sessions partagés par les appareils de ce compte.",
+  "mobile.manageAccount": "Gérer le compte",
+  "mobile.signOut": "Se déconnecter",
+  "mobile.viewMyDevices": "Voir mes appareils",
+  "mobile.noDevices": "Aucun appareil n’est encore connecté à ce compte.",
+  "mobile.online": "En ligne",
+  "mobile.offline": "Hors ligne",
+  "mobile.deviceNotSharing": "Cet appareil ne partage encore aucun contenu.",
+  "mobile.scopeMachine": "Tout l’espace de travail",
+  "mobile.scopeProject": "Projet",
+  "mobile.scopeSession": "Session",
+  "mobile.sharingNotReady": "Le contenu partagé n’est pas encore disponible. Vérifiez les paramètres de partage sur l’appareil concerné.",
+  "mobile.deviceOffline": "L’appareil est hors ligne. Ouvrez VelaTerm sur cet appareil et maintenez sa connexion au réseau.",
+  "mobile.viewShared": "Voir le contenu partagé →",
+  "mobile.devicesUnavailable": "Impossible de charger la liste des appareils. Réessayez.",
+  "mobile.accountUnavailable": "Impossible de charger l’état du compte. Vérifiez votre connexion réseau et réessayez.",
+  "mobile.signInTitle": "Se connecter à VelaTerm",
+  "mobile.signInHint": "Connectez-vous avec votre adresse e-mail et votre mot de passe ou avec un compte tiers pour voir vos appareils et le contenu partagé.",
+  "mobile.signIn": "Se connecter",
+  "mobile.checkSignIn": "Vérifier la connexion au compte",
+  "mobile.waitingSignIn": "En attente de confirmation de connexion…",
+  "mobile.workspaceTitle": "Votre espace de travail",
+  "mobile.workspaceHint": "Connectez-vous à un hôte distant pour poursuivre votre travail.",
+  "mobile.newSsh": "+ Connexion SSH",
+  "mobile.newUrl": "+ Connexion par URL",
+  "mobile.scanToConnect": "Scanner un code QR pour se connecter",
+  "mobile.noConnections": "Aucune connexion enregistrée pour le moment. Ajoutez une connexion SSH ou par URL, ou ouvrez Mes appareils pour voir le contenu partagé par les appareils de votre compte.",
+  "mobile.tapToConnect": "Toucher pour se connecter →",
+  "mobile.webPasswordSaved": "Mot de passe d’accès enregistré",
+  "mobile.deleteConnectionTitle": "Supprimer la connexion",
+  "mobile.deleteConnectionConfirm": (name: string) => `Supprimer « ${name} » et ses identifiants enregistrés ? Les projets distants ne seront pas supprimés.`,
+  "mobile.connectionMissing": "Connexion introuvable",
+  "mobile.editConnection": "Modifier la connexion",
+  "mobile.addSshHost": "Ajouter une connexion SSH",
+  "mobile.addUrlConnection": "Ajouter une connexion par URL",
+  "mobile.connectionName": "Nom de la connexion",
+  "mobile.serviceUrl": "Adresse du service",
+  "mobile.scanToFill": "Remplir à partir d’un code QR",
+  "mobile.openingCamera": "Ouverture de l’appareil photo…",
+  "mobile.scanCancelled": "Scan annulé",
+  "mobile.scanDone": "Adresse du service détectée. Vérifiez-la, puis enregistrez la connexion et connectez-vous.",
+  "mobile.scanNativeOnly": "Le scan de codes QR est disponible uniquement dans l’application iOS ou Android.",
+  "mobile.webPasswordOptional": "Mot de passe d’accès (facultatif)",
+  "mobile.keepPassword": "Laisser vide pour conserver le mot de passe actuel",
+  "mobile.webPasswordLater": "Vous pouvez aussi le saisir après la connexion",
+  "mobile.webPasswordSavedHint": "Le mot de passe d’accès est enregistré et sera utilisé automatiquement lors de la reconnexion. Laissez le champ vide pour conserver le mot de passe enregistré.",
+  "mobile.webPasswordStorageHint": "Le mot de passe est conservé dans le stockage sécurisé du téléphone. Vous pouvez aussi choisir de le mémoriser lorsque vous le saisissez après la connexion.",
+  "mobile.sshHost": "Hôte SSH",
+  "mobile.sshHostPlaceholder": "Nom d’hôte ou adresse IP",
+  "mobile.sshPort": "Port SSH",
+  "mobile.username": "Nom d’utilisateur",
+  "mobile.authMethod": "Authentification",
+  "mobile.authPassword": "Mot de passe",
+  "mobile.authKeyAndroid": "Clé privée (OpenSSH Ed25519 / RSA)",
+  "mobile.authKey": "Clé privée (OpenSSH Ed25519)",
+  "mobile.sshPassword": "Mot de passe SSH",
+  "mobile.privateKey": "Clé privée",
+  "mobile.keepPrivateKey": "Laisser vide pour conserver la clé privée enregistrée",
+  "mobile.pastePrivateKey": "Coller une clé privée OpenSSH",
+  "mobile.passphraseOptional": "Phrase secrète de la clé (facultatif)",
+  "mobile.keepPassphrase": "Laisser vide pour conserver la phrase secrète actuelle",
+  "mobile.sshSecretSavedHint": "Les identifiants SSH sont conservés dans le stockage sécurisé du téléphone. Laissez les champs vides lors de la modification pour les conserver.",
+  "mobile.remoteService": "Service distant",
+  "mobile.serviceAuto": "Rechercher automatiquement le service VelaTerm",
+  "mobile.serviceManual": "Utiliser le port d’un service existant",
+  "mobile.remotePort": "Port HTTP de boucle locale de l’hôte distant",
+  "mobile.webPasswordAutoHint": "Le mot de passe d’accès est enregistré et sera utilisé automatiquement lors de la reconnexion.",
+  "mobile.prepareService": "Télécharger et démarrer le service VelaTerm si aucun n’est disponible",
+  "mobile.prepareServiceHint": "La préparation automatique écrit un exécutable dont la signature a été vérifiée, la configuration et les journaux dans ~/.velaterm/ sur l’hôte distant, puis maintient le service en cours d’exécution. Elle nécessite Python 3 et OpenSSL avec prise en charge d’Ed25519 ; la réutilisation d’un service existant ou la spécification de son port ne nécessite pas ces outils.",
+  "mobile.saveConnection": "Enregistrer la connexion",
+  "mobile.saveAndConnect": "Enregistrer et se connecter",
+  "mobile.loginOpening": "Ouverture de la page de connexion dans le navigateur…",
+  "mobile.loginFinishInBrowser": "Terminez la connexion au compte dans la fenêtre du navigateur, puis revenez à l’application.",
+  "mobile.loginChecking": "Vérification de la connexion au compte…",
+  "mobile.loginSuccess": "Connexion au compte réussie.",
+  "mobile.loginWaiting": "En attente de confirmation de connexion. Votre compte et la liste des appareils seront mis à jour automatiquement une fois la connexion au compte terminée.",
+  "mobile.loginExpired": "La demande de connexion a expiré. Veuillez vous reconnecter.",
+  "mobile.loginRetrying": "Le service de comptes est temporairement inaccessible. Nouvelle tentative en cours. Vous n’avez pas besoin de vous reconnecter.",
 
   // ── Other shared components ──
   "splitter.dragToResize": "Glisser pour redimensionner", // Drag to resize
@@ -1756,16 +1776,17 @@ const fr: typeof en = {
   "chat.attach.tooLarge": (name: string, mb: number) => `${name} dépasse ${mb} Mo et n’a pas été joint`,
   "chat.attach.unreadable": (name: string) => `Impossible de lire ${name}`,
   // ── Shell mode: `!` runs a command in the session's shell ──
-  "chat.shell.title": "Shell command", // TODO translate
-  "chat.shell.running": "Running…", // TODO translate
-  "chat.shell.cancel": "Cancel", // TODO translate
-  "chat.shell.cancelled": "Cancelled", // TODO translate
-  "chat.shell.exitCode": (code: number) => `Exit code ${code}`, // TODO translate
-  "chat.shell.stderr": "stderr", // TODO translate
-  "chat.shell.truncated": "Earlier output was cut; only the last part is kept", // TODO translate
-  "chat.shell.emptyCommand": "Type a command after ! to run it in the shell", // TODO translate
-  "chat.shell.noImages": "Shell commands cannot carry images. Remove the attachment or send it as a message.", // TODO translate
-  "chat.shell.alreadyRunning": "A shell command is still running in this conversation. Cancel it or wait for it to finish.", // TODO translate
+  "chat.shell.title": "Commande shell",
+  "chat.shell.running": "En cours…",
+  "chat.shell.cancel": "Annuler",
+  "chat.shell.cancelled": "Annulée",
+  "chat.shell.exitCode": (code: number) => `Code de sortie ${code}`,
+  "chat.shell.stderr": "stderr",
+  "chat.shell.truncated": "Le début de la sortie a été tronqué. Seule la sortie la plus récente est conservée.",
+  "chat.shell.outputIncomplete": "La collecte s’est arrêtée avant la fermeture de tous les flux de sortie. La sortie peut être incomplète.",
+  "chat.shell.emptyCommand": "Saisissez une commande après ! pour l’exécuter dans le shell.",
+  "chat.shell.noImages": "Les commandes shell ne peuvent pas contenir d’images. Retirez la pièce jointe ou envoyez-la dans un message.",
+  "chat.shell.alreadyRunning": "Une commande shell est encore en cours dans cette conversation. Annulez-la ou attendez qu’elle se termine.",
   // Compacting the conversation… / Context compacted / Context compacted automatically
   "chat.compaction.running": "Compactage de la conversation…",
   "chat.compaction.manual": "Contexte compacté",
@@ -1909,30 +1930,31 @@ const fr: typeof en = {
   "chat.tasks.backgroundAll": "Passer le travail en cours en arrière-plan",
   "chat.tasks.none": "Aucune tâche en arrière-plan",
   "chat.tasks.stop": "Arrêter",
-  "chat.chipAgentNotRunning": "The agent process is not running. Send a message to start it.", // TODO translate
-  "chat.tasks.open": "Open task", // TODO translate
-  "chat.tasks.tabTooltip": "Background task", // TODO translate
-  "chat.tasks.status.running": "Running", // TODO translate
-  "chat.tasks.status.completed": "Completed", // TODO translate
-  "chat.tasks.status.failed": "Failed", // TODO translate
-  "chat.tasks.status.canceled": "Stopped", // TODO translate
-  "chat.tasks.status.ended": "Ended", // TODO translate
-  "chat.tasks.stale": "No longer reported by the agent", // TODO translate
-  "chat.tasks.elapsed": "Elapsed", // TODO translate
-  "chat.tasks.tokens": "Tokens", // TODO translate
-  "chat.tasks.toolUses": "Tool calls", // TODO translate
-  "chat.tasks.currentAgent": "Current agent", // TODO translate
-  "chat.tasks.started": "Started", // TODO translate
-  "chat.tasks.finished": "Finished", // TODO translate
-  "chat.tasks.summary": "Summary", // TODO translate
-  "chat.tasks.outputFile": "Output file", // TODO translate
-  "chat.tasks.phases": "Phases", // TODO translate
-  "chat.tasks.noProgress": "This task reports no per-agent progress.", // TODO translate
-  "chat.tasks.attempt": (n: number) => `attempt ${n}`, // TODO translate
-  "chat.tasks.prompt": "Prompt", // TODO translate
-  "chat.tasks.result": "Result", // TODO translate
-  "chat.tasks.agentState.start": "running", // TODO translate
-  "chat.tasks.agentState.done": "done", // TODO translate
+  "chat.chipAgentNotRunning": "Le processus de l’agent n’est pas en cours d’exécution. Envoyez un message pour le démarrer.",
+  "chat.tasks.open": "Ouvrir la tâche",
+  "chat.tasks.tabTooltip": "Tâche en arrière-plan",
+  "chat.tasks.status.running": "En cours",
+  "chat.tasks.status.completed": "Terminée",
+  "chat.tasks.status.failed": "Échec",
+  "chat.tasks.status.canceled": "Arrêtée",
+  "chat.tasks.status.ended": "Fin d’exécution",
+  "chat.tasks.stale": "L’agent ne transmet plus d’informations sur cette tâche",
+  "chat.tasks.elapsed": "Temps écoulé",
+  "chat.tasks.tokens": "Tokens",
+  "chat.tasks.toolUses": "Appels d’outils",
+  "chat.tasks.lastTool": "Dernier outil signalé",
+  "chat.tasks.lastUpdatedAgent": "Dernier agent signalé",
+  "chat.tasks.started": "Début",
+  "chat.tasks.finished": "Fin",
+  "chat.tasks.summary": "Résumé",
+  "chat.tasks.outputFile": "Fichier de sortie",
+  "chat.tasks.phases": "Phases",
+  "chat.tasks.noProgress": "Cette tâche ne fournit pas la progression de chaque agent.",
+  "chat.tasks.attempt": (n: number) => `Tentative ${n}`,
+  "chat.tasks.prompt": "Instructions",
+  "chat.tasks.result": "Résultat",
+  "chat.tasks.agentState.start": "En cours",
+  "chat.tasks.agentState.done": "Terminé",
   "chat.retry.line": (attempt: number, max: number, seconds: number, message: string) =>
     `Nouvelle tentative (${attempt}/${max}) dans ${seconds} s : ${message}`,
   "chat.notify.dismiss": "Fermer",
@@ -1944,95 +1966,108 @@ const fr: typeof en = {
   "settings.completionHint": "S’applique aux nouveaux terminaux Zsh, Bash 4+, Fish et PowerShell. CMD conserve le comportement habituel de Tab. Tab insère la suggestion sélectionnée ; Entrée exécute la commande actuelle sans appliquer de suggestion.",
 
   // Native texts of the mobile remote plugin (iOS, Android, download bridge). They reach the apps through native-text.json; {name} placeholders are replaced natively.
-  "mobile.native.trustTitle": "Confirm remote fingerprint", // TODO translate
-  "mobile.native.trustChangedTitle": "Remote fingerprint has changed", // TODO translate
-  "mobile.native.trustBody": "{identity}\n\n{fingerprint}\n\nCheck this fingerprint with the host administrator before you continue.", // TODO translate
-  "mobile.native.trustChangedBody": "{identity}\n\n{fingerprint}\n\nThis fingerprint differs from the one you trusted before. Check it with the host administrator before you continue. The previously trusted fingerprint will be replaced.", // TODO translate
-  "mobile.native.trustAccept": "Trust and continue", // TODO translate
-  "mobile.native.tlsIdentity": "HTTPS certificate · {identity}", // TODO translate
-  "mobile.native.ok": "OK", // TODO translate
-  "mobile.native.reconnect": "Reconnect", // TODO translate
-  "mobile.native.switchConnection": "Switch connection", // TODO translate
-  "mobile.native.currentServer": "Current server", // TODO translate
-  "mobile.native.navigationBlocked": "Navigation away from the current service was blocked: {host}", // TODO translate
-  "mobile.native.pageUnavailable": "The remote page is temporarily unavailable (HTTP {code}). Retry or return to your connections.", // TODO translate
-  "mobile.native.pageLoadFailed": "The remote page could not be loaded. Check your network and retry, or return to your connections.", // TODO translate
-  "mobile.native.pageLoadFailedReason": "The remote page could not be loaded. Check your network and retry, or return to your connections.\n\n{reason}\n{domain} {code}", // TODO translate
-  "mobile.native.pageTerminated": "The page stopped running. Reconnect or return to your connections.", // TODO translate
-  "mobile.native.certificateRejected": "The remote certificate could not be verified. Reconnect or return to your connections.", // TODO translate
-  "mobile.native.webViewOutdated": "Update Android System WebView and try again, or return to your connections.", // TODO translate
-  "mobile.native.downloadFailedTitle": "Download failed", // TODO translate
-  "mobile.native.downloadRetry": "Download failed. Please try again.", // TODO translate
-  "mobile.native.downloadTooLarge": "File export on mobile currently supports files up to 64 MB.", // TODO translate
-  "mobile.native.downloadFileFailed": "The file could not be downloaded. Please try again.", // TODO translate
-  "mobile.native.downloadCreateFailed": "The download file could not be created.", // TODO translate
-  "mobile.native.saveLocationFailed": "The save location could not be opened.", // TODO translate
-  "mobile.native.fileSaved": "File saved", // TODO translate
-  "mobile.native.fileSaveFailed": "The file could not be saved. Please try again.", // TODO translate
-  "mobile.native.savePickerFailed": "The file save dialog could not be opened.", // TODO translate
-  "mobile.native.scanHint": "Point the camera at the URL QR code", // TODO translate
-  "mobile.native.scanPrompt": "Scan the service address QR code. Press Back to cancel.", // TODO translate
-  "mobile.native.scanBusy": "A scan is already in progress. Close the current scanner first.", // TODO translate
-  "mobile.native.scanUnavailable": "The scanner could not be opened. Return to the connections page and try again.", // TODO translate
-  "mobile.native.scannerNotReady": "The scanner is not ready yet.", // TODO translate
-  "mobile.native.scanCancelled": "Scan cancelled.", // TODO translate
-  "mobile.native.cameraPermissionDenied": "Camera access is not allowed. Allow VelaTerm to use the camera in the system settings.", // TODO translate
-  "mobile.native.cameraUnavailable": "The camera cannot be used. Check the device and its camera permission.", // TODO translate
-  "mobile.native.cameraBusy": "The camera is unavailable. Close other apps that use the camera and try again.", // TODO translate
-  "mobile.native.qrOutputUnavailable": "This device cannot read QR codes.", // TODO translate
-  "mobile.native.qrTypeUnavailable": "This device does not support QR code scanning.", // TODO translate
-  "mobile.native.qrTooLong": "The URL in the QR code is too long.", // TODO translate
-  "mobile.native.qrInvalid": "The QR code is not a usable service address. Scan an HTTPS URL without a username or password.", // TODO translate
-  "mobile.native.urlConnectionName": "URL connection", // TODO translate
-  "mobile.native.keychainReadFailed": "The system keychain could not be read ({code}).", // TODO translate
-  "mobile.native.keychainWriteFailed": "The system keychain could not be saved ({code}).", // TODO translate
-  "mobile.native.secureStorageWriteFailed": "The secure storage could not be saved.", // TODO translate
-  "mobile.native.hostKeyUnreadable": "The host public key could not be read.", // TODO translate
-  "mobile.native.portRange": "The port must be between 1 and 65535.", // TODO translate
-  "mobile.native.addressInvalid": "Enter an HTTP or HTTPS address without a username or password.", // TODO translate
-  "mobile.native.httpsRequired": "Use HTTPS for URL connections. HTTP is only allowed for a local SSH tunnel.", // TODO translate
-  "mobile.native.nameRequired": "Enter a connection name.", // TODO translate
-  "mobile.native.sshHostInvalid": "Enter a valid SSH host and username.", // TODO translate
-  "mobile.native.sshHostNameInvalid": "Enter a valid SSH host name.", // TODO translate
-  "mobile.native.sshUsernameRequired": "Enter the SSH username.", // TODO translate
-  "mobile.native.sshCredentialsRequired": "Enter the SSH password or a private key.", // TODO translate
-  "mobile.native.privateKeyRequired": "Enter the private key.", // TODO translate
-  "mobile.native.sshPasswordRequired": "Enter the SSH password.", // TODO translate
-  "mobile.native.serviceModeRequired": "Choose how to connect to the service.", // TODO translate
-  "mobile.native.modeUnsupported": "This connection type is not supported.", // TODO translate
-  "mobile.native.connectionMissing": "This connection does not exist.", // TODO translate
-  "mobile.native.connectionConfigMissing": "The connection settings are missing.", // TODO translate
-  "mobile.native.connectionIdMissing": "The connection ID is missing.", // TODO translate
-  "mobile.native.accountServiceUnavailable": "The account service is unavailable. Please try again.", // TODO translate
-  "mobile.native.loginRequestExpired": "The sign-in request has expired. Please sign in again.", // TODO translate
-  "mobile.native.sessionExpired": "Your sign-in has expired. Please sign in again.", // TODO translate
-  "mobile.native.accountWindowBusy": "The account window cannot be opened. Close the current window first.", // TODO translate
-  "mobile.native.loginResponseInvalid": "Invalid sign-in response.", // TODO translate
-  "mobile.native.loginRestart": "Please start the sign-in again.", // TODO translate
-  "mobile.native.signInFirst": "Please sign in first.", // TODO translate
-  "mobile.native.deviceInvalid": "Invalid device.", // TODO translate
-  "mobile.native.grantInvalid": "Invalid sharing scope.", // TODO translate
-  "mobile.native.connectResponseInvalid": "Invalid connection response.", // TODO translate
-  "mobile.native.remoteWindowFailed": "The remote window could not be opened.", // TODO translate
-  "mobile.native.accountActionInvalid": "Invalid account action.", // TODO translate
-  "mobile.native.accountAddressInvalid": "Invalid account address.", // TODO translate
-  "mobile.native.loginRequestInvalid": "Invalid sign-in request.", // TODO translate
-  "mobile.native.loginStateUpdateFailed": "The sign-in state could not be updated.", // TODO translate
-  "mobile.native.loginFailed": "Sign-in failed.", // TODO translate
-  "mobile.native.connectionFailed": "Connection failed.", // TODO translate
-  "mobile.native.resourceMissing": "A remote setup resource is missing.", // TODO translate
-  "mobile.native.hostKeyRejected": "The SSH host fingerprint was not trusted.", // TODO translate
-  "mobile.native.rsaUnsupported": "The iOS SSH library does not support RSA SHA-2 authentication. Use an Ed25519 private key or a password.", // TODO translate
-  "mobile.native.privateKeyUnreadable": "The private key could not be read. Check the passphrase. Supported: OpenSSH Ed25519 keys, encrypted with AES-CTR.", // TODO translate
-  "mobile.native.connectionCancelled": "The connection was cancelled.", // TODO translate
-  "mobile.native.sourceConnectionMissing": "The source connection is no longer available. Return to the connection list and try again.", // TODO translate
-  "mobile.native.pythonRequired": "Remote setup requires Python 3. Alternatively, enter the port of a service that is already running.", // TODO translate
-  "mobile.native.localPortFailed": "No local port could be allocated for SSH.", // TODO translate
-  "mobile.native.healthCheckFailed": "The remote service failed its health check.", // TODO translate
-  "mobile.native.connectionClosed": "The connection has been closed.", // TODO translate
-  "mobile.native.responseTooLarge": "The remote response is too large.", // TODO translate
+  "mobile.native.trustTitle": "Confirmer l’empreinte distante",
+  "mobile.native.trustChangedTitle": "L’empreinte distante a changé",
+  "mobile.native.trustBody": "{identity}\n\n{fingerprint}\n\nVérifiez cette empreinte auprès de l’administrateur de l’hôte avant de continuer.",
+  "mobile.native.trustChangedBody": "{identity}\n\n{fingerprint}\n\nCette empreinte diffère de celle que vous aviez approuvée. Vérifiez-la auprès de l’administrateur de l’hôte avant de continuer. L’empreinte précédemment approuvée sera remplacée.",
+  "mobile.native.trustAccept": "Approuver et continuer",
+  "mobile.native.tlsIdentity": "Certificat HTTPS · {identity}",
+  "mobile.native.ok": "OK",
+  "mobile.native.reconnect": "Reconnecter",
+  "mobile.native.switchConnection": "Changer de connexion",
+  "mobile.native.currentServer": "Serveur actuel",
+  "mobile.native.navigationBlocked": "La navigation en dehors du service actuel a été bloquée : {host}",
+  "mobile.native.pageUnavailable": "La page distante est temporairement indisponible (HTTP {code}). Réessayez ou revenez à la liste des connexions.",
+  "mobile.native.pageLoadFailed": "Impossible de charger la page distante. Vérifiez votre connexion réseau et réessayez, ou revenez à la liste des connexions.",
+  "mobile.native.pageLoadFailedReason": "Impossible de charger la page distante. Vérifiez votre connexion réseau et réessayez, ou revenez à la liste des connexions.\n\n{reason}\n{domain} {code}",
+  "mobile.native.pageTerminated": "La page a cessé de fonctionner. Reconnectez-vous ou revenez à la liste des connexions.",
+  "mobile.native.certificateRejected": "Le certificat distant n’a pas pu être vérifié. Reconnectez-vous ou revenez à la liste des connexions.",
+  "mobile.native.webViewOutdated": "Mettez à jour Android System WebView et réessayez, ou revenez à la liste des connexions.",
+  "mobile.native.downloadFailedTitle": "Échec du téléchargement",
+  "mobile.native.downloadRetry": "Le téléchargement a échoué. Veuillez réessayer.",
+  "mobile.native.downloadTooLarge": "L’exportation sur mobile prend actuellement en charge les fichiers de 64 Mo maximum.",
+  "mobile.native.downloadFileFailed": "Impossible de télécharger le fichier. Veuillez réessayer.",
+  "mobile.native.downloadCreateFailed": "Impossible de créer le fichier à télécharger.",
+  "mobile.native.saveLocationFailed": "Impossible d’ouvrir l’emplacement de sauvegarde.",
+  "mobile.native.fileSaved": "Fichier enregistré",
+  "mobile.native.fileSaveFailed": "Impossible d’enregistrer le fichier. Veuillez réessayer.",
+  "mobile.native.savePickerFailed": "Impossible d’ouvrir la boîte de dialogue d’enregistrement du fichier.",
+  "mobile.native.scanHint": "Pointez la caméra vers le code QR de l’URL",
+  "mobile.native.scanPrompt": "Scannez le code QR de l’adresse du service. Appuyez sur Retour pour annuler.",
+  "mobile.native.scanBusy": "Un scan est déjà en cours. Fermez d’abord la fenêtre de scan actuelle.",
+  "mobile.native.scanUnavailable": "Impossible d’ouvrir le scanner. Revenez à la page des connexions et réessayez.",
+  "mobile.native.scannerNotReady": "Le scanner n’est pas encore prêt.",
+  "mobile.native.scanCancelled": "Scan annulé.",
+  "mobile.native.cameraPermissionDenied": "L’accès à la caméra n’est pas autorisé. Autorisez VelaTerm à utiliser la caméra dans les réglages du système.",
+  "mobile.native.cameraUnavailable": "La caméra ne peut pas être utilisée. Vérifiez l’appareil et l’autorisation d’accès à la caméra.",
+  "mobile.native.cameraBusy": "La caméra est indisponible. Fermez les autres applications qui l’utilisent et réessayez.",
+  "mobile.native.qrOutputUnavailable": "Cet appareil ne peut pas lire les codes QR.",
+  "mobile.native.qrTypeUnavailable": "Cet appareil ne prend pas en charge le scan de codes QR.",
+  "mobile.native.qrTooLong": "L’URL du code QR est trop longue.",
+  "mobile.native.qrInvalid": "Le code QR ne contient pas d’adresse de service valide. Scannez une URL HTTPS sans nom d’utilisateur ni mot de passe.",
+  "mobile.native.urlConnectionName": "Connexion par URL",
+  "mobile.native.keychainReadFailed": "Impossible de lire le trousseau du système ({code}).",
+  "mobile.native.keychainWriteFailed": "Impossible d’enregistrer les données dans le trousseau du système ({code}).",
+  "mobile.native.secureStorageWriteFailed": "Impossible d’enregistrer les données dans le stockage sécurisé.",
+  "mobile.native.hostKeyUnreadable": "Impossible de lire la clé publique de l’hôte.",
+  "mobile.native.portRange": "Le port doit être compris entre 1 et 65535.",
+  "mobile.native.addressInvalid": "Saisissez une adresse HTTP ou HTTPS sans nom d’utilisateur ni mot de passe.",
+  "mobile.native.httpsRequired": "Utilisez HTTPS pour les connexions par URL. HTTP n’est autorisé que pour un tunnel SSH local.",
+  "mobile.native.nameRequired": "Saisissez un nom de connexion.",
+  "mobile.native.sshHostInvalid": "Saisissez un hôte SSH et un nom d’utilisateur valides.",
+  "mobile.native.sshHostNameInvalid": "Saisissez un nom d’hôte SSH valide.",
+  "mobile.native.sshUsernameRequired": "Saisissez le nom d’utilisateur SSH.",
+  "mobile.native.sshCredentialsRequired": "Saisissez le mot de passe SSH ou une clé privée.",
+  "mobile.native.privateKeyRequired": "Saisissez la clé privée.",
+  "mobile.native.sshPasswordRequired": "Saisissez le mot de passe SSH.",
+  "mobile.native.serviceModeRequired": "Choisissez le mode de connexion au service.",
+  "mobile.native.modeUnsupported": "Ce type de connexion n’est pas pris en charge.",
+  "mobile.native.connectionMissing": "Cette connexion n’existe pas.",
+  "mobile.native.connectionConfigMissing": "Les paramètres de connexion sont manquants.",
+  "mobile.native.connectionIdMissing": "L’identifiant de connexion est manquant.",
+  "mobile.native.accountServiceUnavailable": "Le service de gestion des comptes est indisponible. Veuillez réessayer.",
+  "mobile.native.loginRequestExpired": "La demande de connexion a expiré. Veuillez vous reconnecter.",
+  "mobile.native.sessionExpired": "Votre session a expiré. Veuillez vous reconnecter.",
+  "mobile.native.accountWindowBusy": "Impossible d’ouvrir la fenêtre du compte. Fermez d’abord la fenêtre actuelle.",
+  "mobile.native.loginResponseInvalid": "Réponse de connexion non valide.",
+  "mobile.native.loginRestart": "Veuillez relancer la connexion au compte.",
+  "mobile.native.signInFirst": "Veuillez d’abord vous connecter.",
+  "mobile.native.deviceInvalid": "Identifiant d’appareil non valide.",
+  "mobile.native.grantInvalid": "Périmètre de partage non valide.",
+  "mobile.native.connectResponseInvalid": "Réponse de connexion au service non valide.",
+  "mobile.native.remoteWindowFailed": "Impossible d’ouvrir la fenêtre distante.",
+  "mobile.native.accountActionInvalid": "Action de compte non valide.",
+  "mobile.native.accountAddressInvalid": "URL du service de gestion des comptes non valide.",
+  "mobile.native.loginRequestInvalid": "Demande de connexion non valide.",
+  "mobile.native.loginStateUpdateFailed": "Impossible de mettre à jour l’état de connexion au compte.",
+  "mobile.native.loginFailed": "Échec de la connexion au compte.",
+  "mobile.native.connectionFailed": "Échec de la connexion.",
+  "mobile.native.resourceMissing": "Une ressource nécessaire à la configuration distante est manquante.",
+  "mobile.native.hostKeyRejected": "L’empreinte de l’hôte SSH n’a pas été approuvée.",
+  "mobile.native.rsaUnsupported": "La bibliothèque SSH d’iOS ne prend pas en charge l’authentification RSA SHA-2. Utilisez une clé privée Ed25519 ou un mot de passe.",
+  "mobile.native.privateKeyUnreadable": "Impossible de lire la clé privée. Vérifiez la phrase secrète. Les clés OpenSSH Ed25519 sont prises en charge ; les clés chiffrées doivent utiliser AES-CTR.",
+  "mobile.native.connectionCancelled": "La connexion a été annulée.",
+  "mobile.native.sourceConnectionMissing": "La connexion d’origine n’est plus disponible. Revenez à la liste des connexions et réessayez.",
+  "mobile.native.pythonRequired": "La configuration distante nécessite Python 3. Vous pouvez aussi saisir le port d’un service déjà en cours d’exécution.",
+  "mobile.native.localPortFailed": "Impossible d’allouer un port local pour SSH.",
+  "mobile.native.healthCheckFailed": "Le service distant a échoué au contrôle de disponibilité.",
+  "mobile.native.connectionClosed": "La connexion a été fermée.",
+  "mobile.native.responseTooLarge": "La réponse distante est trop volumineuse.",
+  "mobile.native.cameraUsageDescription": "VelaTerm utilise la caméra pour scanner les codes QR contenant des adresses de services.",
+  "mobile.native.localNetworkUsageDescription": "VelaTerm se connecte aux services VelaTerm et aux hôtes SSH de votre réseau local.",
 
 
+  "term.runs.label": "Commandes en arrière-plan",
+  "term.runs.elapsed": (time) => `En cours depuis ${time}`,
+  "term.runs.viewLog": "Journal",
+  "term.runs.stop": "Arrêter",
+  "term.runs.confirmStop": "Confirmer l’arrêt",
+  "term.runs.stopFailed": "Arrêt impossible",
+  "term.runs.logTitle": (label) => `Journal : ${label}`,
+  "term.runs.logRunning": "En cours",
+  "term.runs.logFinished": (code) => `Terminé avec le code de sortie ${code}`,
+  "term.runs.logEnded": "Terminé",
+  "term.runs.logEmpty": "Aucune sortie pour le moment",
 };
 
 export default fr;

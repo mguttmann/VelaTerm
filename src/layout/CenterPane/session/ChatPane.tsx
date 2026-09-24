@@ -10,7 +10,6 @@
 //! sent starts it again where the conversation left off.
 
 import { useAgentPermissions, savePermissionDefault } from "../../../hooks/useAgentPermissions";
-import { genId } from "../../../genId";
 import { useSessionPermissionState } from "../../../hooks/useSessionPermissionState";
 import { currentPermissionLabel, PermissionStateDetails } from "../../../components/PermissionStateDetails";
 import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from "react";
@@ -55,6 +54,7 @@ import {
   chatSnapshot,
   chatCommands,
   chatStart,
+  isTaskFinished,
   onChatEvent,
   type ChatAutoContinue,
   type ChatAutoContinueReason,
@@ -126,7 +126,8 @@ import { useOutbox, emptySubmissions, acknowledgeSubmissions, createSubmission, 
 import { cachedChat, cacheChat, mergeRows, reconcileChat, chatSyncMetrics } from "./chatCache";
 import { ChatSearch } from "./ChatSearch";
 import { QueuedMessageText } from "./QueuedMessageText";
-import { parseShellContext, parseShellSubmission, shellErrorKey } from "./shellMode";
+import { MessageSender, messageSenderName } from "./MessageSender";
+import { parseShellSubmission, shellErrorKey, shellSubmissionFor, acknowledgeShellSubmission } from "./shellMode";
 import { SessionLinkDirectory } from "./links";
 
 interface MessageReplacement {
@@ -285,11 +286,20 @@ export function ChatPane({
   const pendingSubmissions = useOutbox(state => state.sessions[session.id] ?? emptySubmissions);
   // Messages typed while the agent was busy. They belong to the backend, not to this pane: a second view
   // of the same session has to show the same queue, and the queue has to outlive this pane being closed.
-  const [queue, setQueue] = useState<QueuedMessage[]>(() => cachedChat(session.id)?.queue ?? []);
+  const [queue, setQueueState] = useState<QueuedMessage[]>(() => cachedChat(session.id)?.queue ?? []);
   const [steeringQueue, setSteeringQueue] = useState(false);
   const steeringQueueRef = useRef(false);
   /** The queued message being rewritten in place, and the text so far. */
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const queueRef = useRef(queue);
+  const setQueue = useCallback((next: React.SetStateAction<QueuedMessage[]>) => {
+    const items = typeof next === "function" ? next(queueRef.current) : next;
+    // Reconnect/events invalidate an editor before React commits the replacement DOM. A queued blur
+    // or Enter handler must consult these latest facts rather than its previous render's closure.
+    queueRef.current = items;
+    setQueueState(items);
+    setEditing(current => current && items.some(item => item.id === current.id && item.shellCommand === undefined) ? current : null);
+  }, []);
   // Images pasted or dropped into the composer, waiting to go out with whatever is being written. They
   // belong to this pane rather than to the session: nothing has been handed over until send is pressed.
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -313,7 +323,7 @@ export function ChatPane({
   const [catalogue, setCatalogue] = useState<ChatModel[]>([]);
   // "skip" is what a terminal-driven session stored for "stop asking me"; the agent's own word for it is
   // bypassPermissions, and that is what this control shows.
-  const [mode, setMode] = useState<Mode>(() => storedMode({
+  const [mode, setMode] = useState<string>(() => storedMode({
     kind: session.kind,
     permissionMode: effectivePermissionMode(session, useTermStore.getState().agentDefaults),
   }));
@@ -347,6 +357,7 @@ export function ChatPane({
   /** Backend-owned start of the logical turn currently in flight. */
   const [actionFeedback, setActionFeedback] = useState("");
   const [sending, setSending] = useState(false);
+  const shellSubmission = useRef<{ sessionId: string; command: string; id: string; pending: boolean } | null>(null);
   const stopping = useRef(false);
   const stop = () => {
     if (stopping.current) return;
@@ -526,7 +537,7 @@ export function ChatPane({
         case "settingsChanged":
           if ("effort" in event) setEffort(event.effort ?? "");
           if ("model" in event) setModel(event.model ?? undefined);
-          if (event.mode && isMode(event.mode)) setMode(event.mode);
+          if (event.mode) setMode(event.mode);
           if ("pendingPermissionMode" in event) setPendingPermissionMode(event.pendingPermissionMode ?? null);
           break;
         case "codexSettingsChanged":
@@ -662,7 +673,7 @@ export function ChatPane({
         );
         setTurnStartedAt(snapshot.running ? snapshot.turnStartedAt : undefined);
         if (snapshot.effort && isEffort(snapshot.effort)) setEffort(snapshot.effort);
-        if (snapshot.mode && isMode(snapshot.mode)) setMode(snapshot.mode);
+        if (snapshot.mode) setMode(snapshot.mode);
         setPendingPermissionMode(snapshot.pendingPermissionMode ?? null);
         setCollaborationModes(snapshot.collaborationModes ?? []);
         if (isCollaborationMode(snapshot.collaborationMode)) {
@@ -1097,7 +1108,11 @@ export function ChatPane({
     };
   }, [hidden, session.id]);
 
-  const busy = status === "working";
+  // Claude's session stays working between turns while its background tasks run. That hold is not a turn, so
+  // the composer's stop control and queueing do not follow it.
+  const heldForBackground =
+    turnStartedAt === undefined && (extras.backgroundTasks ?? []).some((task) => !isTaskFinished(task));
+  const busy = status === "working" && !heldForBackground;
   const canRewind =
     !readOnly &&
     engineRunning &&
@@ -1217,7 +1232,7 @@ export function ChatPane({
    * stop what you are doing and read this instead.
    */
   const send = (behavior: SendBehavior = "queue") => {
-    if (sending) return;
+    if (sending || shellSubmission.current?.pending) return;
     const text = draft.trim();
     // A picture on its own is a message: dropping a screenshot in and pressing send says enough.
     if (rewinding || pendingRewind) return;
@@ -1243,17 +1258,26 @@ export function ChatPane({
       setDismissed(null);
       setAttachNote(null);
       toEnd();
+      const submission = shellSubmissionFor(session.id, shell.command);
+      if (submission.pending) return;
+      submission.pending = true;
+      shellSubmission.current = submission;
+      setSending(true);
+      const submittedDraft = draft;
       void (async () => {
         try {
-          if (!engineRunning) await startAgent();
-          await chatRunShell(session.id, shell.command, `sh-${genId()}`);
+          await chatRunShell(session.id, shell.command, submission.id);
           // The typed line leaves the composer only once the command was accepted; a refusal or a
           // failed start keeps it there for a retry, like the outbox keeps a failed message.
-          updateDraft("");
-          setCaret(0);
+          setDraft((current) => current === submittedDraft ? "" : current);
+          acknowledgeShellSubmission(submission);
+          shellSubmission.current = null;
         } catch (err) {
           const key = shellErrorKey(err);
           setError(key ? t(key) : String(err));
+        } finally {
+          submission.pending = false;
+          setSending(false);
         }
       })();
       return;
@@ -1420,13 +1444,15 @@ export function ChatPane({
     // Drop it here as well as on the backend: the event confirming it costs a round trip, and the row has
     // to stop looking clickable the moment it is dismissed.
     setQueue((prev) => prev.filter((item) => item.id !== id));
-    void chatQueueRemove(session.id, id).catch((err) => setError(String(err)));
+    void chatQueueRemove(session.id, id).catch((err) => { setError(String(err)); void refreshRef.current(); });
   };
 
   const commitEdit = () => {
     if (!editing) return;
     const { id, text } = editing;
     setEditing(null);
+    const current = queueRef.current.find(item => item.id === id);
+    if (!current || current.shellCommand !== undefined) return;
     const trimmed = text.trim();
     // Emptying a queued message is how it is thrown away.
     if (!trimmed) {
@@ -1434,7 +1460,7 @@ export function ChatPane({
       return;
     }
     setQueue((prev) => prev.map((item) => (item.id === id ? { ...item, text: trimmed } : item)));
-    void chatQueueUpdate(session.id, id, trimmed).catch((err) => setError(String(err)));
+    void chatQueueUpdate(session.id, id, trimmed).catch((err) => { setError(String(err)); void refreshRef.current(); });
   };
 
   const applyMode = async (next: Mode) => {
@@ -1753,7 +1779,8 @@ export function ChatPane({
   const permissionPending = permissionValue?.activation === "nextTurn" || permissionValue?.activation === "restart";
   const pendingMode = permissionPending ? permissionValue?.pending : null;
   const appliedMode = permissionValue?.running ? permissionValue?.current : null;
-  const modeOptions: ChipOption<Mode>[] = (permissionCatalog?.catalog?.modes ?? []).map((value) => ({
+  const modeLabel = isMode(mode) ? t(modeLabelKeyFor(session.kind, mode)) : mode;
+  const modeOptions: ChipOption<string>[] = (permissionCatalog?.catalog?.modes ?? []).map((value) => ({
     value,
     label: t(modeLabelKeyFor(session.kind, value)),
     // The effective row is noted only while it differs from the target being waited on; on its own,
@@ -1852,9 +1879,9 @@ export function ChatPane({
         glyph={permissionPending
           ? <Icons.clock size={14} style={{ color: "var(--accent)" }} />
           : <Icons.lock size={14} />}
-        label={t(modeLabelKeyFor(session.kind, mode))}
+        label={modeLabel}
         title={permissionValue?.activation === "nextTurn"
-          ? `${t("chat.modeTooltip")} · ${t("chat.modePendingHint", currentPermissionLabel(permissionValue), t(modeLabelKeyFor(session.kind, mode)))}`
+          ? `${t("chat.modeTooltip")} · ${t("chat.modePendingHint", currentPermissionLabel(permissionValue), modeLabel)}`
           : permissionValue?.activation === "restart"
             ? `${t("chat.modeTooltip")} · ${t("permission.restart")}`
             : permissionValue?.activation === "applied"
@@ -1864,7 +1891,7 @@ export function ChatPane({
         options={modeOptions}
         disabled={!permissionCatalog?.catalog}
         defaultValue={defaultMode}
-        onPick={pickMode}
+        onPick={(next, keep) => { if (isMode(next)) pickMode(next, keep); }}
         keepLabel={t("chat.keepChoice")}
         menuWidth={240}
       />
@@ -1907,6 +1934,7 @@ export function ChatPane({
   ) });
   if (session.kind === "claude") composerChips.push({ id: "tasks", node: (
     <TasksChip
+      sessionId={session.id}
       tasks={extras.backgroundTasks ?? []}
       busy={busy}
       disabled={!engineRunning}
@@ -2062,7 +2090,7 @@ export function ChatPane({
                           rewindScopes={rewindScopes}
                           rewindRequest={rewindRequest}
                           onRewindRequestHandled={finishRewindRequest}
-                          onCancelShell={cancelShell}
+                          onCancelShell={readOnly ? undefined : cancelShell}
                         />
                         {submissionFeedback(entry.id)}
                       </div>
@@ -2085,7 +2113,7 @@ export function ChatPane({
                     rewindScopes={rewindScopes}
                     rewindRequest={rewindRequest}
                     onRewindRequestHandled={finishRewindRequest}
-                    onCancelShell={cancelShell}
+                    onCancelShell={readOnly ? undefined : cancelShell}
                   />
                   {submissionFeedback(entry.id)}
                 </div>
@@ -2108,8 +2136,10 @@ export function ChatPane({
                   onDismiss={() => setAgentNoticeDismissed(agentMissingKey)}
                 />
               )}
-              {error && !isAgentNotInstalledError(error) && <ErrorRow message={error} />}
-              {catalogueError && <ErrorRow message={catalogueError} />}
+              {/* Wrapped like every other row: a bare child of the scroller would lose the centered column,
+                  because the row's own left indent replaces the auto margins that center it. */}
+              {error && !isAgentNotInstalledError(error) && <div className="sv-item"><ErrorRow message={error} /></div>}
+              {catalogueError && <div className="sv-item"><ErrorRow message={catalogueError} /></div>}
               {(session.kind === "codex" || session.kind === "claude") && !readOnly && <AgentAuth provider={session.kind === "claude" ? "Claude" : "Codex"} sessionId={session.id} state={extras.auth} busy={turnStartedAt !== undefined} />}
             </div>
             {away && (
@@ -2227,67 +2257,75 @@ export function ChatPane({
                   <span>{t("chat.queue.pending")}</span>
                   <span className="sv-queue-count">({queue.length})</span>
                 </div>
-                {queue.map((item) => (
-                  <div key={item.id} className="sv-queue-item">
-                    {editing?.id === item.id ? (
-                      <textarea
-                        className="sv-queue-edit"
-                        autoFocus
-                        rows={1}
-                        value={editing.text}
-                        onChange={(e) => setEditing({ id: item.id, text: e.target.value })}
-                        onBlur={commitEdit}
-                        onKeyDown={(e) => {
-                          if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
-                            e.preventDefault();
-                            commitEdit();
-                          }
-                          if (e.key === "Escape") {
-                            e.preventDefault();
-                            e.stopPropagation();
-                            setEditing(null);
-                          }
-                        }}
-                      />
-                    ) : (
-                      // A shell command waiting for the turn to end is shown as what was typed, not as
-                      // the tagged context message it carries; the text itself is not for editing.
-                      <QueuedMessageText
-                        text={queuedShellCommand(item.text) ?? item.text}
-                        disabled={steeringQueue || queuedShellCommand(item.text) !== null}
-                        onEdit={() => setEditing({ id: item.id, text: item.text })}
-                      />
-                    )}
-                    {item.images && item.images.length > 0 && (
-                      <span className="sv-queue-images">
-                        {item.images.map((image, i) => (
-                          <ChatImageView
-                            key={"attachmentId" in image ? image.attachmentId : i}
-                            image={image}
-                            className="sv-queue-thumb"
-                            alt=""
-                          />
-                        ))}
-                      </span>
-                    )}
-                    <button
-                      className="sv-queue-steer"
-                      disabled={!busy || stopping.current || steeringQueue || editing !== null}
-                      onClick={() => void steerQueued(item.id)}
-                    >
-                      {t("chat.steer")}
-                    </button>
-                    <button
-                      className="sv-queue-drop"
-                      disabled={steeringQueue}
-                      title={t("chat.queue.remove")}
-                      aria-label={t("chat.queue.remove")}
-                      onClick={() => removeQueued(item.id)}
-                    >
-                      <Icons.close size={12} />
-                    </button>
-                  </div>
-                ))}
+                <div className="sv-queue-list" role="region" aria-label={t("chat.queue.pending")} tabIndex={0}>
+                  {queue.map((item) => (
+                    <div key={item.id} className="sv-queue-item">
+                      <div className="sv-queue-content">
+                        {item.origin && <MessageSender origin={item.origin} />}
+                        <div className="sv-queue-message">
+                          {editing?.id === item.id && item.shellCommand === undefined ? (
+                            <textarea
+                              className="sv-queue-edit"
+                              autoFocus
+                              rows={1}
+                              value={editing.text}
+                              onChange={(e) => setEditing({ id: item.id, text: e.target.value })}
+                              onBlur={commitEdit}
+                              onKeyDown={(e) => {
+                                if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
+                                  e.preventDefault();
+                                  commitEdit();
+                                }
+                                if (e.key === "Escape") {
+                                  e.preventDefault();
+                                  e.stopPropagation();
+                                  setEditing(null);
+                                }
+                              }}
+                            />
+                          ) : (
+                            // A shell command waiting for the turn to end is shown as what was typed, not as
+                            // the tagged context message it carries; the text itself is not for editing.
+                            <QueuedMessageText
+                              text={queuedShellCommand(item) ?? item.text}
+                              origin={item.origin}
+                              disabled={steeringQueue || queuedShellCommand(item) !== null}
+                              onEdit={() => setEditing({ id: item.id, text: item.text })}
+                            />
+                          )}
+                        </div>
+                      </div>
+                      {item.images && item.images.length > 0 && (
+                        <span className="sv-queue-images">
+                          {item.images.map((image, i) => (
+                            <ChatImageView
+                              key={"attachmentId" in image ? image.attachmentId : i}
+                              image={image}
+                              className="sv-queue-thumb"
+                              alt=""
+                            />
+                          ))}
+                        </span>
+                      )}
+                      <button
+                        className="sv-queue-steer"
+                        disabled={!busy || stopping.current || steeringQueue || editing !== null}
+                        onClick={() => void steerQueued(item.id)}
+                      >
+                        {t("chat.steer")}
+                      </button>
+                      <button
+                        className="sv-queue-drop"
+                        disabled={steeringQueue}
+                        title={t("chat.queue.remove")}
+                        aria-label={t("chat.queue.remove")}
+                        onClick={() => removeQueued(item.id)}
+                      >
+                        <Icons.close size={12} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
               </div>
             )}
             {attachNote && <div className="sv-attach-note">{attachNote}</div>}
@@ -2522,9 +2560,8 @@ const Entry = memo(function Entry({
 });
 
 /** How a queued shell-mode context message reads in the queue: the command as it was typed. */
-function queuedShellCommand(text: string): string | null {
-  const shell = parseShellContext(text);
-  return shell ? `! ${shell.command}` : null;
+function queuedShellCommand(item: QueuedMessage): string | null {
+  return item.shellCommand === undefined ? null : `! ${item.shellCommand}`;
 }
 
 /** Drop a leading "<name> · " from a model's description, where the name is already the row's label. */
@@ -2610,7 +2647,7 @@ function Row({
     case "user":
       return (
         <MessageBubble
-          who={row.origin ? `${row.origin.name}${row.origin.role === "plan" || row.origin.role === "exec" ? ` · ${t(row.origin.role === "plan" ? "chat.origin.plan" : "chat.origin.exec")}` : ""}` : t("archive.you")}
+          who={row.origin ? messageSenderName(row.origin, t) : t("archive.you")}
           icon={row.origin ? kindIconEl(row.origin.agent, 14) : undefined}
           isUser
           text={row.text}

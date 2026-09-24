@@ -23,6 +23,7 @@ import { isTauri } from "../ipc/transport";
 import { isShareSurface } from "../ipc/shareBase";
 import { env } from "../platform";
 import { useTermStore } from "../store/termStore";
+import { activeAgentLocation, agentPickerUrl, navigateAgentPicker, newAgentPickerRoute, readAgentPickerRoute } from "../layout/NewAgentSession/navigation";
 import {
   DEFAULT_BINDINGS,
   hasMod,
@@ -75,6 +76,17 @@ export function useKeyboardShortcuts() {
       // ── Remappable actions: exactly match the user override or default binding ──
       const { shortcutOverrides } = useTermStore.getState();
       const sc = (a: ShortcutAction) => shortcutOverrides[a] || DEFAULT_BINDINGS[a];
+
+      // A shortcut saved before this action existed keeps its trigger, even if it now overlaps our default.
+      const existingOverride = Object.entries(shortcutOverrides).some(([action, combo]) =>
+        action !== "newAgentSession" && action in DEFAULT_BINDINGS && !!combo && matchCombo(e, combo));
+      if (!existingOverride && matchCombo(e, sc("newAgentSession"))) {
+        if (isShareSurface || e.defaultPrevented || e.isComposing || e.keyCode === 229 || e.repeat) return;
+        e.preventDefault();
+        e.stopPropagation();
+        if (!readAgentPickerRoute()) navigateAgentPicker(agentPickerUrl(newAgentPickerRoute(activeAgentLocation(useTermStore.getState()))));
+        return;
+      }
 
       if (matchCombo(e, sc("openProject"))) {
         e.preventDefault();

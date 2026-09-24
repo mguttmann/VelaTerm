@@ -236,7 +236,10 @@ pub fn rows(
     messages: &[OpencodeMessage],
     children: &dyn Fn(&str) -> Option<Vec<OpencodeMessage>>,
 ) -> Vec<ChatRow> {
-    rows_at_depth(messages, children, 0)
+    let mut rows = rows_at_depth(messages, children, 0);
+    // HTTP replay bypasses the shared history reader, so restore local shell context here too.
+    super::shell::map_replayed_rows(&mut rows);
+    rows
 }
 
 /// Use the native message's model identifier as its display name.
@@ -477,7 +480,7 @@ pub fn user_turns(messages: &[OpencodeMessage]) -> Vec<super::history::RewindTar
             }
             Some(super::history::RewindTarget {
                 message_id: id.to_string(),
-                turn_id: None,
+                last_message_id: None, turn_id: None,
                 text,
             })
         })
@@ -502,6 +505,39 @@ mod tests {
             info: json!({"id":id,"role":role,"time":{"created":1_700_000_000_000i64}}),
             parts,
         }
+    }
+
+    fn recorded_shell_context() -> OpencodeMessage {
+        let value: Value = serde_json::from_str(include_str!("fixtures/opencode-velaterm-shell.json")).unwrap();
+        OpencodeMessage { info: value["info"].clone(), parts: value["parts"].as_array().unwrap().clone() }
+    }
+
+    #[test]
+    fn recorded_shell_context_keeps_streams_status_and_native_identity() {
+        let message = recorded_shell_context();
+        let original = user_text(&message.parts);
+        let native_id = message.info["id"].as_str().unwrap().to_string();
+        let result = rows(std::slice::from_ref(&message), &|_| None);
+        assert_eq!(result.len(), 1);
+        assert!(matches!(&result[0], ChatRow::Shell {
+            id, command, stdout, stderr, exit_code: Some(7), status: "completed", at, source_text,
+            stdout_truncated: false, stderr_truncated: false, output_incomplete: false,
+        } if id == &user_row_id(&native_id)
+            && command.ends_with("exit 7")
+            && stdout == "VLX_STDOUT_871316b6da51\n" && stderr == "VLX_STDERR_871316b6da51\n"
+            && *at == ms(message.info.pointer("/time/created")) && source_text == &original));
+        let rewind = user_turns(&[message]);
+        assert_eq!(rewind[0].message_id, native_id);
+        assert_eq!(rewind[0].text, original);
+    }
+
+    #[test]
+    fn shell_like_text_with_an_attachment_remains_a_user_message() {
+        let mut message = recorded_shell_context();
+        message.parts.push(json!({"id":"image-part","type":"file","mime":"image/png","url":"data:image/png;base64,AA=="}));
+        let expected = user_text(&message.parts);
+        let result = rows(&[message], &|_| None);
+        assert!(matches!(&result[0], ChatRow::User { text, .. } if text == &expected && text.ends_with("[image]")));
     }
 
     #[test]

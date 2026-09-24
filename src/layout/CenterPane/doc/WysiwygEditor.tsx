@@ -12,6 +12,7 @@ import { Crepe } from "@milkdown/crepe";
 import "@milkdown/crepe/theme/common/style.css";
 import { editorViewCtx, parserCtx } from "@milkdown/kit/core";
 import { headingIdGenerator } from "@milkdown/kit/preset/commonmark";
+import { blockConfig } from "@milkdown/kit/plugin/block";
 import { $prose } from "@milkdown/kit/utils";
 import type { EditorView } from "@milkdown/kit/prose/view";
 import { Slice } from "@milkdown/kit/prose/model";
@@ -30,6 +31,7 @@ import {
   pmSearchPlugin,
 } from "./pmSearch";
 import { pmMermaidPlugin } from "./pmMermaid";
+import { pmHtmlAnchorPlugin } from "./pmHtmlAnchor";
 import { onUploadDocImage, proxyDocImageURL } from "./docImageIO";
 import { stripImageRatioAlt } from "./docImage";
 import { replaceChangedContent, withHeadingIds } from "./milkdownSync";
@@ -148,6 +150,15 @@ export const WysiwygEditor = forwardRef<
     crepe.editor.use($prose(() => pmSearchPlugin()));
     // Mermaid plugin renders decorations below fenced blocks without changing document serialization.
     crepe.editor.use($prose(() => pmMermaidPlugin()));
+    // Empty HTML anchors such as `<a id="x"></a>` are hidden rather than shown as literal tags.
+    crepe.editor.use($prose(() => pmHtmlAnchorPlugin()));
+    // The block handle hit-tests the editor's horizontal center at the pointer's height. When an inline
+    // atom (inline HTML, an image) sits there, the handle anchors to it and lands mid-line; resolving
+    // inline nodes to their enclosing block keeps it in the left gutter. Runs after Crepe's own config.
+    crepe.editor.config(ctx => ctx.update(blockConfig.key, config => ({
+      ...config,
+      filterNodes: (pos, node) => !node.isInline && config.filterNodes(pos, node),
+    })));
     // Observe transactions immediately without serializing the document on every keystroke.
     crepe.editor.use($prose(() => new Plugin({
       view: () => ({

@@ -12,9 +12,12 @@ import Icons from "../../../components/Icons";
 import { useSuspendNativeViews } from "../../../hooks/nativeViewSuspend";
 import { useBackdropDismiss } from "../../../hooks/useBackdropDismiss";
 import { useT } from "../../../i18n";
+import type { MessageOrigin } from "../../../ipc/chat";
+import { MessageSender } from "./MessageSender";
 
-export function QueuedMessageText({ text, disabled, onEdit }: {
+export function QueuedMessageText({ text, origin, disabled, onEdit }: {
   text: string;
+  origin?: MessageOrigin;
   disabled: boolean;
   onEdit: () => void;
 }) {
@@ -51,13 +54,13 @@ export function QueuedMessageText({ text, disabled, onEdit }: {
           <Icons.eye size={13} />
         </button>
       )}
-      {preview && <QueuedMessagePreview text={text} onClose={() => setPreview(false)} />}
+      {preview && <QueuedMessagePreview text={text} origin={origin} onClose={() => setPreview(false)} />}
     </>
   );
 }
 
 /** The whole queued message, read-only, outside the composer's clamped row. */
-function QueuedMessagePreview({ text, onClose }: { text: string; onClose: () => void }) {
+function QueuedMessagePreview({ text, origin, onClose }: { text: string; origin?: MessageOrigin; onClose: () => void }) {
   const t = useT();
   const dialogRef = useRef<HTMLDialogElement>(null);
   const backdrop = useBackdropDismiss(onClose);
@@ -87,6 +90,7 @@ function QueuedMessagePreview({ text, onClose }: { text: string; onClose: () => 
     >
       <div className="sv-queue-preview-panel">
         <div className="sv-queue-preview-toolbar">
+          {origin && <MessageSender origin={origin} />}
           <button type="button" className="sv-queue-preview-close" onClick={onClose} autoFocus>
             {t("common.close")}
           </button>

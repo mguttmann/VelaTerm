@@ -5,10 +5,21 @@ import { useT } from "../i18n";
 import { launchModels, launchOptions, type LaunchOption, type LaunchModelContext, type LaunchModelCatalog } from "../ipc/launch";
 import type { WorktreeMode } from "../ipc/events";
 import Combo from "./Combo";
+import { Icons } from "./Icons";
 import "./launch-dialog.css";
 
 export function launchErrorText(cause: unknown): string {
   return cause instanceof Error ? cause.message : String(cause);
+}
+
+/** Header close control shared by launch dialogs. It is never disabled, so no error or pending work can trap the user. */
+export function LaunchCloseButton({ onClose }: { onClose: () => void }) {
+  const t = useT();
+  return (
+    <button type="button" className="icon-btn launch-close" aria-label={t("common.close")} title={t("common.close")} onClick={onClose}>
+      <Icons.close size={16} aria-hidden="true" />
+    </button>
+  );
 }
 
 export function useLaunchOptions(active: boolean) {
@@ -69,7 +80,7 @@ function models(kind: string, context: LaunchModelContext) {
 /** A model and its effort share one native catalogue and one atomic draft update. */
 export function ModelEffortFields({
   spec, model, effort, onChange, onModelCommit, onEffortCommit,
-  context = {}, modelPlaceholder, effortPlaceholder, inheritedModel,
+  context = {}, modelPlaceholder, effortPlaceholder, inheritedModel, disabled = false,
 }: {
   spec: LaunchOption;
   model: string;
@@ -81,6 +92,7 @@ export function ModelEffortFields({
   modelPlaceholder?: string;
   effortPlaceholder?: string;
   inheritedModel?: string;
+  disabled?: boolean;
 }) {
   const t = useT();
   const key = JSON.stringify([spec.id, context.parentSessionId || null, context.cwd || null, !!context.inheritArgs]);
@@ -106,8 +118,9 @@ export function ModelEffortFields({
   return <>
     <div className="launch-field">
       <LaunchField label={t("spawn.modelLabel")}>
-        <Combo value={model} onChange={next => onChange(next, effort)}
+        <Combo key={String(disabled)} value={model} disabled={disabled} onChange={next => { if (!disabled) onChange(next, effort); }}
           onCommit={next => {
+            if (disabled) return;
             const supported = catalog?.models.find(entry => entry.id === next)?.effortLevels;
             if (effort && supported && !supported.includes(effort)) {
               onChange(next, "");
@@ -129,7 +142,7 @@ export function ModelEffortFields({
       </div>}
     </div>
     {spec.effortFlag && <LaunchField label={t("spawn.effortLabel")}>
-      <Combo value={effort} onChange={next => onChange(model, next)} onCommit={onEffortCommit}
+      <Combo key={String(disabled)} value={effort} disabled={disabled} onChange={next => { if (!disabled) onChange(model, next); }} onCommit={next => { if (!disabled) onEffortCommit?.(next); }}
         allowCustom width="100%" menuPortal mono ariaLabel={t("spawn.effortLabel")}
         placeholder={defaultEffort}
         options={[{ value: "", label: defaultEffort }, ...Array.from(new Set([...levels, ...(effort ? [effort] : [])]))
@@ -173,16 +186,18 @@ export function WorktreeChoices({
   onChange,
   single = false,
   workflow = false,
+  disabled = false,
 }: {
   value: WorktreeMode;
   onChange: (v: WorktreeMode) => void;
   single?: boolean;
   workflow?: boolean;
+  disabled?: boolean;
 }) {
   const t = useT();
   const name = useId();
   return (
-    <fieldset className="launch-worktrees">
+    <fieldset className="launch-worktrees" disabled={disabled}>
       <legend className="launch-label">{t("launch.directory")}</legend>
       <div className={`launch-worktree-grid${single ? " is-single" : ""}`}>
         {(["none", ...(single ? [] : ["shared"]), "each"] as const).map(

@@ -22,6 +22,8 @@ import { type TreeNodeRef } from "../LeftSidebar/ProjectTree";
 import { useSessionMenu } from "../sessionMenu";
 import { MemoryTab } from "../Memory/MemoryTab";
 import { SessionKindIcon } from "../sessionViewers/sessionMeta";
+import { taskUrl } from "./session/taskNavigation";
+import { memoryNavigate } from "../Memory/navigation";
 import { taskIcon } from "./session/TaskView";
 
 /** Close any tab, routing dirty documents through their three-choice confirmation and closing others directly. */
@@ -439,10 +441,19 @@ export function TabBar() {
               {...dragProps(tabId)}
               {...middleCloseProps(tabId)}
             >
+              <a href={taskUrl(task.sessionId, task.taskId)} className="sv-task-tab-link" onClick={(event) => {
+                event.stopPropagation();
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                setActiveTab(tabId);
+                const href = taskUrl(task.sessionId, task.taskId);
+                if (href !== window.location.href) memoryNavigate(href);
+              }}>
               <span style={{ color: "var(--text-dim)", display: "grid", flex: "none" }}>
                 <TaskIcon size={13} />
               </span>
               <span className="tnm">{task.title}</span>
+              </a>
               <span
                 className="x"
                 onClick={(e) => {

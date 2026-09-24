@@ -114,12 +114,18 @@ pub fn init(data_dir: &Path) {
     });
     static PANIC_HOOK: OnceLock<()> = OnceLock::new();
     PANIC_HOOK.get_or_init(|| {
-        // A panic payload may contain a user document or credential-bearing error.
+        // A panic payload may contain a user document or credential-bearing error, so only the source
+        // location is recorded. File and line together identify the exact failing statement, which a line
+        // number alone does not: a poisoned mutex produces the same panic at hundreds of call sites.
         std::panic::set_hook(Box::new(|info| {
+            let location = info.location();
             record(
                 "ERROR",
                 "runtime_panic",
-                json!({"line":info.location().map(|p|p.line())}),
+                json!({
+                    "file": location.map(std::panic::Location::file),
+                    "line": location.map(std::panic::Location::line),
+                }),
             );
             flush();
         }));
@@ -257,6 +263,8 @@ pub fn safe_fields(data: &Value) -> Value {
                 | "clientDurationMs"
                 | "count"
                 | "line"
+                | "blockedMs"
+                | "subscribers"
         );
         if numeric && (value.is_u64() || value.is_i64() || value.is_null()) {
             out.insert(key.clone(), value.clone());
@@ -349,6 +357,9 @@ pub fn safe_fields(data: &Value) -> Value {
                     | "validated"
                     | "received"
                     | "slow"
+                    | "poisoned"
+                    | "blocked"
+                    | "recovered"
                     | "unknown"
             ),
             "shell" => matches!(
@@ -478,8 +489,12 @@ pub fn safe_fields(data: &Value) -> Value {
                     | "fallback"
                     | "exit"
                     | "handshake"
+                    | "resize"
+                    | "nudge"
+                    | "nudge_restore"
             ),
             "command" => COMMANDS.contains(&s),
+            "file" => s.len() <= 120 && s.ends_with(".rs") && !s.contains(".."),
             "path" => matches!(
                 s,
                 "/knowledge"
@@ -489,6 +504,7 @@ pub fn safe_fields(data: &Value) -> Value {
                     | "/search"
                     | "/orch"
                     | "/stat"
+                    | "/runs"
                     | "/hook/:id"
                     | "/api/login"
                     | "/api/me"
@@ -575,23 +591,72 @@ pub fn level_enabled(level: &str) -> bool {
         .is_some_and(|logger| rank(level) >= logger.level)
 }
 
-/// Preserve standard Mutex semantics while exposing meaningful database contention.
-pub struct DatabaseMutex<T>(std::sync::Mutex<T>);
-impl<T> DatabaseMutex<T> {
-    pub fn new(value: T) -> Self {
-        Self(std::sync::Mutex::new(value))
+/// A Mutex that reports contention and poisoning instead of hiding them. `lock` still returns `LockResult`,
+/// so existing `lock().unwrap()` call sites keep standard semantics.
+///
+/// Waiting matters most on a lock the UI thread also takes: a background holder that runs long does not
+/// merely slow one operation down, it stops the window from drawing and accepting input. A poisoned result
+/// is always reported regardless of the threshold, because every later `lock().unwrap()` on the same mutex
+/// panics as well and the application looks dead rather than merely broken in one place.
+pub struct TrackedMutex<T> {
+    inner: std::sync::Mutex<T>,
+    event: &'static str,
+    threshold: Duration,
+}
+impl<T> TrackedMutex<T> {
+    pub fn new(value: T, event: &'static str, threshold: Duration) -> Self {
+        Self { inner: std::sync::Mutex::new(value), event, threshold }
     }
     pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, T>> {
         let started = Instant::now();
-        let result = self.0.lock();
-        if started.elapsed() >= Duration::from_millis(100) || result.is_err() {
+        let result = self.inner.lock();
+        let waited = started.elapsed();
+        if waited >= self.threshold || result.is_err() {
             record(
                 "WARN",
-                "database_lock",
-                json!({"lockWaitMs":started.elapsed().as_millis() as u64,"status":if result.is_ok(){"slow"}else{"failed"}}),
+                self.event,
+                json!({"lockWaitMs":waited.as_millis() as u64,"status":if result.is_ok(){"slow"}else{"poisoned"}}),
             );
         }
         result
+    }
+}
+
+/// Preserve standard Mutex semantics while exposing meaningful database contention.
+pub struct DatabaseMutex<T>(TrackedMutex<T>);
+impl<T> DatabaseMutex<T> {
+    pub fn new(value: T) -> Self {
+        Self(TrackedMutex::new(value, "database_lock", Duration::from_millis(100)))
+    }
+    pub fn lock(&self) -> std::sync::LockResult<std::sync::MutexGuard<'_, T>> {
+        self.0.lock()
+    }
+}
+
+/// Emits one line when a scope outlives `threshold` and stays silent otherwise.
+///
+/// Intended for work that runs on the UI thread, where the useful measurement is the tail rather than the
+/// average: a keystroke handler taking 200 ms is a visible freeze even if the median is microseconds.
+pub struct Slow {
+    event: &'static str,
+    fields: Value,
+    threshold: Duration,
+    start: Instant,
+}
+impl Slow {
+    pub fn new(event: &'static str, threshold: Duration, fields: Value) -> Self {
+        Self { event, fields, threshold, start: Instant::now() }
+    }
+}
+impl Drop for Slow {
+    fn drop(&mut self) {
+        let elapsed = self.start.elapsed();
+        if elapsed < self.threshold {
+            return;
+        }
+        let mut fields = self.fields.take();
+        fields["durationMs"] = json!(elapsed.as_millis() as u64);
+        record("WARN", self.event, fields);
     }
 }
 
@@ -865,6 +930,7 @@ impl HttpRequest {
             "/search" => "/search",
             "/orch" => "/orch",
             "/stat" => "/stat",
+            "/runs" => "/runs",
             p if p.starts_with("/hook/") => "/hook/:id",
             _ => "unknown",
         };
@@ -998,6 +1064,53 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+    #[test]
+    fn responsiveness_fields_survive_the_field_filter() {
+        // Every field the freeze instrumentation emits has to be registered, or it is dropped here and the
+        // log line arrives without the one number that made it worth writing.
+        let sid = uuid::Uuid::new_v4().to_string();
+        assert_eq!(
+            safe_fields(&json!({"status":"blocked","blockedMs":8100})),
+            json!({"status":"blocked","blockedMs":8100})
+        );
+        assert_eq!(
+            safe_fields(&json!({"status":"recovered","blockedMs":8600})),
+            json!({"status":"recovered","blockedMs":8600})
+        );
+        assert_eq!(
+            safe_fields(&json!({"lockWaitMs":120,"status":"poisoned"})),
+            json!({"lockWaitMs":120,"status":"poisoned"})
+        );
+        assert_eq!(
+            safe_fields(&json!({"sessionId":&sid,"step":"nudge_restore","cols":120,"rows":40,"durationMs":900})),
+            json!({"sessionId":&sid,"step":"nudge_restore","cols":120,"rows":40,"durationMs":900})
+        );
+        assert_eq!(
+            safe_fields(&json!({"bytes":65536,"subscribers":3,"durationMs":180})),
+            json!({"bytes":65536,"subscribers":3,"durationMs":180})
+        );
+        assert_eq!(
+            safe_fields(&json!({"file":"src/pty/manager.rs","line":1466})),
+            json!({"file":"src/pty/manager.rs","line":1466})
+        );
+        // Each synchronous command reported by `ui_thread_slow` must be a known protocol name.
+        for command in [
+            "pty_write", "pty_resize", "pty_kill", "set_native_theme", "native_notify",
+            "browser_navigate", "browser_reload", "browser_set_bounds", "browser_set_visible",
+            "browser_close",
+        ] {
+            assert_eq!(
+                safe_fields(&json!({"command":command,"durationMs":70})),
+                json!({"command":command,"durationMs":70}),
+                "{command} is missing from the approved command list"
+            );
+        }
+        // An absolute or traversing path is still not a source location.
+        assert!(safe_fields(&json!({"file":"/Users/someone/secret.rs/../x.rs"}))
+            .as_object()
+            .unwrap()
+            .is_empty());
     }
     #[test]
     fn levels_are_consistent() {

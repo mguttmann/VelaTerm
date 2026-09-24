@@ -6,6 +6,7 @@ import type { Session } from "../../types";
 
 vi.mock("../../ipc/commands", () => ({
   agentContextInfo: vi.fn().mockResolvedValue(null),
+  agentTurnStats: vi.fn().mockResolvedValue({ model: "Kiro model", contextLimit: 200000, contextPercent: 37 }),
   usageRefresh: vi.fn().mockResolvedValue(null),
 }));
 vi.mock("../../ipc/info", () => ({
@@ -36,6 +37,14 @@ const session = {
 } as unknown as Session;
 
 describe("InfoTab sections", () => {
+  it("displays Kiro's reported model and percentage without inventing token usage", async () => {
+    render(<InfoTab session={{ ...session, kind: "kiro", agentSessionId: "native-id" }} cwd="/tmp" />);
+    expect(await screen.findByText("Kiro model")).toBeTruthy();
+    expect(screen.getByText("37%")).toBeTruthy();
+    expect(screen.getByText("— / 200.0k")).toBeTruthy();
+    expect(screen.queryByText("turn tokens")).toBeNull();
+    expect(screen.queryByText("session total")).toBeNull();
+  });
   it("gives every section a collapse button and folds its body away", () => {
     render(<InfoTab session={session} cwd="/tmp" />);
     expect(screen.getByText("Process")).toBeTruthy();

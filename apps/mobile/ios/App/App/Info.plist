@@ -32,9 +32,9 @@
 		<true/>
 	</dict>
 	<key>NSCameraUsageDescription</key>
-	<string>扫描二维码，填写并访问 VelaTerm 服务地址。</string>
+	<string>VelaTerm uses the camera to scan QR codes for service addresses.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>连接局域网中的 VelaTerm 服务和 SSH 主机。</string>
+	<string>VelaTerm connects to VelaTerm services and SSH hosts on your local network.</string>
 	<key>UIApplicationSceneManifest</key>
 	<dict>
 		<key>UIApplicationSupportsMultipleScenes</key>

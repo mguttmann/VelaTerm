@@ -3,7 +3,6 @@
 //! Inactive tabs use `display:none`, keeping xterm and the PTY alive; dividers overlay the active tab.
 
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { MemoryRoute } from "../Memory/MemoryRoute";
 import { useMemoryTab } from "../Memory/useMemoryTab";
 import Icons from "../../components/Icons";
 import { useT } from "../../i18n";
@@ -37,6 +36,14 @@ import { TabBar } from "./TabBar";
 import { TerminalView } from "./TerminalView";
 import { ChatPane } from "./session/ChatPane";
 import { TaskView } from "./session/TaskView";
+import { TaskNavigation } from "./session/taskNavigation";
+
+// The memory route reaches the same editor stack through MemoryDocument, so it is imported
+// dynamically as well. A static import here would pull Crepe/CodeMirror/mermaid back into the entry
+// chunk and cancel out the split below.
+const MemoryRoute = lazy(() =>
+  import("../Memory/MemoryRoute").then((m) => ({ default: m.MemoryRoute })),
+);
 
 // Dynamically import the entire document editor. Crepe/CodeMirror plus ProseMirror exceeds 1 MB
 // before compression, so Vite splits it into a chunk that does not affect terminal startup.
@@ -292,6 +299,7 @@ export function CenterPane() {
 
   return (
     <div className="col col-mid">
+      <TaskNavigation />
       <TabBar />
       <div
         className="stage"
@@ -301,7 +309,9 @@ export function CenterPane() {
         onDragLeave={onStageDragLeave}
         onDrop={onStageDrop}
       >
-        <MemoryRoute />
+        <Suspense fallback={null}>
+          <MemoryRoute />
+        </Suspense>
         {searchOpen && activeSessionId && (sessionsById.get(activeSessionId) ?? ephemeralSessions[activeSessionId])?.engine !== "chat" && <SearchBar />}
 
         {openTabs.length === 0 && (

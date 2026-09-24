@@ -17,6 +17,27 @@ import static org.junit.Assert.*;
 /** Exercises the production native transport against a local SSH fixture; no WebView automation. */
 @RunWith(AndroidJUnit4.class)
 public class SshIntegrationTest {
+    @Test public void localizedRecoveryLayoutForAllElevenLanguages() {
+        InstrumentationRegistry.getInstrumentation().runOnMainSync(() -> {
+            var base = InstrumentationRegistry.getInstrumentation().getTargetContext();
+            for (String locale : new String[]{"en", "zh-CN", "zh-TW", "ja", "ko", "fr", "de", "es", "pt-BR", "ru", "vi"}) {
+                var configuration = new android.content.res.Configuration(base.getResources().getConfiguration());
+                configuration.setLocales(new android.os.LocaleList(java.util.Locale.forLanguageTag(locale)));
+                var context = base.createConfigurationContext(configuration);
+                var strings = new com.velaterm.remote.MobileText(context);
+                var panel = new com.velaterm.remote.ConnectionRecoveryView(context);
+                panel.show(strings.get("mobile.native.certificateRejected", java.util.Collections.emptyMap()), false);
+                saveRecoverySnapshot(panel, "recovery-" + locale + ".png");
+                for (var button : new android.widget.Button[]{panel.getRetryButton(), panel.getBackButton()}) {
+                    assertFalse(locale, button.getText().toString().contains("mobile."));
+                    assertNotNull(locale, button.getLayout());
+                    for (int line = 0; line < button.getLayout().getLineCount(); line++) assertEquals(locale, 0, button.getLayout().getEllipsisCount(line));
+                }
+                assertTrue(locale, panel.getBackButton().getTop() - panel.getRetryButton().getBottom() >= 16 * context.getResources().getDisplayMetrics().density);
+            }
+        });
+    }
+
     @Test public void nativeTaskNotificationCarriesConnectionAndSession() throws Exception {
         try (ActivityScenario<MainActivity> scenario = ActivityScenario.launch(MainActivity.class)) {
             AtomicReference<Throwable> failure = new AtomicReference<>();

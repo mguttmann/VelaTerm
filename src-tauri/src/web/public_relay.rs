@@ -423,6 +423,9 @@ pub(crate) fn sync(app: &AppCtx) -> Result<(), String> {
 }
 
 fn sync_grants(app: &AppCtx, config: &Config) -> Result<(), String> {
+    // Serialize the remote snapshot and its acknowledgement with local grant mutations.
+    // A snapshot fetched before an enable must never remove that newly created grant.
+    let _lock = FILE_LOCK.lock().map_err(|_| "Sharing unavailable")?;
     let grants = request(
         &config.origin,
         "/api/device-link/host/grants",
@@ -434,7 +437,6 @@ fn sync_grants(app: &AppCtx, config: &Config) -> Result<(), String> {
         .filter_map(|grant| grant["share"]["id"].as_str()).collect();
     let mut confirmed = Vec::new();
     {
-        let _lock = FILE_LOCK.lock().map_err(|_| "Sharing unavailable")?;
         let mut current = load(app)?;
         if current.device_id != config.device_id || current.token != config.token {
             return Err("Account changed".into());
@@ -549,4 +551,71 @@ mod tests {
         drop(app);
         std::fs::remove_dir_all(dir).unwrap();
     }
+
+    #[test]
+    fn grant_sync_does_not_erase_a_concurrent_enable() {
+        use std::sync::mpsc;
+        use std::thread;
+        let dir = std::env::temp_dir().join(format!("vlx-grant-race-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let server = loop {
+            let port = 10000 + (uuid::Uuid::new_v4().as_u128() % 39152) as u16;
+            if let Ok(server) = tiny_http::Server::http(("127.0.0.1", port)) { break server; }
+        };
+        let config = Config {
+            origin: format!("http://{}", server.server_addr()),
+            device_id: "11111111-1111-1111-1111-111111111111".into(),
+            token: "synthetic-token".into(), shares: HashMap::new(),
+        };
+        let db = crate::db::Db::open(&dir.join("test.db")).unwrap();
+        let app = AppCtx::Headless(std::sync::Arc::new(HeadlessHost::new(dir.clone(), db)));
+        save(&app, &config).unwrap();
+        let (requested_tx, requested_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            let request = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+            assert_eq!(request.url(), "/api/device-link/host/grants");
+            requested_tx.send(()).unwrap();
+            release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            request.respond(tiny_http::Response::from_string("[]")).unwrap();
+            let mut request = server.recv_timeout(Duration::from_secs(5)).unwrap().unwrap();
+            assert_eq!(request.method().as_str(), "PUT");
+            assert_eq!(request.url(), "/api/device-link/host/shared-scopes");
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            assert_eq!(body, "[]");
+            request.respond(tiny_http::Response::from_string("null")).unwrap();
+        });
+        let sync_app = app.clone();
+        let sync_thread = thread::spawn(move || sync_grants(&sync_app, &config));
+        requested_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let (writing_tx, writing_rx) = mpsc::channel();
+        let (written_tx, written_rx) = mpsc::channel();
+        let write_app = app.clone();
+        let writer = thread::spawn(move || {
+            writing_tx.send(()).unwrap();
+            let _lock = FILE_LOCK.lock().unwrap();
+            let mut current = load(&write_app).unwrap();
+            current.shares.insert("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".into(), LocalShare {
+                scope: ShareScope { scope: "machine".into(), target_id: None, push_authority: None },
+                secret: "synthetic-secret".into(), password_hash: None,
+                allowed_accounts: vec!["synthetic-owner".into()],
+            });
+            save(&write_app, &current).unwrap();
+            written_tx.send(()).unwrap();
+        });
+        writing_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        // Let the old implementation commit its new grant while the earlier GET is still pending.
+        let write_finished_before_snapshot = written_rx.recv_timeout(Duration::from_millis(100)).is_ok();
+        release_tx.send(()).unwrap();
+        sync_thread.join().unwrap().unwrap();
+        writer.join().unwrap();
+        server_thread.join().unwrap();
+        let retained = load(&app).unwrap().shares.contains_key("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa");
+        drop(app);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert!(retained, "an older grant snapshot erased the newly enabled grant");
+        assert!(!write_finished_before_snapshot, "grant mutations must wait for the complete synchronization");
+    }
+
 }

@@ -1,9 +1,57 @@
 # Changelog
 
-> Created: 2026-07-09 16:10 · Updated: 2026-09-14
+> Created: 2026-07-09 16:10 · Updated: 2026-09-24
 
 All notable changes to VelaTerm are documented here, newest first.
 v0.1.91 is the first public release; earlier version numbers were internal iterations and are not covered.
+
+---
+
+## v0.2.3 — 2026-09-24
+
+- 🪟 Existing sessions can be moved into splits. The sidebar's context menu opens a session in a right split, a bottom split or the focused pane; dragging a session onto the edge of a pane splits in that direction, and dropping it in the middle replaces what that pane shows. Two to four selected sessions can be tiled into one evenly divided tab, and sessions shown in the current tab's other panes are marked in the sidebar.
+
+- 🗂️ Background tasks started by an agent open in their own tabs next to the conversation, with status, elapsed time, tokens, tool calls, the last reported tool and each agent's phases. A task has its own address, and leaving it returns to the pane it was opened from.
+
+- 💬 In the conversation view, a message that begins with `!` runs in the session's shell. Output streams in as it arrives, the exit code is shown, the command can be cancelled while it runs, and it stays in the reading history of Claude, Codex, OpenCode, Pi and OMP sessions.
+
+- ⏱️ The new `vrun` command starts a long-running command and waits for it in a single call, so an agent finds out when the work has actually finished. Commands started this way are listed above the terminal with their running time, a log window and a stop button that asks for confirmation.
+
+- ⌨️ New agent sessions have their own page and keyboard shortcut: search agents and presets, reuse the one you used last, and choose whether the session is created next to the current one or under it.
+
+- 🧰 The composer toolbar is configurable in Settings — choose which items sit beside the message and in which order. Items you switch off, and items that do not fit the width, remain available from the More menu.
+
+- 📥 Downloading a file in a URL or SSH connection window starts with a save dialog on this machine and then shows the download's progress, with a button to cancel it.
+
+- 🗃️ Kiro sessions can be imported into a project and read: import matches sessions by working directory, and each one opens in a read-only history view with search. Text-only records are supported for now.
+
+- 🧠 Organizing the knowledge base works with Grok, OpenCode, Pi and OMP in addition to Claude and Codex, and the agent is chosen from the same kind of dropdown used elsewhere in the app.
+
+- 📱 iOS and Android: the start page keeps your SSH and URL connections, signs in to a VelaTerm account and lists the devices sharing with it. A host fingerprint is confirmed once and remembered, a QR code fills in the service address, and every native screen and system prompt is translated into all 11 interface languages.
+
+- 🔐 Claude sessions start in the permission mode you chose: additional launch arguments keep their intended precedence, the mode is reconciled with what the CLI reports at startup, and a session started with confirmations skipped stays marked that way.
+
+- 🧩 The model menu lists Opus 5.5 and adds the extra models the selected CLI reports while keeping the built-in order; a model that arrives with a CLI update appears without restarting the app.
+
+- 🌱 Child-session requests survive interruptions: a request whose answer was lost can be recovered after reconnecting, a launch that was already confirmed reuses the same session and settings when it is retried, and a worktree that could not be created is rolled back without touching anything that existed before.
+
+- ⚡ The app starts faster — the code loaded at startup is roughly half its previous size, and the knowledge base, security audit, session import and shared-projects pages load when you open them.
+
+- 🖼️ Images pasted or dropped into a message are scaled down to 1568 pixels on the long side before they are sent.
+
+- 🐚 Bash sessions load shell completion from a startup file, so a new Bash session no longer opens with a command already typed into it. Login profiles are still read in Bash's own order.
+
+- ✍️ Markdown: a single tilde no longer strikes through the rest of the line, so a pasted shell prompt stays readable, and bold or italic text that ends next to Chinese, Japanese or Korean characters closes properly instead of leaving asterisks on screen.
+
+- 📨 `vtell --steer` delivers a message into the turn the recipient is currently running instead of waiting for that turn to end. A recipient stopped on a question is reported as blocked, because the message is only read once that question has been answered.
+
+- 🔁 In the conversation view a session's status ends as soon as its turn does, the unread mark clears when work really starts, and a session whose background work is still running stays marked as running.
+
+- 🪟 Windows: Cursor hooks start correctly, and the window layer has been updated for the keyboard input problems reported after an RDP reconnection or a virtual-desktop switch.
+
+- 🛡️ Security audit: the model list and the agent names come from the same launch catalogue as the rest of the app, so earlier runs show each agent's current name.
+
+- 🩹 Smaller fixes: error messages in the conversation line up with the centre column, both launch dialogs can always be closed and a confirmed launch that failed can be cancelled, messages and queued messages show who sent them, a long queue scrolls within a fixed height, empty HTML anchors no longer show a marker while editing a document, and the phone's status filter picks up sessions that start matching it later.
 
 ---
 

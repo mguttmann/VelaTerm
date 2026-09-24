@@ -61,7 +61,7 @@ it("hides stale controls after a mutation fails and retries only the read", asyn
 });
 
 it("keeps the Tasks chip in the row with an empty task list and says so when opened", () => {
-  render(<TasksChip tasks={[]} busy={false} onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />);
+  render(<TasksChip sessionId="s" tasks={[]} busy={false} onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />);
   const chip = screen.getByRole("button", { name: "Tasks" });
   expect(chip.hasAttribute("disabled")).toBe(false);
   expect(chip.querySelector(".sv-chip-badge")).toBeNull();
@@ -73,7 +73,7 @@ it("keeps the Tasks chip in the row with an empty task list and says so when ope
 it("draws disabled MCP and Tasks chips that open nothing and ask the backend nothing without a process", () => {
   const { rerender } = render(<>
     <McpChip sessionId="session-a" disabled />
-    <TasksChip tasks={[]} busy={false} disabled onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />
+    <TasksChip sessionId="s" tasks={[]} busy={false} disabled onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />
   </>);
   const mcp = screen.getByRole("button", { name: "MCP" });
   const tasks = screen.getByRole("button", { name: "Tasks" });
@@ -90,7 +90,7 @@ it("draws disabled MCP and Tasks chips that open nothing and ask the backend not
   vi.mocked(chatMcpStatus).mockResolvedValueOnce({ mcpServers: [] });
   rerender(<>
     <McpChip sessionId="session-a" />
-    <TasksChip tasks={[]} busy={false} onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />
+    <TasksChip sessionId="s" tasks={[]} busy={false} onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />
   </>);
   expect(mcp.hasAttribute("disabled")).toBe(false);
   expect(mcp.getAttribute("title")).toBe("MCP servers");
@@ -99,21 +99,21 @@ it("draws disabled MCP and Tasks chips that open nothing and ask the backend not
 });
 
 it("closes an open popover when the chip becomes disabled", () => {
-  const { rerender } = render(<TasksChip tasks={[]} busy={false} onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />);
+  const { rerender } = render(<TasksChip sessionId="s" tasks={[]} busy={false} onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />);
   fireEvent.click(screen.getByRole("button", { name: "Tasks" }));
   expect(screen.getByText("No background tasks")).toBeTruthy();
-  rerender(<TasksChip tasks={[]} busy={false} disabled onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />);
+  rerender(<TasksChip sessionId="s" tasks={[]} busy={false} disabled onStop={() => {}} onOpen={() => {}} onBackgroundAll={() => {}} />);
   expect(screen.queryByText("No background tasks")).toBeNull();
   expect(screen.getByRole("button", { name: "Tasks" }).getAttribute("aria-expanded")).toBe("false");
 });
 
 const tasks: ChatBackgroundTask[] = [
-  { task_id: "w1", task_type: "local_workflow", description: "Beta: gamma-worker", summary: "protocol probe", status: "running" },
-  { task_id: "sh1", task_type: "local_bash", description: "npm test", status: "completed" },
+  { task_id: "w1", task_type: "local_workflow", description: "Beta: gamma-worker", summary: "protocol probe", status: "running", can_stop: true, finished: false },
+  { task_id: "sh1", task_type: "local_bash", description: "npm test", status: "completed", can_stop: false, finished: true },
 ];
 
 function renderTasks(onOpen = vi.fn(), onStop = vi.fn()) {
-  render(<TasksChip tasks={tasks} busy={false} onStop={onStop} onOpen={onOpen} onBackgroundAll={vi.fn()} />);
+  render(<TasksChip sessionId="s" tasks={tasks} busy={false} onStop={onStop} onOpen={onOpen} onBackgroundAll={vi.fn()} />);
   fireEvent.click(screen.getByRole("button", { name: /Tasks/ }));
   return { onOpen, onStop };
 }
@@ -136,13 +136,14 @@ it("opens the task behind a row, and Stop stops without opening", () => {
   expect(onOpen).toHaveBeenCalledTimes(1);
 });
 
-it("opens and stops through real buttons that do not nest, so both work from the keyboard", () => {
+it("opens through a task link and stops through a separate command button", () => {
   const { onOpen, onStop } = renderTasks();
   const [open] = screen.getAllByTitle("Open task");
   const stop = screen.getByRole("button", { name: "Stop" });
   // Native buttons: the browser itself activates them on Enter and Space, which jsdom does not emulate,
   // so the element kind and the focus order are what is asserted here.
-  expect(open.tagName).toBe("BUTTON");
+  expect(open.tagName).toBe("A");
+  expect(open.getAttribute("href")).toContain("taskSession=s&taskId=w1");
   expect(stop.tagName).toBe("BUTTON");
   expect(open.contains(stop)).toBe(false);
   expect(stop.contains(open)).toBe(false);

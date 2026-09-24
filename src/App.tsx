@@ -1,6 +1,6 @@
 //! Vlinx application root: title bar, project/terminal/info columns, and status bar.
 
-import { useEffect } from "react";
+import { lazy, Suspense, useEffect } from "react";
 import { GitbashDownloadBanner } from "./components/GitbashDownloadBanner";
 import { ErrorLogModal } from "./components/ErrorLogModal";
 import { Splitter } from "./components/Splitter";
@@ -13,11 +13,7 @@ import { SpawnConfirmModal } from "./components/SpawnConfirmModal";
 import { UpdateModal } from "./components/UpdateModal";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 import { useNotifications } from "./hooks/useNotifications";
-import { SharedProjectsRoute } from "./sharing/SharedProjects";
 import { CenterPane } from "./layout/CenterPane/CenterPane";
-import { KnowledgeRoute } from "./layout/Knowledge/KnowledgeRoute";
-import { SecurityRoute } from "./layout/Security/SecurityRoute";
-import { ImportSessionsRoute } from "./layout/ImportSessions";
 import { LeftSidebar } from "./layout/LeftSidebar/LeftSidebar";
 import { RightPanel } from "./layout/RightPanel/RightPanel";
 import { StatusBar } from "./layout/StatusBar/StatusBar";
@@ -26,8 +22,6 @@ import { runMenuAction } from "./layout/TitleBar/appMenuActions";
 import { listShells } from "./ipc/commands";
 import {
   onMenuAction,
-  onSpawnRequest,
-  onSpawnResolved,
   onPresetsChanged,
   onSessionState,
   onTreeChanged,
@@ -37,8 +31,10 @@ import {
   refreshSettingsFromBackend,
   startSettingsWatch,
 } from "./store/settingsWatch";
-import { getClientSource, isTauri } from "./ipc/transport";
+import { isTauri } from "./ipc/transport";
+import { startSpawnRecovery } from "./ipc/spawnRecovery";
 import { isShareSurface } from "./ipc/shareBase";
+import { isMobileView } from "./mobile/detect";
 import { useSharedSessionNavigation } from "./sharing/useSharedSessionNavigation";
 import { wsClient } from "./ipc/wsClient";
 import { startUpdateSchedule } from "./ipc/updater";
@@ -52,6 +48,27 @@ import { startMirrorSync } from "./store/mirrorSync";
 import { useTermStore } from "./store/termStore";
 import { startUsageSync } from "./store/usageSync";
 import { watchSystemTheme } from "./theme";
+
+// Full-screen surfaces driven entirely by query parameters. Each renders null until its parameter is
+// present, so importing them on demand keeps their code and dependencies out of the entry chunk.
+const KnowledgeRoute = lazy(() =>
+  import("./layout/Knowledge/KnowledgeRoute").then((m) => ({ default: m.KnowledgeRoute })),
+);
+const SecurityRoute = lazy(() =>
+  import("./layout/Security/SecurityRoute").then((m) => ({ default: m.SecurityRoute })),
+);
+const ImportSessionsRoute = lazy(() =>
+  import("./layout/ImportSessions").then((m) => ({ default: m.ImportSessionsRoute })),
+);
+const NewAgentSessionRoute = lazy(() =>
+  import("./layout/NewAgentSession/NewAgentSessionRoute").then((m) => ({ default: m.NewAgentSessionRoute })),
+);
+const KiroHistoryRoute = lazy(() =>
+  import("./layout/KiroHistory/KiroHistoryRoute").then((m) => ({ default: m.KiroHistoryRoute })),
+);
+const SharedProjectsRoute = lazy(() =>
+  import("./sharing/SharedProjects").then((m) => ({ default: m.SharedProjectsRoute })),
+);
 
 /** Isolated notification side-effect host. Changes to activeSessionId, notifications, and
  * windowFocused rerender only this null component instead of the entire App tree, avoiding stalls
@@ -67,7 +84,6 @@ function App() {
   const resizeLeft = useTermStore((s) => s.resizeLeft);
   const resizeRight = useTermStore((s) => s.resizeRight);
   const loadTree = useTermStore((s) => s.loadTree);
-  const handleSpawnRequest = useTermStore((s) => s.handleSpawnRequest);
   const applyAppearance = useTermStore((s) => s.applyAppearance);
 
   useKeyboardShortcuts();
@@ -118,12 +134,7 @@ function App() {
     const unwatch = watchSystemTheme(() => {
       if (useTermStore.getState().theme === "system") applyAppearance();
     });
-    const unlisten = onSpawnRequest((req) => void handleSpawnRequest(req));
-    const unlistenResolved = onSpawnResolved((ev) => {
-      // Skip our own echo — we already removed the card locally.
-      if (ev.source === getClientSource()) return;
-      useTermStore.getState().handleSpawnResolved(ev.parentSessionId, ev.prompt);
-    });
+    const stopSpawnRecovery = startSpawnRecovery();
     const consumeOpenProject = () => {
       void platform.window
         .takeOpenProjectRequest()
@@ -189,8 +200,7 @@ function App() {
     return () => {
       unwatch();
       offConnState?.();
-      void unlisten.then((fn) => fn());
-      void unlistenResolved.then((fn) => fn());
+      stopSpawnRecovery();
       void unlistenOpenProject.then((fn) => fn());
       void unlistenView.then((fn) => fn());
       clearTimeout(treeTimer);
@@ -242,10 +252,20 @@ function App() {
         )}
       </div>
       <StatusBar />
-      <ImportSessionsRoute />
-      <KnowledgeRoute />
-      <SecurityRoute />
-      <SharedProjectsRoute />
+      <Suspense fallback={null}>
+        <ImportSessionsRoute />
+        {!isShareSurface && <NewAgentSessionRoute />}
+        {!isShareSurface && !isMobileView() && <KiroHistoryRoute />}
+      </Suspense>
+      <Suspense fallback={null}>
+        <KnowledgeRoute />
+      </Suspense>
+      <Suspense fallback={null}>
+        <SecurityRoute />
+      </Suspense>
+      <Suspense fallback={null}>
+        <SharedProjectsRoute />
+      </Suspense>
       <DirectoryPickerModal />
       <CreateProjectModal />
       <CloneProjectModal />

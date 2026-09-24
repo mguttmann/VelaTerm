@@ -34,11 +34,12 @@ fn main() {
     // Hidden lifecycle-hook/notify subcommands: forward the event and exit without starting the GUI.
     if matches!(
         args.get(1).map(String::as_str),
-        Some("--notify") | Some("--notify-env") | Some("--codex-hook") | Some("--grok-hook")
+        Some("--notify") | Some("--notify-env") | Some("--codex-hook") | Some("--grok-hook") | Some("--cursor-hook")
     ) {
         match args.get(1).map(String::as_str) {
             Some("--codex-hook") => velaterm_lib::run_codex_hook(&args),
             Some("--grok-hook") => velaterm_lib::run_grok_hook(&args),
+            Some("--cursor-hook") => velaterm_lib::run_cursor_hook(&args),
             _ => velaterm_lib::run_notify(&args),
         }
         return;
@@ -50,6 +51,7 @@ fn main() {
     match args.get(1).map(String::as_str) {
         Some("--spawn") => velaterm_lib::run_spawn(&args),
         Some("--tell") => velaterm_lib::run_tell(&args),
+        Some("--run") => velaterm_lib::run_wait(&args),
         Some("--flow") => velaterm_lib::run_flow(&args),
         Some("--view") => velaterm_lib::run_view(&args),
         Some("--refer") => velaterm_lib::run_refer(&args),

@@ -5,13 +5,12 @@
 //! three tested `--plugin-dir` layouts failed to activate hooks. To avoid modifying repositories, merge
 //! into the user-level `~/.cursor/hooks.json` with the user's consent:
 //!
-//! - Install a static script at `~/.cursor/vlx-term/hook.sh` in its own namespace.
-//! - Merge references into `~/.cursor/hooks.json`, replacing only entries whose command contains
-//!   `vlx-term/hook.sh` and preserving all user hooks. Refuse malformed object/array structures rather
-//!   than risk damaging configuration.
-//! - The static script reads injected `VLX_SESSION_ID`, `VLX_TOKEN`, and `VLX_SPAWN_URL`, forwards stdin
-//!   unchanged to `/hook/<sid>?t=<token>&e=<event>`, and keeps dynamic ports/tokens in the environment.
-//! - In unmanaged Cursor sessions with missing variables, it quietly returns `{}` as a no-op.
+//! - Unix uses an explicitly invoked POSIX shim; Windows uses an encoded PowerShell launcher.
+//! - Both launch the hidden `--cursor-hook` entry without invoking file associations or starting a GUI.
+//! - Merge only VelaTerm commands into `~/.cursor/hooks.json`, preserving user entries and refusing
+//!   malformed configuration. Recognize both separators when migrating legacy script commands.
+//! - Dynamic executable paths, ports, session IDs, and tokens remain in the injected environment.
+//! - The native hook bounds stdin and HTTP IO and always returns `{}` with a successful exit.
 //! - Installation is lazy and occurs only when the user actually launches a Cursor session.
 //!
 //! Event-to-state mapping, verified in interactive CLI mode. Payloads include the conversation/session
@@ -26,25 +25,77 @@
 
 use std::path::{Path, PathBuf};
 
-/// Marker identifying VelaTerm entries in hooks.json by command substring.
-const MARKER: &str = "vlx-term/hook.sh";
+mod hook;
+pub use hook::run;
 
-/// Static POSIX hook script where `$1` is working, waiting, or boot. Missing variables consume stdin and
-/// return `{}` successfully. curl is limited to three seconds and all failures exit successfully so the
-/// hook cannot disrupt Cursor. The final `{}` is Cursor's empty continue response.
+/// Legacy marker retained for upgrades from script-based hooks.
+const MARKER: &str = "vlx-term/hook.sh";
+const NATIVE_MARKER: &str = "velaterm-cursor-hook-v1";
+const WINDOWS_COMMAND_PREFIX: &str = "powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -EncodedCommand ";
+
+/// Explicit `sh` invocation avoids executable-bit and script-association dependencies.
 const HOOK_SCRIPT: &str = r#"#!/bin/sh
-# VelaTerm status-bridge hook, installed and updated automatically and safe to delete at any time.
-# Active only in Cursor sessions launched by VelaTerm; missing VLX_* variables make it a no-op.
-if [ -z "$VLX_SPAWN_URL" ] || [ -z "$VLX_SESSION_ID" ] || [ -z "$VLX_TOKEN" ]; then
-  cat >/dev/null 2>&1
-  echo '{}'
-  exit 0
+# VelaTerm status bridge. Dynamic values belong to the managed agent environment.
+if [ -n "$VLX_EXE" ] && [ -x "$VLX_EXE" ]; then
+  "$VLX_EXE" --cursor-hook "$1" 2>/dev/null || printf '{}\n'
+else
+  printf '{}\n'
 fi
-curl -s -m 3 -X POST -H "Content-Type: application/json" --data-binary @- \
-  "$VLX_SPAWN_URL/hook/$VLX_SESSION_ID?t=$VLX_TOKEN&e=$1" >/dev/null 2>&1
-echo '{}'
 exit 0
 "#;
+
+/// The command contains no user paths or shell metacharacters. ProcessStartInfo passes VLX_EXE as
+/// data, disables ShellExecute/file associations and console windows, and copies raw stdin bytes.
+/// Both the pipe copy and child wait are bounded; the wrapper emits exactly one continue response.
+fn windows_command(event: &str) -> String {
+    use base64::Engine;
+    let code = format!(r#"# {NATIVE_MARKER}
+$ErrorActionPreference = 'Stop'
+$ProgressPreference = 'SilentlyContinue'
+$p = $null
+try {{
+  if ($env:VLX_EXE -and $env:VLX_SPAWN_URL -and $env:VLX_SESSION_ID -and $env:VLX_TOKEN) {{
+    $p = New-Object System.Diagnostics.Process
+    $p.StartInfo.FileName = $env:VLX_EXE
+    $p.StartInfo.Arguments = '--cursor-hook {event}'
+    $p.StartInfo.UseShellExecute = $false
+    $p.StartInfo.CreateNoWindow = $true
+    $p.StartInfo.RedirectStandardInput = $true
+    $p.StartInfo.RedirectStandardOutput = $true
+    $p.StartInfo.RedirectStandardError = $true
+    if ($p.Start()) {{
+      $copy = [Console]::OpenStandardInput().CopyToAsync($p.StandardInput.BaseStream)
+      $null = $copy.Wait(1000)
+      $p.StandardInput.Close()
+      if (-not $p.WaitForExit(3500)) {{ $p.Kill() }}
+    }}
+  }}
+}} catch {{
+}} finally {{
+  if ($p) {{
+    try {{ if (-not $p.HasExited) {{ $p.Kill() }} }} catch {{}}
+    $p.Dispose()
+  }}
+}}
+[Console]::Out.WriteLine('{{}}')
+exit 0
+"#);
+    let bytes: Vec<u8> = code.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    format!("{WINDOWS_COMMAND_PREFIX}{}", base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+fn is_vlx_command(command: &str) -> bool {
+    let normalized = command.replace('\\', "/");
+    if normalized.contains(MARKER) { return true; }
+    // Recognize our namespace across launcher updates, without matching unrelated PowerShell hooks.
+    use base64::Engine;
+    let Some(encoded) = command.strip_prefix(WINDOWS_COMMAND_PREFIX) else { return false; };
+    if encoded.len() > 16384 { return false; }
+    let Ok(bytes) = base64::engine::general_purpose::STANDARD.decode(encoded) else { return false; };
+    if bytes.len() % 2 != 0 { return false; }
+    let units: Vec<_> = bytes.chunks_exact(2).map(|v| u16::from_le_bytes([v[0], v[1]])).collect();
+    String::from_utf16(&units).is_ok_and(|code| code.starts_with(&format!("# {NATIVE_MARKER}\n")))
+}
 
 /// Cursor configuration root: `~/.cursor`.
 fn cursor_home() -> Option<PathBuf> {
@@ -68,9 +119,14 @@ const EVENTS: [(&str, &str); 3] = [
     ("stop", "waiting"),
 ];
 
-/// Build an entry pointing to the hook script: `{"command": "<absolute script path> <event>"}`.
+/// Paths are single-quoted for POSIX shells; apostrophes are escaped without expansion.
 fn hook_entry(script: &Path, event: &str) -> serde_json::Value {
-    serde_json::json!({ "command": format!("{} {event}", script.display()) })
+    let command = if cfg!(windows) {
+        windows_command(event)
+    } else {
+        format!("sh '{}' {event}", script.to_string_lossy().replace('\'', "'\"'\"'"))
+    };
+    serde_json::json!({ "command": command, "timeout": 6 })
 }
 
 /// Merge VelaTerm entries into the hooks.json root object in place.
@@ -98,7 +154,7 @@ fn merge_into(root: &mut serde_json::Value, script: &Path) -> Result<(), String>
         arr.retain(|e| {
             !e.get("command")
                 .and_then(|c| c.as_str())
-                .is_some_and(|c| c.contains(MARKER))
+                .is_some_and(|c| is_vlx_command(c))
         });
         arr.push(hook_entry(script, status));
     }
@@ -117,27 +173,12 @@ pub fn install() -> Result<PathBuf, String> {
 
 /// As `install`, with explicit target paths for tests.
 fn install_at(script: &Path, hooks_json: &Path) -> Result<PathBuf, String> {
-    // 1. Preserve matching script contents; make newly written scripts executable.
-    let script_current = std::fs::read_to_string(script)
-        .map(|s| s == HOOK_SCRIPT)
-        .unwrap_or(false);
-    if !script_current {
-        if let Some(parent) = script.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("Failed to create script directory: {e}"))?;
-        }
-        std::fs::write(script, HOOK_SCRIPT)
-            .map_err(|e| format!("Failed to write hook script: {e}"))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(script, std::fs::Permissions::from_mode(0o755))
-                .map_err(|e| format!("Failed to set script executable bit: {e}"))?;
-        }
-    }
-
-    // 2. Read hooks.json or an empty object, merge, and preserve matching content. Never touch invalid JSON.
-    let existing = std::fs::read_to_string(hooks_json).ok();
+    // Validate before changing either file. Only a missing file means a fresh configuration.
+    let existing = match std::fs::read_to_string(hooks_json) {
+        Ok(text) => Some(text),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(format!("Failed to read hooks.json; not written: {e}")),
+    };
     let mut root: serde_json::Value = match &existing {
         Some(text) => serde_json::from_str(text).map_err(|_| {
             "~/.cursor/hooks.json is not valid JSON; not written (please check manually)"
@@ -146,6 +187,21 @@ fn install_at(script: &Path, hooks_json: &Path) -> Result<PathBuf, String> {
         None => serde_json::json!({}),
     };
     merge_into(&mut root, script)?;
+
+    if !cfg!(windows) {
+        let script_current = std::fs::read_to_string(script)
+            .map(|s| s == HOOK_SCRIPT)
+            .unwrap_or(false);
+        if !script_current {
+            if let Some(parent) = script.parent() {
+                std::fs::create_dir_all(parent)
+                    .map_err(|e| format!("Failed to create script directory: {e}"))?;
+            }
+            std::fs::write(script, HOOK_SCRIPT)
+                .map_err(|e| format!("Failed to write hook script: {e}"))?;
+        }
+    }
+
     let content = serde_json::to_string_pretty(&root)
         .map_err(|e| format!("Failed to serialize hooks.json: {e}"))?;
     if existing.as_deref() != Some(content.as_str()) {
@@ -179,24 +235,17 @@ mod tests {
 
         install_at(&script, &hooks).expect("installation should succeed");
 
-        // The script has matching content and is executable.
-        assert_eq!(std::fs::read_to_string(&script).unwrap(), HOOK_SCRIPT);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = std::fs::metadata(&script).unwrap().permissions().mode();
-            assert_eq!(mode & 0o111, 0o111, "the script should be executable");
+        if !cfg!(windows) {
+            assert_eq!(std::fs::read_to_string(&script).unwrap(), HOOK_SCRIPT);
         }
 
         // hooks.json has version 1 and one script command with event name for each of three events.
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&hooks).unwrap()).unwrap();
         assert_eq!(v["version"], 1);
-        let cmd_of = |ev: &str| v["hooks"][ev][0]["command"].as_str().unwrap().to_string();
-        assert!(cmd_of("sessionStart").ends_with(" boot"));
-        assert!(cmd_of("beforeSubmitPrompt").ends_with(" working"));
-        assert!(cmd_of("stop").ends_with(" waiting"));
-        assert!(cmd_of("stop").contains(MARKER));
+        for (event, status) in EVENTS {
+            assert_eq!(v["hooks"][event][0], hook_entry(&script, status));
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -209,7 +258,7 @@ mod tests {
 
         install_at(&script, &hooks).unwrap();
         let mtime1 = std::fs::metadata(&hooks).unwrap().modified().unwrap();
-        let smtime1 = std::fs::metadata(&script).unwrap().modified().unwrap();
+        let smtime1 = std::fs::metadata(&script).ok().and_then(|m| m.modified().ok());
         install_at(&script, &hooks).unwrap();
         assert_eq!(
             std::fs::metadata(&hooks).unwrap().modified().unwrap(),
@@ -217,7 +266,7 @@ mod tests {
             "hooks.json should not be rewritten when the contents are identical"
         );
         assert_eq!(
-            std::fs::metadata(&script).unwrap().modified().unwrap(),
+            std::fs::metadata(&script).ok().and_then(|m| m.modified().ok()),
             smtime1,
             "the script should not be rewritten when the contents are identical"
         );
@@ -267,14 +316,10 @@ mod tests {
         // The old entry is replaced by one current entry pointing to the new script and waiting event.
         let vlx: Vec<_> = stop
             .iter()
-            .filter(|e| e["command"].as_str().unwrap().contains(MARKER))
+            .filter(|e| is_vlx_command(e["command"].as_str().unwrap()))
             .collect();
         assert_eq!(vlx.len(), 1, "the vlx entries should be deduplicated to one");
-        assert!(vlx[0]["command"].as_str().unwrap().ends_with(" waiting"));
-        assert!(vlx[0]["command"]
-            .as_str()
-            .unwrap()
-            .starts_with(&script.display().to_string()));
+        assert_eq!(*vlx[0], hook_entry(&script, "waiting"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -318,4 +363,86 @@ mod tests {
         merge_into(&mut root, Path::new("/x/vlx-term/hook.sh")).unwrap();
         assert_eq!(root["version"], 2);
     }
+
+    #[test]
+    fn migration_removes_mixed_separator_duplicates_and_preserves_user_fields() {
+        let user = serde_json::json!({ "command": "my-hook --keep", "timeout": 42, "custom": true });
+        let old = [
+            r"C:\Users\with space\.cursor\vlx-term\hook.sh working",
+            "sh '/old/.cursor/vlx-term/hook.sh' working",
+            "bash C:/old/vlx-term/hook.sh working",
+        ];
+        let mut root = serde_json::json!({"custom": {"keep": 1}, "version": 2, "hooks": {"afterFileEdit": [user.clone()]}});
+        for (event, _) in EVENTS {
+            let mut entries: Vec<_> = old.iter().map(|command| serde_json::json!({"command": command})).collect();
+            entries.push(user.clone());
+            entries.push(serde_json::json!({"command": windows_command("working")}));
+            root["hooks"][event] = entries.into();
+        }
+        let script = Path::new("/new/vlx-term/hook.sh");
+        merge_into(&mut root, script).unwrap();
+        let once = root.clone();
+        merge_into(&mut root, script).unwrap();
+        assert_eq!(root, once);
+        assert_eq!(root["custom"]["keep"], 1);
+        assert_eq!(root["version"], 2);
+        assert_eq!(root["hooks"]["afterFileEdit"], serde_json::json!([user.clone()]));
+        for (event, status) in EVENTS {
+            assert_eq!(root["hooks"][event], serde_json::json!([user.clone(), hook_entry(script, status)]));
+        }
+    }
+
+    #[test]
+    fn invalid_utf8_and_unreadable_config_are_not_replaced() {
+        let dir = tmp_dir("non-utf8");
+        let hooks = dir.join("hooks.json");
+        let script = dir.join("vlx-term/hook.sh");
+        let invalid = b"{\"custom\":\"\xff\"}";
+        std::fs::write(&hooks, invalid).unwrap();
+        assert!(install_at(&script, &hooks).is_err());
+        assert_eq!(std::fs::read(&hooks).unwrap(), invalid);
+        assert!(!script.exists());
+        std::fs::remove_file(&hooks).unwrap();
+        std::fs::create_dir(&hooks).unwrap();
+        assert!(install_at(&script, &hooks).is_err());
+        assert!(hooks.is_dir());
+        assert!(!script.exists());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn malformed_event_array_preserves_both_files() {
+        let dir = tmp_dir("bad-event");
+        let hooks = dir.join("hooks.json");
+        let script = dir.join("hook.sh");
+        let original = r#"{"hooks":{"stop":{},"sessionStart":[]},"custom":1}"#;
+        std::fs::write(&hooks, original).unwrap();
+        std::fs::write(&script, "old script").unwrap();
+        assert!(install_at(&script, &hooks).is_err());
+        assert_eq!(std::fs::read_to_string(hooks).unwrap(), original);
+        assert_eq!(std::fs::read_to_string(script).unwrap(), "old script");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn posix_launcher_executes_literal_special_paths() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::process::{Command, Stdio};
+        let dir = tmp_dir("special-path").join("space & % ! ^ ' ( ) $ ` 中文");
+        let script = dir.join("vlx-term/hook.sh");
+        let hooks = dir.join("hooks.json");
+        install_at(&script, &hooks).unwrap();
+        let exe = dir.join("fake executable");
+        std::fs::write(&exe, "#!/bin/sh\n[ \"$1\" = --cursor-hook ] && [ \"$2\" = working ] || exit 1\nprintf '{\"native\":true}\\n'\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let entry = hook_entry(&script, "working");
+        let output = Command::new("sh").arg("-c").arg(entry["command"].as_str().unwrap())
+            .env("VLX_EXE", &exe).stdin(Stdio::null()).output().unwrap();
+        assert!(output.status.success());
+        assert_eq!(output.stdout, b"{\"native\":true}\n");
+        assert!(output.stderr.is_empty());
+        std::fs::remove_dir_all(dir.parent().unwrap()).unwrap();
+    }
+
 }

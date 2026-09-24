@@ -11,6 +11,7 @@ import { StatusIndicator } from "../../components/StatusIndicator";
 import { AGENT_KIND_LABEL, kindIconEl } from "../sessionViewers/sessionMeta";
 import { useT } from "../../i18n";
 import { TermScrollbar } from "./TermScrollbar";
+import { RunStrip } from "./RunStrip";
 import { usePtySession } from "../../hooks/usePtySession";
 import { useGitBranch } from "../../hooks/useGitBranch";
 import { IS_PLAIN_BROWSER } from "../../hooks/shortcutRegistry";
@@ -347,6 +348,9 @@ export const TerminalView = memo(function TerminalView({
             </button>
           </span>
         </div>
+
+        {/* Commands this session started with vrun, shown while they run; the terminal below shrinks to fit. */}
+        {!hidden && <RunStrip sessionId={session.id} />}
 
         {/* The xterm container fills its parent through absolute positioning so it has a definite size.
             It deliberately does not rely on height:100% inside a flex parent: WebKit resolves that

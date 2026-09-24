@@ -1,13 +1,9 @@
 //! One of a Claude conversation's background tasks, opened as a tab of its own.
 //!
-//! The view owns its data: it subscribes to the session's chat events and reads its task out of every
-//! `extras` event, so it keeps working after the conversation pane unmounts (the process stays alive while
-//! a task runs). The opener's copy of the task is the first paint; one snapshot on mount fetches the current
-//! state and, in the browser, registers this connection for the session's events. A task that leaves the
-//! list without a terminal frame, or whose process ends, is shown as ended with the last state seen, never
-//! as running or empty.
+//! The view subscribes independently of its conversation pane. Reconnection registers the new socket
+//! with a snapshot without starting an agent; backend facts own lifecycle and elapsed time.
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import Icons from "../../../components/Icons";
 import { fmtTokens } from "../../../format";
@@ -22,7 +18,8 @@ import {
   type ChatWorkflowAgent,
   type ChatWorkflowPhase,
 } from "../../../ipc/chat";
-import type { TaskTab } from "../../../store/termStore";
+import { onTransportReconnect, onTransportDisconnect } from "../../../ipc/transport";
+import { useTermStore, type TaskTab } from "../../../store/termStore";
 
 /** The icon a task kind is drawn with, here and on its tab. */
 export function taskIcon(taskType: string) {
@@ -34,7 +31,6 @@ export function taskIcon(taskType: string) {
 /** The label key for a task status; unknown values are shown as the agent wrote them. */
 export function taskStatusKey(status: string | undefined): I18nKey | null {
   switch (status) {
-    case undefined:
     case "running":
     case "pending":
     case "paused":
@@ -66,15 +62,10 @@ export function fmtElapsed(ms: number): string {
   return `${hours ? `${hours}:` : ""}${mm}:${String(seconds).padStart(2, "0")}`;
 }
 
-/**
- * How long the task has run: wall clock from the backend's start stamp while it runs, start to end once it
- * has ended, and the agent's own `duration_ms` when the stamps are missing.
- */
-function elapsedOf(task: ChatBackgroundTask | undefined, finished: boolean, now: number): number | undefined {
-  if (task?.started_at == null) return task?.usage?.duration_ms;
-  if (task.ended_at != null) return task.ended_at - task.started_at;
-  if (!finished) return now - task.started_at;
-  return task.usage?.duration_ms;
+/** Advance a backend duration using only the time since this client received it. */
+function elapsedOf(task: ChatBackgroundTask | undefined, ticking: boolean, delta: number): number | undefined {
+  const elapsed = task?.elapsed_ms ?? task?.usage?.duration_ms;
+  return elapsed == null ? undefined : elapsed + (ticking ? delta : 0);
 }
 
 /** Human-readable task type: "local_workflow" reads as "local workflow". */
@@ -86,70 +77,95 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
   /** The last list did not carry this task, and no terminal frame explained why. */
   const [stale, setStale] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [now, setNow] = useState(() => Date.now());
+  const [offline, setOffline] = useState(false);
+  const [syncFailed, setSyncFailed] = useState(false);
+  const [retry, setRetry] = useState(0);
+  const [sampledAt, setSampledAt] = useState(() => performance.now());
+  const [now, setNow] = useState(() => performance.now());
+  const frozenDelta = useRef(0);
 
   useEffect(() => {
     let disposed = false;
-    let sawEvent = false;
+    let eventVersion = 0;
+    let requestVersion = 0;
     let unlisten: (() => void) | undefined;
     const apply = (tasks: ChatBackgroundTask[] | undefined) => {
       const mine = tasks?.find((candidate) => candidate.task_id === tab.taskId);
       if (mine) {
         setTask(mine);
+        useTermStore.getState().hydrateTaskTab(tab.sessionId, mine);
         setStale(false);
+        const at = performance.now();
+        setSampledAt(at);
+        setNow(at);
+        frozenDelta.current = 0;
       } else {
         setStale(true);
       }
+      setOffline(false);
+      setSyncFailed(false);
     };
+    const synchronize = async () => {
+      const request = ++requestVersion;
+      const version = eventVersion;
+      try {
+        const snapshot = await chatSnapshot(tab.sessionId, {});
+        if (!disposed && request === requestVersion && version === eventVersion) {
+          apply(extrasOf(snapshot).backgroundTasks);
+        }
+      } catch {
+        if (!disposed && request === requestVersion && version === eventVersion) setSyncFailed(true);
+      }
+    };
+    const offReconnect = onTransportReconnect(() => { void synchronize(); });
+    const offDisconnect = onTransportDisconnect(() => {
+      requestVersion++;
+      setOffline(true);
+    });
     void onChatEvent(tab.sessionId, (event) => {
+      if (disposed) return;
       if (event.type === "extras") {
-        sawEvent = true;
+        eventVersion++;
         apply(event.extras.backgroundTasks);
       } else if (event.type === "exited" || event.type === "reset") {
-        // The process that ran this task is gone (it exited, or a new one took the session over), and it
-        // sends no extras on its way out. Without this the view would keep showing a running task, with a
-        // ticking clock and a Stop that can only fail, until the next process happens to list its tasks.
-        sawEvent = true;
-        apply(undefined);
+        eventVersion++;
+        // Retain any final backend facts; absence is unavailable, never an invented task outcome.
+        setStale(true);
       }
     }).then((fn) => {
       if (disposed) fn();
-      else unlisten = fn;
-    });
-    // The snapshot is the current state at mount; an event that arrived first is newer than it. Only the
-    // flattened extras are read, so ask for a page rather than the whole transcript.
-    void chatSnapshot(tab.sessionId, {})
-      .then((snapshot) => {
-        if (!disposed && !sawEvent) apply(extrasOf(snapshot).backgroundTasks);
-      })
-      .catch(() => {
-        /* The seed stays; the subscription still delivers every later change. */
-      });
+      else { unlisten = fn; void synchronize(); }
+    }).catch(() => { if (!disposed) setSyncFailed(true); });
     return () => {
       disposed = true;
+      requestVersion++;
       unlisten?.();
+      offReconnect();
+      offDisconnect();
     };
-  }, [tab.sessionId, tab.taskId]);
+  }, [tab.sessionId, tab.taskId, retry]);
 
-  const finished = !task || isTaskFinished(task) || stale;
+  const finished = !!task && isTaskFinished(task);
+  const ticking = !!task && !finished && !stale && !offline && !syncFailed;
   useEffect(() => {
-    if (finished || hidden) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1000);
+    if (!ticking || hidden) return;
+    setNow(performance.now());
+    const timer = setInterval(() => setNow(performance.now()), 1000);
     return () => clearInterval(timer);
-  }, [finished, hidden]);
+  }, [ticking, hidden]);
 
-  const status = task && isTaskFinished(task) ? task.status : stale ? "ended" : task?.status;
-  const statusKey = taskStatusKey(status);
-  const statusLabel = statusKey ? t(statusKey) : (status ?? "");
-  const elapsedMs = elapsedOf(task, finished, now);
+  const delta = Math.max(0, now - sampledAt);
+  if (ticking) frozenDelta.current = delta;
+  const statusKey = taskStatusKey(task?.status);
+  const statusLabel = statusKey ? t(statusKey) : (task?.status ?? "");
+  const elapsedMs = elapsedOf(task, !finished, ticking ? delta : frozenDelta.current);
   const TaskIcon = taskIcon(task?.task_type || tab.taskType);
   const progress = task?.workflow_progress ?? [];
   const phases = progress
-    .filter((entry): entry is ChatWorkflowPhase => entry.type === "workflow_phase")
-    .sort((a, b) => a.index - b.index);
-  const agents = progress.filter((entry): entry is ChatWorkflowAgent => entry.type === "workflow_agent");
-  const unphased = agents.filter((agent) => !phases.some((phase) => phase.index === agent.phaseIndex));
+    .filter((entry): entry is ChatWorkflowPhase => entry?.type === "workflow_phase")
+    .sort((a, b) => (a.index ?? Infinity) - (b.index ?? Infinity));
+  const agents = progress.filter((entry): entry is ChatWorkflowAgent => entry?.type === "workflow_agent");
+  const unphased = agents.filter((agent) => !phases.some((phase) => phase.index != null && phase.index === agent.phaseIndex));
   const isWorkflow = (task?.task_type || tab.taskType) === "local_workflow";
   const when = (ms: number) => new Date(ms).toLocaleString(dateLocale());
 
@@ -165,7 +181,7 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
             {stale && !(task && isTaskFinished(task)) ? <span className="sv-task-stale">{t("chat.tasks.stale")}</span> : null}
           </div>
         </div>
-        {!finished ? (
+        {task?.can_stop && !finished && !stale && !offline && !syncFailed ? (
           <button
             className="sv-popover-action"
             onClick={() => void chatStopTask(tab.sessionId, tab.taskId).catch((err) => setError(String(err)))}
@@ -175,6 +191,10 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
         ) : null}
       </div>
       {error ? <div className="sv-task-error" role="alert">{error}</div> : null}
+      {offline || syncFailed ? <div className="sv-task-error" role="alert">
+        {t("chat.sync.failed")}
+        <button className="sv-popover-action" onClick={() => setRetry((value) => value + 1)}>{t("common.retry")}</button>
+      </div> : null}
 
       {task?.description ? <div className="sv-task-description">{task.description}</div> : null}
 
@@ -182,7 +202,10 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
         {elapsedMs != null ? <Stat label={t("chat.tasks.elapsed")} value={fmtElapsed(elapsedMs)} /> : null}
         {task?.usage?.total_tokens != null ? <Stat label={t("chat.tasks.tokens")} value={fmtTokens(task.usage.total_tokens)} /> : null}
         {task?.usage?.tool_uses != null ? <Stat label={t("chat.tasks.toolUses")} value={String(task.usage.tool_uses)} /> : null}
-        {task?.last_tool_name && !finished ? <Stat label={t("chat.tasks.currentAgent")} value={task.last_tool_name} /> : null}
+        {task?.last_tool_name && ["local_agent", "local_workflow"].includes(task.task_type) ? <Stat
+          label={t(task.task_type === "local_workflow" ? "chat.tasks.lastUpdatedAgent" : "chat.tasks.lastTool")}
+          value={task.last_tool_name}
+        /> : null}
         {task?.started_at != null ? <Stat label={t("chat.tasks.started")} value={when(task.started_at)} /> : null}
         {task?.ended_at != null ? <Stat label={t("chat.tasks.finished")} value={when(task.ended_at)} /> : null}
       </dl>
@@ -208,16 +231,16 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
           ) : (
             <>
               {phases.map((phase) => (
-                <div className="sv-task-phase" key={phase.index}>
+                <div className="sv-task-phase" key={phase.id ?? `phase:${phase.index}:${phase.title}`}>
                   <div className="sv-task-phase-title">{phase.title}</div>
                   {agents
-                    .filter((agent) => agent.phaseIndex === phase.index)
-                    .map((agent) => <AgentRow key={agent.index} agent={agent} now={now} />)}
+                    .filter((agent) => phase.index != null && agent.phaseIndex === phase.index && phases.find((candidate) => candidate.index === agent.phaseIndex) === phase)
+                    .map((agent) => <AgentRow key={agent.id ?? `agent:${agent.index}:${agent.label}`} agent={agent} delta={ticking ? delta : frozenDelta.current} />)}
                 </div>
               ))}
               {unphased.length ? (
                 <div className="sv-task-phase">
-                  {unphased.map((agent) => <AgentRow key={agent.index} agent={agent} now={now} />)}
+                  {unphased.map((agent) => <AgentRow key={agent.id ?? `agent:${agent.index}:${agent.label}`} agent={agent} delta={ticking ? delta : frozenDelta.current} />)}
                 </div>
               ) : null}
             </>
@@ -238,11 +261,11 @@ function Stat({ label, value }: { label: string; value: string }) {
 }
 
 /** One agent of a workflow: who, on what model, in which state, and what it was asked and answered. */
-function AgentRow({ agent, now }: { agent: ChatWorkflowAgent; now: number }) {
+function AgentRow({ agent, delta }: { agent: ChatWorkflowAgent; delta: number }) {
   const t = useT();
   const done = agent.state === "done";
-  const durationMs =
-    agent.durationMs ?? (agent.state === "start" && agent.startedAt != null ? now - agent.startedAt : undefined);
+  const baseDuration = agent.elapsedMs ?? agent.durationMs;
+  const durationMs = baseDuration == null ? undefined : baseDuration + (agent.elapsedRunning ? delta : 0);
   const stateLabel =
     agent.state === "start" ? t("chat.tasks.agentState.start") : done ? t("chat.tasks.agentState.done") : (agent.state ?? "");
   return (

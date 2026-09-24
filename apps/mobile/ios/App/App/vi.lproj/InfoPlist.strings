@@ -1,0 +1,2 @@
+"NSCameraUsageDescription" = "VelaTerm sử dụng máy ảnh để quét mã QR chứa địa chỉ dịch vụ.";
+"NSLocalNetworkUsageDescription" = "VelaTerm kết nối với các dịch vụ VelaTerm và máy chủ SSH trong mạng cục bộ của bạn.";

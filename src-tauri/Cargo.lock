@@ -6254,8 +6254,7 @@ dependencies = [
 [[package]]
 name = "tao"
 version = "0.35.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d1c93047acf68669466a34690ac58cca7010bd1b201e1ec86f1fd0a75d3dd4a9"
+source = "git+https://github.com/tauri-apps/tao?rev=c704261c519c58cfdd0bc2d58ba24e06a0b71c92#c704261c519c58cfdd0bc2d58ba24e06a0b71c92"
 dependencies = [
  "bitflags 2.13.1",
  "block2",
@@ -7377,7 +7376,7 @@ checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
 name = "velaterm"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "argon2 0.5.3",
  "axum",

@@ -8,7 +8,8 @@
 //! Only what agent answers actually contain is handled. Raw HTML blocks render as their own source text,
 //! which is both honest and safe.
 
-import { marked, type Token, type Tokens } from "marked";
+import { type Token, type Tokens } from "marked";
+import { md } from "../../../markdownEngine";
 import { memo, type ReactNode } from "react";
 
 import { highlight } from "../../RightPanel/highlight";
@@ -36,7 +37,7 @@ export const Markdown = memo(function Markdown({ text }: { text: string }): Reac
   }
   let tokens: Token[];
   try {
-    tokens = marked.lexer(text);
+    tokens = md.lexer(text);
   } catch {
     // A tokenizer failure must not blank out the message; show the source instead.
     return (

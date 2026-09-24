@@ -710,6 +710,7 @@ fn pi_read_cached(entry: &mut PiCached) -> Result<TurnStats, String> {
 }
 
 pub fn current_turn_stats(kind: SessionKind, agent_session_id: &str) -> Result<TurnStats, String> {
+    if kind == SessionKind::Kiro { return crate::agent::kiro_info::turn_stats(agent_session_id); }
     if kind == SessionKind::Opencode {
         return Ok(opencode_stats_from_messages(&opencode_store::messages(agent_session_id)?));
     }

@@ -1,0 +1,2 @@
+"NSCameraUsageDescription" = "VelaTerm 使用相机扫描服务地址二维码。";
+"NSLocalNetworkUsageDescription" = "VelaTerm 连接局域网中的 VelaTerm 服务和 SSH 主机。";

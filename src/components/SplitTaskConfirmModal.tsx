@@ -8,7 +8,7 @@ import { useTermStore } from "../store/termStore";
 import { useSuspendNativeViews } from "../hooks/nativeViewSuspend";
 import { Backdrop } from "./Backdrop";
 import Combo from "./Combo";
-import { LaunchField, LaunchLoadState, ModelEffortFields, launchErrorText, useLaunchOptions } from "./LaunchFields";
+import { LaunchCloseButton, LaunchField, LaunchLoadState, ModelEffortFields, launchErrorText, useLaunchOptions } from "./LaunchFields";
 import { navigatePlanExecute, usePlanExecuteMenuRoute } from "./planExecuteNavigation";
 
 export function splitReviewUrl(runId: string | null, taskId?: string) {
@@ -122,7 +122,7 @@ export function SplitTaskConfirmModal() {
       else if (!event.shiftKey && document.activeElement === nodes.at(-1)) { event.preventDefault(); nodes[0].focus(); }
     }}>
     <header className="launch-header"><div><h2 id={titleId}>{t("launch.splitReview")}</h2><p>{t("launch.splitReviewHint")}</p></div>
-      <button type="button" className="vlx-btn" disabled={busy} onClick={close}>{t("common.close")}</button></header>
+      <LaunchCloseButton onClose={close} /></header>
     <div className="launch-body">
       {loading && <p role="status">{t("common.loading")}</p>}
       {error && <div className="launch-notice launch-error" role="alert">{error}<button className="vlx-btn" disabled={busy} onClick={() => setRevision(r => r + 1)}>{t("common.retry")}</button></div>}

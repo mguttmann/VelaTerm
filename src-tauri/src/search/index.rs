@@ -16,7 +16,7 @@ use rusqlite::params;
 
 use crate::agent::transcript;
 use crate::db::{repo, table_exists, Db};
-use crate::models::Session;
+use crate::models::{Session, SessionKind};
 
 /// Transcript-track source stored in session_fts and search_index_state.
 const SRC_TRANSCRIPT: &str = "transcript";
@@ -42,7 +42,7 @@ struct BuildResult {
     indexed_len: u64,
     /// Source-file mtime in seconds.
     indexed_mtime: Option<i64>,
-    /// Resolved transcript path, persisted so later refreshes stat it directly; None for recordings.
+    /// Resolved transcript path or Kiro identity/content revision; None for recordings.
     source_path: Option<String>,
     rows: Vec<FtsRow>,
 }
@@ -164,6 +164,11 @@ fn recording_rows(lines: &[String], start_seq: i64) -> Vec<FtsRow> {
 /// Extract an entire track outside the lock, selecting the source and building all rows. None means no
 /// readable transcript or recording content.
 fn build_full(session: &Session, recordings_dir: &Path) -> Option<BuildResult> {
+    if session.kind == SessionKind::Kiro {
+        let native = nonempty_agent_id(session).ok_or_else(|| "Kiro session ID is unavailable".to_string())
+            .and_then(crate::agent::kiro_store::read);
+        return build_kiro(native).or_else(|| build_recording(session, recordings_dir));
+    }
     // Prefer a transcript when agentSessionId resolves to a readable, parseable file.
     if let Some(agent_id) = nonempty_agent_id(session) {
         if let Some(path) = transcript::source_path(session.kind, agent_id) {
@@ -180,6 +185,28 @@ fn build_full(session: &Session, recordings_dir: &Path) -> Option<BuildResult> {
         }
         // Fall back to recording when a remote/local transcript is absent or deleted.
     }
+    build_recording(session, recordings_dir)
+}
+
+fn build_kiro(native: Result<crate::agent::kiro_store::Session, String>) -> Option<BuildResult> {
+    let parsed = native.and_then(|session| {
+        let messages = session.messages?.into_iter().map(|m| transcript::TranscriptMessage {
+            role: m.role.into(), text: m.text, timestamp: m.timestamp, tools: Vec::new(),
+        }).collect::<Vec<_>>();
+        Ok(BuildResult { source: SRC_TRANSCRIPT, indexed_len: 0, indexed_mtime: None,
+            // Kiro checkpoints are content/identity hashes, never paths passed to read_at.
+            source_path: Some(session.revision), rows: transcript_rows(&messages) })
+    });
+    match parsed {
+        Ok(built) => Some(built),
+        Err(reason) => {
+            crate::diagnostics::record("WARN", "kiro_history_read", serde_json::json!({"status":"unavailable", "reason":reason}));
+            None
+        },
+    }
+}
+
+fn build_recording(session: &Session, recordings_dir: &Path) -> Option<BuildResult> {
     // Recording track strips ANSI from the complete file, including its final partial line.
     let rec = recordings_dir.join(format!("{}.log", session.id));
     if rec.exists() {
@@ -280,23 +307,27 @@ pub fn reindex_session(db: &Db, recordings_dir: &Path, session: &Session) -> Res
     // Read and parse/strip files outside the lock.
     let built = build_full(session, recordings_dir);
 
+    store_build(db, &session.id, built)
+}
+
+fn store_build(db: &Db, session_id: &str, built: Option<BuildResult>) -> Result<(), String> {
     // Batch writes in a short locked transaction.
     let mut conn = db.conn.lock().unwrap();
     let tx = conn
         .transaction()
         .map_err(|e| format!("Failed to begin index tx: {e}"))?;
     // Remove both old tracks and checkpoints before writing the newly selected full track.
-    delete_rows(&tx, &session.id, None)?;
+    delete_rows(&tx, session_id, None)?;
     tx.execute(
         "DELETE FROM search_index_state WHERE session_id = ?1",
-        params![session.id],
+        params![session_id],
     )
     .map_err(|e| format!("Failed to clear search state: {e}"))?;
     if let Some(b) = built {
-        insert_rows(&tx, &session.id, &b.rows)?;
+        insert_rows(&tx, session_id, &b.rows)?;
         upsert_state(
             &tx,
-            &session.id,
+            session_id,
             b.source,
             b.indexed_len,
             b.indexed_mtime,
@@ -337,7 +368,7 @@ pub fn drop_sessions(db: &Db, ids: &[String]) -> Result<(), String> {
 struct StateRow {
     indexed_len: u64,
     indexed_mtime: Option<i64>,
-    /// Transcript path recorded at the last index; None for recordings or rows written before the column existed.
+    /// Transcript path or Kiro identity/content revision; None for recordings or older checkpoints.
     source_path: Option<String>,
 }
 
@@ -512,6 +543,12 @@ pub fn refresh_stale(db: &Db, recordings_dir: &Path) -> Result<(), String> {
     for s in &sessions {
         // Select the same track as build_full, but reuse the recorded path instead of looking it up again.
         let st = states.get(&(s.id.clone(), SRC_TRANSCRIPT.to_string()));
+        if s.kind == SessionKind::Kiro {
+            let native = nonempty_agent_id(s).ok_or_else(|| "Kiro session ID is unavailable".to_string())
+                .and_then(crate::agent::kiro_store::read);
+            refresh_kiro(db, recordings_dir, s, st, native)?;
+            continue;
+        }
         if let Some(path) = resolve_transcript_path(s, st) {
             // Rebuild a transcript fully when length or mtime changes.
             let (len, mtime) = stat_len_mtime(&path);
@@ -567,6 +604,17 @@ pub fn refresh_stale(db: &Db, recordings_dir: &Path) -> Result<(), String> {
             .map_err(|e| format!("Failed to commit path backfill tx: {e}"))?;
     }
     Ok(())
+}
+
+/// Resolve by native identity on every refresh, including after restart or source replacement.
+fn refresh_kiro(db: &Db, recordings_dir: &Path, session: &Session, previous: Option<&StateRow>,
+    native: Result<crate::agent::kiro_store::Session, String>) -> Result<(), String> {
+    if let Some(built) = build_kiro(native) {
+        if previous.and_then(|s| s.source_path.as_deref()) == built.source_path.as_deref() { return Ok(()); }
+        return store_build(db, &session.id, Some(built));
+    }
+    // A vanished/conflicting/unsupported source must not leave a stale transcript under the session ID.
+    store_build(db, &session.id, build_recording(session, recordings_dir))
 }
 
 /// Rebuild a complete transcript index from an already resolved `path`, with unlocked parsing and a short
@@ -722,6 +770,51 @@ mod tests {
             |r| r.get(0),
         )
         .unwrap()
+    }
+
+    fn kiro_state(db: &Db, sid: &str) -> Option<StateRow> {
+        use rusqlite::OptionalExtension;
+        db.conn.lock().unwrap().query_row(
+            "SELECT indexed_len,indexed_mtime,source_path FROM search_index_state WHERE session_id=?1 AND source='transcript'",
+            [sid],|r| Ok(StateRow {indexed_len:r.get(0)?,indexed_mtime:r.get(1)?,source_path:r.get(2)?})).optional().unwrap()
+    }
+    fn kiro_text(db: &Db, sid: &str) -> Vec<(i64,String)> {
+        let conn=db.conn.lock().unwrap();
+        let mut stmt=conn.prepare("SELECT ordinal,text FROM session_fts WHERE session_id=?1 ORDER BY ordinal").unwrap();
+        stmt.query_map([sid],|r| Ok((r.get(0)?,r.get(1)?))).unwrap().map(Result::unwrap).collect()
+    }
+
+    #[test]
+    fn kiro_shared_database_refresh_is_identity_and_content_scoped_after_restart() {
+        let f=crate::agent::kiro_store::tests::Fixture::new();let native=f.db();
+        f.insert(&native,"native-one",&f.dir,"Alpha");f.insert(&native,"native-two",&f.dir,"Other");
+        let app_path=f.dir.join("index.db");let db=Db::open(&app_path).unwrap();
+        let one=make_session("local-one",SessionKind::Kiro,Some("native-one"));
+        let two=make_session("local-two",SessionKind::Kiro,Some("native-two"));
+        for s in [&one,&two] {
+            refresh_kiro(&db,&f.dir,s,None,crate::agent::kiro_store::read_from(&f.roots,s.agent_session_id.as_deref().unwrap())).unwrap();
+        }
+        assert_eq!(kiro_text(&db,&one.id),vec![(0,"Alpha".into()),(1,"Reply".into())]);
+        let first=kiro_state(&db,&one.id).unwrap();let second=kiro_state(&db,&two.id).unwrap();
+        assert_ne!(first.source_path,second.source_path);
+        assert!(first.source_path.as_deref().unwrap().starts_with("kiro:sha256:"));
+        drop(db);
+        // Identical-length content and unchanged SQLite timestamps still invalidate this session only.
+        f.insert(&native,"native-one",&f.dir,"Bravo");let db=Db::open(&app_path).unwrap();
+        refresh_kiro(&db,&f.dir,&one,kiro_state(&db,&one.id).as_ref(),crate::agent::kiro_store::read_from(&f.roots,"native-one")).unwrap();
+        assert_eq!(kiro_text(&db,&one.id),vec![(0,"Bravo".into()),(1,"Reply".into())]);
+        assert_eq!(kiro_text(&db,&two.id),vec![(0,"Other".into()),(1,"Reply".into())]);
+        assert_ne!(kiro_state(&db,&one.id).unwrap().source_path,first.source_path);
+        assert_eq!(kiro_state(&db,&two.id).unwrap().source_path,second.source_path);
+        // A conflicting source must remove old text, while an available recording remains searchable.
+        f.pair("native-one",&f.dir,"Conflict");
+        refresh_kiro(&db,&f.dir,&one,kiro_state(&db,&one.id).as_ref(),crate::agent::kiro_store::read_from(&f.roots,"native-one")).unwrap();
+        assert_eq!(count_rows(&db,&one.id),0);
+        std::fs::write(f.dir.join("local-one.log"),"Recorded fallback\n").unwrap();
+        refresh_kiro(&db,&f.dir,&one,None,crate::agent::kiro_store::read_from(&f.roots,"native-one")).unwrap();
+        assert_eq!(kiro_text(&db,&one.id),vec![(0,"Recorded fallback".into())]);
+        assert!(kiro_state(&db,&one.id).is_none());
+        assert_eq!(count_rows(&db,&two.id),2);
     }
 
     /// Full recording rebuild strips ANSI into rows, and deletion clears them.

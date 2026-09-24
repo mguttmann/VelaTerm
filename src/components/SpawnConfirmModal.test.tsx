@@ -13,9 +13,11 @@ import type { SpawnRequest } from "../ipc/events";
 import type { PlanExecuteRolePrefs } from "../store/settings";
 
 const mocks = vi.hoisted(() => ({
+  localeSuffix: "",
   launchOptions: vi.fn(),
   launchModels: vi.fn(),
   launchSelection: vi.fn(),
+  prepareSpawn: vi.fn(),
   planExecuteDefaults: vi.fn(),
   preparePlanExecute: vi.fn(),
   createPlanExecute: vi.fn(),
@@ -24,6 +26,7 @@ const mocks = vi.hoisted(() => ({
   env: { isTauri: false },
   store: {
     pendingSpawns: [] as SpawnRequest[],
+    spawnReceipts: {} as Record<string, import("../ipc/commands").SpawnReceipt>,
     sessions: [] as {
       id: string;
       name: string;
@@ -49,12 +52,13 @@ vi.mock("../terminal/imageInput", async (original) => ({
   ...await original<typeof import("../terminal/imageInput")>(),
   imageFromNativeClipboard: mocks.nativeImage,
 }));
-vi.mock("../i18n", () => ({ useT: () => (key: string) => key }));
+vi.mock("../i18n", () => ({ useT: () => (key: string) => key + mocks.localeSuffix }));
 vi.mock("../hooks/nativeViewSuspend", () => ({
   useSuspendNativeViews: () => {},
 }));
 vi.mock("../ipc/commands", () => ({
   agentListModels: vi.fn().mockResolvedValue(["opus", "sonnet"]),
+  prepareSpawn: mocks.prepareSpawn,
 }));
 vi.mock("../ipc/launch", () => ({
   launchOptions: mocks.launchOptions,
@@ -73,6 +77,7 @@ import { SpawnConfirmModal } from "./SpawnConfirmModal";
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mocks.localeSuffix = "";
   mocks.launchModels.mockReset().mockResolvedValue({ models: [
     { id: "opus", label: "opus", effortLevels: ["low", "high"] },
     { id: "sonnet", label: "sonnet", effortLevels: ["low", "high"] },
@@ -82,6 +87,14 @@ beforeEach(() => {
   mocks.nativeImage.mockReset();
   window.history.replaceState(null, "", "/");
   mocks.store.pendingSpawns = [];
+  mocks.store.spawnReceipts = {};
+  mocks.store.cancelSpawn.mockResolvedValue(undefined);
+  mocks.prepareSpawn.mockImplementation(async (requestId: string, kind?: string) => {
+    const req = mocks.store.pendingSpawns.find(item => item.requestId === requestId);
+    const selected = kind || req?.kind || "claude";
+    const values = await mocks.launchSelection(selected, "--model sonnet");
+    return { kind: selected, cwd: req?.cwd || "/repo", model: req?.model ?? values.model, effort: req?.effort ?? values.effort };
+  });
   mocks.store.loadTree.mockResolvedValue(undefined);
   mocks.launchOptions.mockResolvedValue([
     {
@@ -127,7 +140,7 @@ async function open(req: Partial<SpawnRequest> = {}, waitForOptions = true) {
     },
   ];
   mocks.store.pendingSpawns = [
-    { parentSessionId: "p1", prompt: "Investigate the parser", ...req },
+    { requestId: "request-id", parentSessionId: "p1", prompt: "Investigate the parser", ...req },
   ];
   render(<SpawnConfirmModal />);
   if (waitForOptions) await screen.findByLabelText("spawn.modelLabel");
@@ -163,9 +176,13 @@ describe("single child-session review", () => {
       "claude",
       "--model sonnet",
     );
+    await act(async () => { await Promise.resolve(); });
+    expect(mocks.prepareSpawn).toHaveBeenCalledTimes(1);
     fireEvent.change(screen.getByLabelText("spawn.modelLabel"), {
       target: { value: "" },
     });
+    await act(async () => { await Promise.resolve(); });
+    expect((screen.getByLabelText("spawn.modelLabel") as HTMLInputElement).value).toBe("");
     expect((await launch()).model).toBe("");
   });
   it("supports Codex effort without silently dropping the request", async () => {
@@ -485,6 +502,7 @@ it("does not attach an image whose read finishes after the request was cancelled
   await waitFor(() => expect(mocks.nativeImage).toHaveBeenCalled());
   cleanup();
   await act(async () => { finish(new File(["image"], "cancelled.png", { type: "image/png" })); });
+  window.history.replaceState(null, "", "/");
   await open({ requestId: "next-request" });
   expect(screen.queryByAltText("cancelled.png")).toBeNull();
 });
@@ -580,4 +598,210 @@ it("offers automatic task splitting in a new planning and execution session", as
   fireEvent.click(screen.getByRole("button", { name: "launch.createAndStart" }));
   await waitFor(() => expect(mocks.createPlanExecute).toHaveBeenCalledOnce());
   expect(mocks.createPlanExecute.mock.calls[0][0].config.splitTasks).toBe(true);
+});
+
+
+it("selects the stable request URL even when another review is first in the queue", async () => {
+  const second = { requestId: "selected-request", parentSessionId: "p1", prompt: "Selected task" };
+  mocks.store.pendingSpawns = [{ requestId: "first", parentSessionId: "p1", prompt: "First task" }, second];
+  window.history.replaceState(null, "", "/?spawnRequest=selected-request");
+  render(<SpawnConfirmModal />);
+  await screen.findByLabelText("spawn.modelLabel");
+  expect((screen.getByLabelText("spawn.promptLabel") as HTMLTextAreaElement).value).toBe("Selected task");
+  expect((await launch()).requestId).toBe("selected-request");
+});
+
+it("keeps a rejected cancellation visible and presents its error", async () => {
+  mocks.store.cancelSpawn.mockRejectedValue(new Error("connection lost"));
+  await open(); fireEvent.click(screen.getByRole("button", { name: "common.cancel" }));
+  expect(await screen.findByText("connection lost")).toBeTruthy();
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  expect(mocks.store.cancelSpawn).toHaveBeenCalledWith("request-id");
+});
+
+
+it.each(["failed", "uncertain", "dispatching"].flatMap(state => [false, true].map(mobile => ({ state, mobile }))))("keeps confirmed $state launches immutable and opens once (mobile=$mobile)", async ({ state, mobile }) => {
+  if (mobile) window.history.replaceState(null, "", "/?view=mobile");
+  const request = { requestId: "request-id", parentSessionId: "p1", prompt: "Investigate the parser" };
+  mocks.store.spawnReceipts["request-id"] = { requestId: "request-id", request, decision: "confirmed", state,
+    sessionId: "created-child", messageId: "msg-request", session: { id: "created-child" }, error: "delivery error" } as import("../ipc/commands").SpawnReceipt;
+  await open();
+  expect(screen.getByText("spawn.confirmedChoices")).toBeTruthy();
+  if (state !== "failed") {
+    expect(screen.getByRole("alert").textContent).toBe("spawn.deliveryUncertain");
+    expect(screen.queryByText("delivery error")).toBeNull();
+  }
+  expect((screen.getByLabelText("spawn.promptLabel") as HTMLTextAreaElement).disabled).toBe(true);
+  expect((screen.getByLabelText("spawn.modelLabel") as HTMLInputElement).disabled).toBe(true);
+  expect((screen.getByLabelText("spawn.agentLabel") as HTMLInputElement).disabled).toBe(true);
+  const retry = screen.getByRole("button", { name: "common.retry" });
+  expect((retry as HTMLButtonElement).disabled).toBe(state !== "failed");
+  const historyLength = window.history.length;
+  fireEvent.click(screen.getByRole("button", { name: "common.open" }));
+  expect(window.history.length).toBe(historyLength + 1);
+  expect(new URL(window.location.href).searchParams.get("session")).toBe(mobile ? "created-child" : null);
+  expect(mocks.store.openSession).toHaveBeenCalledWith("created-child");
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(new URL(window.location.href).searchParams.has("spawnRequest")).toBe(false);
+  act(() => {
+    window.history.replaceState(null, "", "/?spawnRequest=request-id");
+    window.dispatchEvent(new PopStateEvent("popstate"));
+  });
+  expect(screen.getByRole("dialog")).toBeTruthy();
+  if (state === "failed") {
+    fireEvent.click(screen.getByRole("button", { name: "common.retry" }));
+    await waitFor(() => expect(mocks.store.confirmSpawn).toHaveBeenCalledWith(request));
+  } else { expect(mocks.store.confirmSpawn).not.toHaveBeenCalled(); }
+});
+
+
+it.each(["failed", "uncertain"] as const)("always closes a confirmed %s launch, cancelling only a failed one", async state => {
+  const request = { requestId: "request-id", parentSessionId: "p1", prompt: "Investigate the parser", model: "opus 5.5" };
+  mocks.store.spawnReceipts["request-id"] = confirmedReceipt(request, state) as import("../ipc/commands").SpawnReceipt;
+  mocks.prepareSpawn.mockRejectedValue(new Error("Model and effort must be identifiers without spaces or shell operators"));
+  await open(request, false);
+  expect((await screen.findAllByText("Model and effort must be identifiers without spaces or shell operators")).length).toBeGreaterThan(0);
+  expect((screen.getByRole("button", { name: "common.cancel" }) as HTMLButtonElement).disabled).toBe(state !== "failed");
+  fireEvent.click(screen.getByRole("button", { name: "common.close" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(new URL(window.location.href).searchParams.has("spawnRequest")).toBe(false);
+  if (state === "failed") expect(mocks.store.cancelSpawn).toHaveBeenCalledWith("request-id");
+  else expect(mocks.store.cancelSpawn).not.toHaveBeenCalled();
+});
+
+it("closes a pending request immediately even when its cancellation is rejected", async () => {
+  mocks.store.cancelSpawn.mockRejectedValue(new Error("connection lost"));
+  await open();
+  fireEvent.click(screen.getByRole("button", { name: "common.close" }));
+  expect(screen.queryByRole("dialog")).toBeNull();
+  expect(mocks.store.cancelSpawn).toHaveBeenCalledWith("request-id");
+});
+
+it("keeps a missing-identity request disabled and translates its error on locale changes", async () => {
+  mocks.store.pendingSpawns = [{ parentSessionId: "p1", kind: "claude", prompt: "Legacy request" }];
+  const view = render(<SpawnConfirmModal />);
+  expect(await screen.findByText("spawn.requestUnavailable")).toBeTruthy();
+  expect((screen.getByRole("button", { name: "spawn.launch" }) as HTMLButtonElement).disabled).toBe(true);
+  expect(mocks.prepareSpawn).not.toHaveBeenCalled();
+  mocks.localeSuffix = " (changed locale)";
+  view.rerender(<SpawnConfirmModal />);
+  expect(screen.getByText("spawn.requestUnavailable (changed locale)")).toBeTruthy();
+  expect(screen.queryByText("spawn.requestUnavailable")).toBeNull();
+  expect(mocks.store.confirmSpawn).not.toHaveBeenCalled();
+});
+
+
+function confirmedReceipt(request: SpawnRequest, state: import("../ipc/commands").SpawnReceipt["state"], resolvedPlanExecute?: SpawnRequest["planExecute"]) {
+  return { requestId: request.requestId!, request, decision: "confirmed" as const, state,
+    sessionId: "created-child", messageId: "msg-request", session: null, error: "controlled rejection", resolvedPlanExecute };
+}
+
+it("preserves pending text, attachment removal and model edits across copied receipts, then displays the approved snapshot", async () => {
+  const first: SpawnRequest = { requestId: "request-id", parentSessionId: "p1", prompt: "Original task", worktree: false,
+    images: [{ mimeType: "image/png", data: "AQID" }] };
+  mocks.store.pendingSpawns = [first];
+  const view = render(<SpawnConfirmModal />);
+  await screen.findByLabelText("spawn.modelLabel");
+  fireEvent.change(screen.getByLabelText("spawn.promptLabel"), { target: { value: "Local unsubmitted task" } });
+  fireEvent.change(screen.getByLabelText("spawn.modelLabel"), { target: { value: "local-model" } });
+  fireEvent.click(screen.getByTitle("chat.attach.remove"));
+  const calls = mocks.prepareSpawn.mock.calls.length;
+  mocks.store.pendingSpawns = [{ ...first, images: [...first.images!] }];
+  view.rerender(<SpawnConfirmModal />);
+  expect((screen.getByLabelText("spawn.promptLabel") as HTMLTextAreaElement).value).toBe("Local unsubmitted task");
+  expect((screen.getByLabelText("spawn.modelLabel") as HTMLInputElement).value).toBe("local-model");
+  expect(screen.queryByRole("img")).toBeNull();
+  expect(mocks.prepareSpawn).toHaveBeenCalledTimes(calls);
+  const approved = { ...first, prompt: "Task confirmed by the other client", worktree: true,
+    kind: "codex" as const, model: "approved-model", effort: "xhigh", images: [{ mimeType: "image/png", data: "BAUG" }] };
+  mocks.prepareSpawn.mockResolvedValue({ kind: "codex", model: "approved-model", effort: "xhigh", cwd: "/approved/worktree" });
+  // The receipt is authoritative even if the queue still contains its previous copy.
+  mocks.store.spawnReceipts["request-id"] = confirmedReceipt(approved, "failed");
+  view.rerender(<SpawnConfirmModal />);
+  await waitFor(() => expect((screen.getByLabelText("spawn.modelLabel") as HTMLInputElement).value).toBe("approved-model"));
+  expect((screen.getByLabelText("spawn.promptLabel") as HTMLTextAreaElement).value).toBe(approved.prompt);
+  expect((screen.getByRole("radio", { name: /orch.worktreeNone/ }) as HTMLInputElement).checked).toBe(false);
+  expect(screen.getByRole("img").getAttribute("src")).toBe("data:image/png;base64,BAUG");
+  expect(screen.getByText("/approved/worktree")).toBeTruthy();
+  expect((screen.getByTitle("chat.attach.remove") as HTMLButtonElement).disabled).toBe(true);
+});
+
+it.each(["pending", "failed", "uncertain", "dispatching"] as const)("locks both workflow roles and splitTasks to the persisted %s snapshot", async state => {
+  const approved: SpawnRequest = { requestId: "request-id", parentSessionId: "p1", prompt: "Approved task", worktree: true,
+    planExecute: { plan: {}, exec: {}, splitTasks: true, worktreeMode: "each" } };
+  const resolved = { ...approved.planExecute!, plan: { agent: "codex" as const, model: "saved-plan", effort: "high" },
+    exec: { agent: "claude" as const, model: "saved-exec", effort: "low" } };
+  mocks.store.planExecutePrefs = { plan: { agent: "claude", model: "new-memory", effort: "low" }, exec: { agent: "codex", model: "new-memory" } };
+  mocks.store.pendingSpawns = [approved];
+  mocks.store.spawnReceipts["request-id"] = confirmedReceipt(approved, state, resolved);
+  render(<SpawnConfirmModal />);
+  await screen.findByRole("region", { name: "launch.planTitle" });
+  for (const [role, label] of [["plan", "launch.planTitle"], ["exec", "launch.execTitle"]] as const) {
+    const section = within(screen.getByRole("region", { name: label }));
+    for (const name of ["spawn.agentLabel", "spawn.modelLabel", "spawn.effortLabel"]) {
+      expect((section.getByLabelText(name) as HTMLInputElement).disabled).toBe(true);
+    }
+    expect((section.getByLabelText("spawn.modelLabel") as HTMLInputElement).value).toBe(resolved[role].model);
+    expect((section.getByLabelText("spawn.effortLabel") as HTMLInputElement).value).toBe(resolved[role].effort);
+    fireEvent.change(section.getByLabelText("spawn.modelLabel"), { target: { value: "attempted-change" } });
+    fireEvent.blur(section.getByLabelText("spawn.modelLabel"));
+  }
+  const split = screen.getByRole("checkbox") as HTMLInputElement;
+  expect(split.checked).toBe(true); expect(split.disabled).toBe(true);
+  expect(mocks.planExecuteDefaults).not.toHaveBeenCalled();
+  expect(mocks.store.setPlanExecuteRolePrefs).not.toHaveBeenCalled();
+  if (state === "failed") {
+    fireEvent.click(screen.getByRole("button", { name: "common.retry" }));
+    await waitFor(() => expect(mocks.store.confirmSpawn).toHaveBeenCalledWith(approved));
+  } else {
+    expect((screen.getByRole("button", { name: "common.retry" }) as HTMLButtonElement).disabled).toBe(true);
+  }
+});
+
+it("keeps pending workflow edits, closes an open role portal on confirmation and never remembers its stale choice", async () => {
+  const config = { plan: { agent: "codex" as const, model: "initial-plan" }, exec: { agent: "claude" as const, model: "initial-exec" } };
+  mocks.planExecuteDefaults.mockResolvedValue(config);
+  const request: SpawnRequest = { requestId: "request-id", parentSessionId: "p1", prompt: "Draft task", planExecute: config };
+  mocks.store.pendingSpawns = [request];
+  const view = render(<SpawnConfirmModal />);
+  const planner = within(await screen.findByRole("region", { name: "launch.planTitle" }));
+  fireEvent.change(planner.getByLabelText("spawn.modelLabel"), { target: { value: "local-plan" } });
+  fireEvent.click(screen.getByRole("checkbox"));
+  mocks.store.pendingSpawns = [{ ...request, planExecute: { ...config } }];
+  view.rerender(<SpawnConfirmModal />);
+  expect((planner.getByLabelText("spawn.modelLabel") as HTMLInputElement).value).toBe("local-plan");
+  expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(true);
+  expect(mocks.planExecuteDefaults).toHaveBeenCalledOnce();
+  fireEvent.click(planner.getByLabelText("spawn.agentLabel"));
+  const staleOption = screen.getByRole("option", { name: "Claude" });
+  const approved = { ...request, planExecute: { ...config, splitTasks: false } };
+  mocks.store.spawnReceipts["request-id"] = confirmedReceipt(approved, "failed", approved.planExecute);
+  view.rerender(<SpawnConfirmModal />);
+  expect(screen.queryByRole("listbox")).toBeNull();
+  mocks.store.setPlanExecuteRolePrefs.mockClear();
+  fireEvent.click(staleOption);
+  expect(mocks.store.setPlanExecuteRolePrefs).not.toHaveBeenCalled();
+  expect((screen.getByRole("checkbox") as HTMLInputElement).checked).toBe(false);
+  expect((within(screen.getByRole("region", { name: "launch.planTitle" })).getByLabelText("spawn.modelLabel") as HTMLInputElement).value).toBe("initial-plan");
+});
+
+it("discards late workflow defaults and accepts only a later persisted snapshot after another client confirms", async () => {
+  let defaults!: (value: unknown) => void;
+  mocks.planExecuteDefaults.mockReturnValue(new Promise(resolve => { defaults = resolve; }));
+  const request: SpawnRequest = { requestId: "request-id", parentSessionId: "p1", prompt: "Draft task", planExecute: { plan: {}, exec: {} } };
+  mocks.store.pendingSpawns = [request];
+  const view = render(<SpawnConfirmModal />);
+  await waitFor(() => expect(mocks.planExecuteDefaults).toHaveBeenCalledOnce());
+  const config = { plan: { agent: "codex" as const, model: "frozen-plan", effort: "xhigh" }, exec: { agent: "claude" as const, model: "frozen-exec", effort: "high" } };
+  mocks.store.spawnReceipts["request-id"] = confirmedReceipt(request, "failed", config);
+  view.rerender(<SpawnConfirmModal />);
+  await screen.findByRole("region", { name: "launch.planTitle" });
+  await act(async () => defaults({ plan: { agent: "claude", model: "late-default" }, exec: { agent: "codex", model: "late-exec" } }));
+  expect((within(screen.getByRole("region", { name: "launch.planTitle" })).getByLabelText("spawn.modelLabel") as HTMLInputElement).value).toBe("frozen-plan");
+  expect(mocks.store.setPlanExecuteRolePrefs).not.toHaveBeenCalled();
+  // A later resolved receipt replaces the explicit, incomplete confirmed request without reading memory.
+  mocks.store.spawnReceipts["request-id"] = confirmedReceipt(request, "dispatching", { ...config, worktreeMode: "each", exec: { ...config.exec, model: "persisted-exec" } });
+  view.rerender(<SpawnConfirmModal />);
+  await waitFor(() => expect((within(screen.getByRole("region", { name: "launch.execTitle" })).getByLabelText("spawn.modelLabel") as HTMLInputElement).value).toBe("persisted-exec"));
+  expect((screen.getAllByRole("radio")[2] as HTMLInputElement).checked).toBe(true);
 });

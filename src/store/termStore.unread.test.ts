@@ -240,20 +240,23 @@ describe("reporting a session as read", () => {
     expect(useTermStore.getState().notifications).toEqual({});
   });
 
-  it("also drops the spawn cards the Dock badge counts", () => {
+  it("settles the spawn cards the Dock badge counts after backend acknowledgement", async () => {
     // A spawn card nobody answered keeps the badge at one while showing no dot to click, which is the
     // state the manual clear exists for. Declining the request settles it for other clients too.
     useTermStore.setState({
       notifications: { a: 1 },
       pendingSpawns: [
-        { parentSessionId: "p1", prompt: "do the thing" },
+        { requestId: "request-1", parentSessionId: "p1", prompt: "do the thing" },
       ] as never,
     });
 
+    resolveSpawnMock.mockResolvedValueOnce({ requestId: "request-1", decision: "cancelled", state: "cancelled",
+      request: { requestId: "request-1", parentSessionId: "p1", prompt: "do the thing" }, session: null });
     useTermStore.getState().clearAllBadges();
 
     expect(markSessionRead).toHaveBeenCalledWith("a");
-    expect(resolveSpawnMock).toHaveBeenCalledWith("p1", "do the thing", false);
+    expect(resolveSpawnMock).toHaveBeenCalledWith("request-1", false);
+    await vi.waitFor(() => expect(useTermStore.getState().pendingSpawns).toEqual([]));
     expect(useTermStore.getState().notifications).toEqual({});
     expect(useTermStore.getState().pendingSpawns).toEqual([]);
   });

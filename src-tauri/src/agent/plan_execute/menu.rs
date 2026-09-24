@@ -205,52 +205,26 @@ pub fn start(app: &AppCtx, req: &Request) -> Result<Value, String> {
     if !path.is_absolute() || !path.is_dir() {
         return Err("Select an existing absolute working directory".into());
     }
-    let wt = if config.worktree_mode(req.worktree) != WorktreeMode::None {
-        Some(crate::git::worktree_add_sibling(&cwd, "plan-execute")?)
-    } else {
-        None
-    };
-    let directory = wt.as_ref().map(|w| w.path.as_str()).unwrap_or(&cwd);
-    let inherited = placement
-        .inherited_worktree
-        .as_deref()
-        .filter(|w| *w == directory);
-    let planner = create_role(
-        app,
-        &req.context.project_id,
-        placement.group_id.as_deref(),
-        placement.parent.as_ref(),
-        "Plan · Execute",
-        &config.plan,
-        Some(directory),
-        wt.as_ref().map(|w| w.path.as_str()).or(inherited),
-        wt.as_ref()
-            .map(|w| w.base_ref.as_str())
-            .or_else(|| inherited.and(placement.inherited_base.as_deref())),
-    )?;
     let id = &req.request_id;
-    let message_id = format!("msg-{id}");
-    let task=format!("{}\n\nWorkflow ID: {id}\nRole: planner\nWorking directory: {directory}\nThis workflow was created by the user from the New Session menu. There is no initiating conversation; present the final audit here.\n\nUser task:\n{}",
-        include_str!("../../../../skills/vspawn/references/plan-execute.md"),req.prompt);
-    let origin = json!({"role":"user"});
-    let wire = format!("[VelaTerm message {message_id}]\n{origin}\n\n{task}")
-        .trim_end()
-        .to_owned();
-    {
-        let mut conn = app.db().conn.lock().unwrap();
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO plan_execute_runs(id,owner_id,planner_id,config,task,state) VALUES (?1,?2,?2,?3,?4,'planning')",
-            params![id,planner.id,serde_json::to_string(&config).unwrap(),req.prompt]).map_err(|e|e.to_string())?;
-        tx.execute(
-            "INSERT INTO plan_execute_menu_launches(run_id,request) VALUES (?1,?2)",
-            params![id, request.to_string()],
-        )
-        .map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO plan_execute_messages(id,run_id,sender_id,target_id,action,round,fingerprint,wire,origin) VALUES (?1,?2,?3,?3,'start',0,'user',?4,?5)",
-            params![message_id,id,planner.id,wire,origin.to_string()]).map_err(|e|e.to_string())?;
-        save_images(&tx, &message_id, &req.images)?;
-        tx.commit().map_err(|e| e.to_string())?;
-    }
+    let inherited = placement.inherited_worktree.as_deref().filter(|w| *w == cwd);
+    let planner = create_role_bound(app, &role_id(id, "planner"), &req.context.project_id,
+        placement.group_id.as_deref(), placement.parent.as_ref(), "Plan · Execute", &config.plan, Some(&cwd),
+        config.worktree_mode(req.worktree) != WorktreeMode::None, inherited,
+        inherited.and(placement.inherited_base.as_deref()), |tx, planner| {
+            let message_id = format!("msg-{id}");
+            let directory = planner.cwd.as_deref().unwrap_or("");
+            let task=format!("{}\n\nWorkflow ID: {id}\nRole: planner\nWorking directory: {directory}\nThis workflow was created by the user from the New Session menu. There is no initiating conversation; present the final audit here.\n\nUser task:\n{}",
+                include_str!("../../../../skills/vspawn/references/plan-execute.md"),req.prompt);
+            let origin = json!({"role":"user"});
+            let wire = format!("[VelaTerm message {message_id}]\n{origin}\n\n{task}").trim_end().to_owned();
+            tx.execute("INSERT INTO plan_execute_runs(id,owner_id,planner_id,config,task,state) VALUES (?1,?2,?2,?3,?4,'planning')",
+                params![id,planner.id,serde_json::to_string(&config).map_err(|e|e.to_string())?,req.prompt]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO plan_execute_menu_launches(run_id,request) VALUES (?1,?2)",
+                params![id,request.to_string()]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO plan_execute_messages(id,run_id,sender_id,target_id,action,round,fingerprint,wire,origin) VALUES (?1,?2,?3,?3,'start',0,'user',?4,?5)",
+                params![message_id,id,planner.id,wire,origin.to_string()]).map_err(|e|e.to_string())?;
+            save_images(tx, &message_id, &req.images)
+        })?;
     bootstrap(app, &get(app, id)?)?;
     Ok(json!({"planner":planner,"run":brief(&get(app,id)?)}))
 }

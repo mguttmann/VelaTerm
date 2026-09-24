@@ -1,22 +1,41 @@
-import {afterEach, describe, expect, it, vi} from "vitest";
+import {afterEach, beforeEach, describe, expect, it, vi} from "vitest";
 import {cleanup, fireEvent, render, screen, waitFor} from "@testing-library/react";
 import type {Session} from "../types";
-const fixture = vi.hoisted(() => ({read: vi.fn(), write: vi.fn(), crash: false}));
+const fixture = vi.hoisted(() => ({read: vi.fn(), write: vi.fn(), exit: vi.fn(), killed: vi.fn(), crash: false}));
 vi.mock("../i18n", () => ({t: (key:string)=>key, useT: ()=>(key:string)=>key}));
 vi.mock("../ipc/commands", () => ({readAgentChat: fixture.read, ptyWrite: fixture.write}));
-vi.mock("../ipc/events", () => ({onPtyExit: vi.fn(), onPtyKilled: vi.fn()}));
+vi.mock("../ipc/events", () => ({onPtyExit: fixture.exit, onPtyKilled: fixture.killed}));
 vi.mock("../store/termStore", () => ({useTermStore:(select:(value:unknown)=>unknown)=>select({runtimes:{}})}));
 vi.mock("../components/StatusIndicator", () => ({StatusIndicator:()=>null}));
 vi.mock("../terminal/imageInput", () => ({injectImageFiles:vi.fn()}));
 vi.mock("../layout/sessionViewers/TranscriptViewer", () => ({assistantLabel:()=>"Claude"}));
 vi.mock("../layout/CenterPane/session/rows", () => ({MessageBubble:({text}:{text:string})=><p>{text}</p>,ReasoningRow:()=>null,ToolCard:()=>null}));
 vi.mock("../layout/CenterPane/session/ChatPane", () => ({ChatPane:()=>{if(fixture.crash)throw new Error("fixture render failure");return <p>recovered</p>}}));
-vi.mock("./MobileTerminal", () => ({MobileTerminal:()=>null}));
-vi.mock("./KeyBar", () => ({KeyBar:()=>null}));
+vi.mock("./MobileTerminal", () => ({MobileTerminal:()=> <div data-testid="terminal"/>}));
+vi.mock("./KeyBar", () => ({KeyBar:()=> <div data-testid="keys"/>}));
 import {TerminalPage} from "./TerminalPage";
 const session = {id:"fixture", name:"Fixture session", kind:"claude", engine:"tui"} as Session;
+beforeEach(()=>{fixture.exit.mockResolvedValue(()=>{});fixture.killed.mockResolvedValue(()=>{});});
 afterEach(()=>{cleanup();vi.resetAllMocks();fixture.crash=false;delete (window as {__VELATERM_CONNECTION_MENU__?:boolean}).__VELATERM_CONNECTION_MENU__;});
 describe("mobile error navigation",()=>{
+  it("retains Kiro terminal controls and returns to the list on PTY exit",()=>{
+    const back=vi.fn();render(<TerminalPage session={{...session,kind:"kiro"}} onBack={back}/>);
+    expect(screen.getByTestId("terminal")).toBeTruthy();
+    expect(screen.getByTestId("keys")).toBeTruthy();
+    expect(screen.getByRole("link",{name:"session.showConversation"}).getAttribute("href")).toContain("sessionView=history");
+    fixture.exit.mock.calls[0][1]();expect(back).toHaveBeenCalledOnce();
+  });
+  it("keeps explicit Kiro history free of terminal controls and exit subscriptions",async()=>{
+    fixture.read.mockResolvedValue([{index:0,kind:"assistant",text:"Saved history"}]);
+    render(<TerminalPage session={{...session,kind:"kiro"}} view="history" onBack={()=>{}}/>);
+    await screen.findByText("Saved history");
+    expect(screen.queryByTestId("terminal")).toBeNull();
+    expect(screen.queryByTestId("keys")).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(fixture.exit).not.toHaveBeenCalled();expect(fixture.killed).not.toHaveBeenCalled();
+    expect(fixture.write).not.toHaveBeenCalled();
+    expect(screen.getByRole("link",{name:"session.showTerminal"}).getAttribute("href")).not.toContain("sessionView");
+  });
   it("keeps back and connection management outside a failed conversation",async()=>{
     fixture.read.mockRejectedValue(new Error("Claude transcript file not found"));
     Object.assign(window,{__VELATERM_CONNECTION_MENU__:true});const back=vi.fn();

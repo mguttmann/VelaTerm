@@ -53,15 +53,9 @@ export function MemoryCompile({ sessionId }: { sessionId: string }) {
   };
   return <form className="memory-document memory-editor memory-compile" onSubmit={(e) => { e.preventDefault(); void start(); }}>
     <h2>{t("memory.add")}</h2><p className="memory-lead">{session?.name ?? sessionId}</p><p>{t("memory.compileHelp")}</p>
-    <fieldset className="memory-agent-field" disabled={busy}>
-      <legend>{t("memory.selectAgent")}</legend>
-      <div className="memory-agent-options">
-        {data.agents.map((item) => <label className="memory-agent-option" key={item.id}>
-          <input type="radio" name="memory-agent" value={item.id} checked={agent === item.id} disabled={!item.available} onChange={() => { setAgent(item.id); setModel(""); setEffort(""); remember({ agent: item.id as SessionKind, model: null, effort: null }); }} />
-          <span><strong>{item.label}</strong>{!item.available && <small>{t("memory.unavailable")}</small>}</span>
-        </label>)}
-      </div>
-    </fieldset>
+    <label>{t("memory.selectAgent")}<Select width="100%" value={agent} disabled={busy} ariaLabel={t("memory.selectAgent")}
+      onChange={(value) => { setAgent(value); setModel(""); setEffort(""); remember({ agent: value as SessionKind, model: null, effort: null }); }}
+      options={data.agents.map((item) => ({ value: item.id, label: item.available ? item.label : `${item.label} — ${t("memory.unavailable")}`, disabled: !item.available }))} /></label>
     {!modelReady ? <LoadState error={models.error} reload={models.reload} /> : <>
       <label>{t("memory.model")}<Select width="100%" value={model} disabled={busy} ariaLabel={t("memory.model")} onChange={(value) => { setModel(value); setEffort(""); remember({ model: value, effort: null }); }} options={[{ value: "", label: t("chat.modelDefault") }, ...models.data!.items.map((item) => ({ value: item.id, label: item.label }))]} /></label>
       <label>{t("chat.effortTooltip")}<Select width="100%" value={effort} disabled={busy || !selectedModel?.effortLevels.length} ariaLabel={t("chat.effortTooltip")} onChange={(value) => { setEffort(value); remember({ effort: value }); }} options={[{ value: "", label: t("spawn.modelDefault") }, ...(selectedModel?.effortLevels.map((level) => ({ value: level, label: memoryEffortLabel(level) })) ?? [])]} /></label>
@@ -104,7 +98,7 @@ export function MemoryJobs({ id }: { id?: string }) {
       {!data.jobs.length && <p>{t(id ? "memory.notFound" : "memory.emptyJobs")}</p>}
       {data.jobs.map((job) => <article className="memory-job" key={job.id}>
         <div className="memory-row"><MemoryLink route={`job/${job.id}`}><strong>{job.sessionName}</strong></MemoryLink><span className="memory-spacer" /><span className={`memory-status ${job.status}`}><StateLabel value={job.status} /></span></div>
-        <p className="memory-muted">{job.agent === "claude" ? "Claude" : "Codex"}{` · ${job.model || t("chat.modelDefault")}`} · {t("chat.effortTooltip")}: {job.effort ? memoryEffortLabel(job.effort) : t("spawn.modelDefault")} · {memoryTime(job.createdAt)}</p>
+        <p className="memory-muted">{job.agentLabel || job.agent}{` · ${job.model || t("chat.modelDefault")}`} · {t("chat.effortTooltip")}: {job.effort ? memoryEffortLabel(job.effort) : t("spawn.modelDefault")} · {memoryTime(job.createdAt)}</p>
         {job.status === "running" && <><p role="status"><StateLabel value={job.stage} /> · {job.progress} / {job.total || "…"}</p><progress max={job.total || 1} value={job.progress} /></>}
         {job.status === "queued" && <p className="memory-muted" role="status">{t("memory.waitingHint")}</p>}
         {job.error && <p className="memory-error">{memoryError(job.error)}</p>}

@@ -9,11 +9,12 @@ import { sharedSessionUrl } from "../sharing/sessionNavigation";
 //! Filtering follows a simplified desktop ProjectTree model:
 //! - Name search displays matching sessions, their ancestor chain, and each match's full subtree.
 //! - Status filters use the snapshot captured in `statusFilterIds`; names do not count and empty
-//!   groups remain hidden.
+//!   groups remain hidden. With `dynamicStatusFilter` on, newly matching sessions join the snapshot,
+//!   matching the desktop sidebar.
 //! - Filtering expands everything and ignores collapse state.
 //! Rows contain an optional collapse arrow, session status dot, name, and type label.
 
-import { memo, useMemo, type CSSProperties } from "react";
+import { memo, useEffect, useMemo, type CSSProperties } from "react";
 import Icons from "../components/Icons";
 import { StatusIndicator } from "../components/StatusIndicator";
 import { t, useT } from "../i18n";
@@ -62,11 +63,27 @@ function StatusChips() {
   const notifications = useTermStore((s) => s.notifications);
   const statusFilter = useTermStore((s) => s.statusFilter);
   const setStatusFilter = useTermStore((s) => s.setStatusFilter);
+  const dynamicStatusFilter = useTermStore((s) => s.dynamicStatusFilter);
+  const primaryViewId = useTermStore((s) => s.primarySidebarTreeViewId);
+  const appendStatusMatches = useTermStore((s) => s.appendSidebarTreeViewStatusMatches);
 
   const counts = useMemo(
     () => countByAgentState(sessions, runtimes, notifications),
     [sessions, runtimes, notifications],
   );
+
+  // Same rule as the desktop sidebar: sessions that start matching join the list, existing rows stay put.
+  useEffect(() => {
+    if (dynamicStatusFilter && statusFilter) appendStatusMatches(primaryViewId);
+  }, [
+    appendStatusMatches,
+    dynamicStatusFilter,
+    notifications,
+    primaryViewId,
+    runtimes,
+    sessions,
+    statusFilter,
+  ]);
 
   return (
     <div className="m-chips">
@@ -159,7 +176,7 @@ export function SessionListPage({ onOpen, loading=false, error=null, onRefresh }
   const statusFiltering = statusFilter !== null;
   const filtering = filter.length > 0 || statusFiltering;
 
-  // Status filtering uses the fixed snapshot captured when the filter was activated.
+  // Status filtering uses the snapshot captured when the filter was activated, plus any dynamic additions.
   const statusMatch = (s: Session) =>
     !statusFiltering || (!!statusFilterIds && s.id in statusFilterIds);
   // Name matching is independent of status. Disable downward name propagation under a status filter.

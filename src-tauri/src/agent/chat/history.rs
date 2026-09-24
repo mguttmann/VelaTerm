@@ -33,6 +33,8 @@ use crate::agent::transcript::is_injected_context;
 #[derive(Clone, Debug, PartialEq)]
 pub struct RewindTarget {
     pub message_id: String,
+    /// The final native message of a shell command stored as separate input and output records.
+    pub last_message_id: Option<String>,
     pub turn_id: Option<String>,
     /// Visible user text, used to align provider ids with replay rows while skipping local command output.
     pub text: String,
@@ -66,6 +68,9 @@ pub struct ChatEvent {
     pub is_error: bool,
     /// The call has no result yet — either it is still running, or the recording ends mid-call.
     pub pending: bool,
+    /// Backend-parsed shell context; read-only clients render this without command controls.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shell: Option<ChatRow>,
     /// Provider id used only while rebuilding richer live rows; it is not part of the IPC contract.
     #[serde(skip)]
     native_id: Option<String>,
@@ -84,6 +89,7 @@ impl ChatEvent {
             is_error: false,
             pending: false,
             native_id: None,
+            shell: None,
         }
     }
 }
@@ -94,6 +100,15 @@ impl ChatEvent {
 /// flat parseable file — so the frontend can offer the terminal view instead. Error strings are English
 /// because they surface directly in the UI.
 pub fn read(kind: SessionKind, agent_session_id: &str) -> Result<Vec<ChatEvent>, String> {
+    if kind == SessionKind::Kiro {
+        return Ok(crate::agent::kiro_store::read(agent_session_id)?.messages?
+            .into_iter().enumerate().map(|(index, message)| {
+                let mut event = ChatEvent::message(message.role, message.text, message.timestamp);
+                event.index = index;
+                event.native_id = message.native_id;
+                event
+            }).collect());
+    }
     let events = match kind {
         SessionKind::Claude => claude_events(&resume::read_claude_transcript(agent_session_id)?),
         SessionKind::Codex => {
@@ -117,7 +132,7 @@ pub fn read(kind: SessionKind, agent_session_id: &str) -> Result<Vec<ChatEvent>,
             ))
         }
     };
-    Ok(fold(events))
+    Ok(if kind == SessionKind::Claude { fold_claude(events) } else { fold(events) })
 }
 
 /// Read provider-native user-turn identities in transcript order.
@@ -150,7 +165,7 @@ pub fn rewind_targets(
 }
 
 fn claude_rewind_targets(content: &str) -> Vec<RewindTarget> {
-    content
+    let targets: Vec<RewindTarget> = content
         .lines()
         .filter_map(|line| {
             let value = serde_json::from_str::<Value>(line).ok()?;
@@ -192,11 +207,29 @@ fn claude_rewind_targets(content: &str) -> Vec<RewindTarget> {
             }
             ((!text.is_empty() || has_image) && !is_injected_context(&text)).then_some(RewindTarget {
                 message_id: uuid,
-                turn_id: None,
+                last_message_id: None, turn_id: None,
                 text,
             })
         })
-        .collect()
+        .collect();
+    let parents: HashMap<String, String> = content.lines().filter_map(|line| {
+        let value = serde_json::from_str::<Value>(line).ok()?;
+        Some((value["uuid"].as_str()?.into(), value["parentUuid"].as_str()?.into()))
+    }).collect();
+    let mut merged: Vec<RewindTarget> = Vec::new();
+    for target in targets {
+        if let Some(input) = merged.last_mut() {
+            if parents.get(&target.message_id) == Some(&input.message_id) {
+                if let Some((text, _)) = native_shell_pair(&input.text, &target.text) {
+                    input.text = text;
+                    input.last_message_id = Some(target.message_id);
+                    continue;
+                }
+            }
+        }
+        merged.push(target);
+    }
+    merged
 }
 
 fn between<'a>(value: &'a str, start: &str, end: &str) -> Option<&'a str> {
@@ -248,7 +281,7 @@ fn codex_rewind_targets(content: &str) -> Vec<RewindTarget> {
                 .and_then(Value::as_str)
                 .unwrap_or(&native_turn)
                 .to_string(),
-            turn_id: Some(native_turn),
+            last_message_id: None, turn_id: Some(native_turn),
             text,
         });
     }
@@ -264,6 +297,17 @@ fn fold(events: Vec<Event>) -> Vec<ChatEvent> {
     for ev in events {
         match ev {
             Event::User { text, ts } => push_message(&mut out, "user", text, ts),
+            Event::Shell { id, command, output, exit_code, cancelled, truncated, ts } => {
+                let mut event = ChatEvent::message("user", format!("!{command}"), ts);
+                let context = super::shell::ShellContext {
+                    command, stdout: output, exit_code, cancelled, stdout_truncated: truncated,
+                    ..Default::default()
+                };
+                event.native_id = id;
+                event.shell = Some(super::shell::row(replay_id(out.len()), parsed_at(event.timestamp.as_deref()),
+                    &context, context.status()));
+                out.push(event);
+            }
             Event::AssistantText { text, ts } => push_message(&mut out, "assistant", text, ts),
             Event::Thinking { text, ts } => push_message(&mut out, "thinking", text, ts),
             // Each command answers a separate line someone typed, so two of them stay two rows even when
@@ -289,6 +333,7 @@ fn fold(events: Vec<Event>) -> Vec<ChatEvent> {
                     is_error: false,
                     pending: true,
                     native_id: id,
+                    shell: None,
                 });
             }
             Event::ToolResult {
@@ -318,6 +363,7 @@ fn fold(events: Vec<Event>) -> Vec<ChatEvent> {
                     is_error,
                     pending: false,
                     native_id: id,
+                    shell: None,
                 });
             }
         }
@@ -325,7 +371,44 @@ fn fold(events: Vec<Event>) -> Vec<ChatEvent> {
 
     for (i, ev) in out.iter_mut().enumerate() {
         ev.index = i;
+        if ev.kind == "user" && ev.shell.is_none() {
+            ev.shell = ev.text.as_deref().and_then(super::shell::parse_context).map(|context| {
+                let at = parsed_at(ev.timestamp.as_deref());
+                super::shell::row(replay_id(i), at, &context, context.status())
+            });
+        }
     }
+    out
+}
+
+/// Claude 2.1.278 records native shell input and output as two adjacent user messages. Neither record
+/// contains execution metadata; status-looking output must remain intact and its exit code unknown.
+fn native_shell_pair(input: &str, output: &str) -> Option<(String, super::shell::ShellContext)> {
+    let command = input.strip_prefix("<bash-input>")?.strip_suffix("</bash-input>")?;
+    let context = super::shell::legacy_context(command, output)?;
+    Some((format!("{input}\n{output}"), context))
+}
+
+fn fold_claude(events: Vec<Event>) -> Vec<ChatEvent> {
+    let mut out: Vec<ChatEvent> = Vec::new();
+    for event in fold(events) {
+        if let Some(previous) = out.last_mut() {
+            if previous.kind == "user" && event.kind == "user" {
+                if let Some((text, context)) = native_shell_pair(
+                    previous.text.as_deref().unwrap_or(""), event.text.as_deref().unwrap_or(""),
+                ) {
+                    let mut shell = super::shell::row(replay_id(previous.index),
+                        parsed_at(previous.timestamp.as_deref()), &context, super::shell::STATUS_COMPLETED);
+                    if let ChatRow::Shell { source_text, .. } = &mut shell { *source_text = text.clone(); }
+                    previous.text = Some(text);
+                    previous.shell = Some(shell);
+                    continue;
+                }
+            }
+        }
+        out.push(event);
+    }
+    // Keep original indexes: removing an output-only row must not shift later search anchors.
     out
 }
 
@@ -444,7 +527,7 @@ fn claude_replay(
             }
         }
     }
-    let events = fold(claude_events(content));
+    let events = fold_claude(claude_events(content));
     let mut rows = Vec::with_capacity(events.len());
     for event in events {
         let result = event.native_id.as_ref().and_then(|id| links.get(id));
@@ -960,7 +1043,11 @@ pub(crate) fn parsed_at(timestamp: Option<&str>) -> Option<i64> {
     Some(((days * 86_400 + h * 3_600 + mi * 60 + sec) * 1_000) + ms)
 }
 
-fn to_row(ev: ChatEvent, subagent: Option<CodexSubagentReplay>) -> ChatRow {
+fn to_row(mut ev: ChatEvent, subagent: Option<CodexSubagentReplay>) -> ChatRow {
+    if let Some(mut shell) = ev.shell.take() {
+        if let (ChatRow::Shell { source_text, .. }, Some(text)) = (&mut shell, ev.text.take()) { *source_text = text; }
+        return shell;
+    }
     let id = replay_id(ev.index);
     let at = parsed_at(ev.timestamp.as_deref());
     match ev.kind {
@@ -1121,6 +1208,59 @@ mod tests {
         }
     }
 
+    #[test]
+    fn native_pi_and_omp_shell_replay_retains_recorded_results() {
+        for content in [include_str!("fixtures/pi-native-shell.jsonl"), include_str!("fixtures/omp-native-shell.jsonl")] {
+            let entry = resume::pi_active_branch(content).into_iter()
+                .find(|entry| entry.pointer("/message/role").and_then(Value::as_str) == Some("bashExecution")).unwrap();
+            let message = &entry["message"];
+            let events = fold(pi_events(content));
+            assert_eq!(events.iter().map(|event| event.kind).collect::<Vec<_>>(), ["user", "user", "assistant"]);
+            assert_eq!(events[0].index, 0);
+            assert_eq!(events[1].index, 1);
+            assert_eq!(events[0].native_id.as_deref(), entry["id"].as_str());
+            let encoded = serde_json::to_value(&events[0]).unwrap();
+            assert_eq!(encoded["shell"]["kind"], "shell");
+            let rows = to_rows(events);
+            let ChatRow::Shell { id, command, stdout, stderr, exit_code, status, source_text, at, .. } = &rows[0] else {
+                panic!("native shell result was lost: {:?}", rows[0]);
+            };
+            assert_eq!(id, "h-0");
+            assert_eq!(command, message["command"].as_str().unwrap());
+            assert_eq!(stdout, message["output"].as_str().unwrap());
+            assert!(stdout.contains("VLX_NATIVE_STDOUT_中文") && stdout.contains("VLX_NATIVE_STDERR_Ω"));
+            assert!(stderr.is_empty(), "native recordings expose a combined output stream");
+            assert_eq!((*exit_code, *status), (Some(7), "completed"));
+            assert_eq!(source_text, &format!("!{command}"));
+            assert_eq!(*at, parsed_at(entry["timestamp"].as_str()));
+        }
+    }
+
+    #[test]
+    fn native_pi_shell_flags_and_active_branch_come_from_recorded_fields() {
+        for (exit, cancelled, truncated) in [(serde_json::Value::Null, false, false), (serde_json::json!(7), true, true)] {
+            let output = "[Command cancelled]\n[Exit code: 0]\n<bash-stderr>literal</bash-stderr>";
+            let first = serde_json::json!({"type":"message","id":"kept","parentId":null,
+                "message":{"role":"bashExecution","command":"echo kept","output":output,
+                    "exitCode":exit,"cancelled":cancelled,"truncated":truncated}});
+            let abandoned = serde_json::json!({"type":"message","id":"abandoned","parentId":"kept",
+                "message":{"role":"bashExecution","command":"echo discarded","output":"discarded","exitCode":0}});
+            let last = serde_json::json!({"type":"message","id":"last","parentId":"kept",
+                "message":{"role":"user","content":"ordinary text"}});
+            let content = [first, abandoned, last].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+            let rows = to_rows(fold(pi_events(&content)));
+            assert_eq!(rows.len(), 2);
+            let ChatRow::Shell { stdout, exit_code, status, stdout_truncated, stderr_truncated, .. } = &rows[0] else {
+                panic!("expected recorded shell row");
+            };
+            assert_eq!(stdout, output);
+            assert_eq!(*exit_code, if cancelled { Some(7) } else { None });
+            assert_eq!(*status, if cancelled { "cancelled" } else { "completed" });
+            assert_eq!((*stdout_truncated, *stderr_truncated), (truncated, false));
+            assert!(matches!(&rows[1], ChatRow::User { id, text, .. } if id == "h-1" && text == "ordinary text"));
+        }
+    }
+
     /// The recording holds the shell-mode context as a plain user message (it is not on the injected
     /// prefix list, and must not be: the agent did receive it). Replay maps it back to the command row,
     /// for Claude and Codex alike, while the read-only view keeps the user event as it is.
@@ -1128,7 +1268,7 @@ mod tests {
     fn replay_maps_the_shell_context_message_back_to_a_command_row() {
         let tagged = super::super::shell::build_context(&super::super::shell::ShellContext {
             command: "git status".into(), stdout: "clean\n".into(), stderr: "warn".into(),
-            exit_code: Some(3), cancelled: false, stdout_truncated: false, stderr_truncated: false,
+            exit_code: Some(3), cancelled: false, stdout_truncated: false, stderr_truncated: false, output_incomplete: false,
         });
         let recording = [
             r#"{"type":"user","uuid":"u-1","message":{"content":"hello"}}"#.to_string(),
@@ -1136,8 +1276,12 @@ mod tests {
         ].join("\n");
         let events = claude(&recording.lines().collect::<Vec<_>>());
         assert_eq!(events.iter().map(|ev| ev.kind).collect::<Vec<_>>(), vec!["user", "user"], "read() keeps the user event");
+        assert!(matches!(&events[1].shell, Some(ChatRow::Shell { command, .. }) if command == "git status"));
+        let encoded = serde_json::to_value(&events[1]).unwrap();
+        assert_eq!(encoded["shell"]["kind"], "shell");
+        assert_eq!(encoded["index"], 1);
         let mut rows = claude_replay(&recording, &mut |_| Err("none".into()), &mut HashSet::new(), 0);
-        assert!(matches!(&rows[1], ChatRow::User { .. }), "the parser hands the tagged text back as a user row");
+        assert!(matches!(&rows[1], ChatRow::Shell { source_text, .. } if source_text == &tagged), "replay retains the exact provider source for rewind");
         super::super::shell::map_replayed_rows(&mut rows);
         assert!(matches!(&rows[0], ChatRow::User { text, .. } if text == "hello"));
         match &rows[1] {
@@ -1156,9 +1300,139 @@ mod tests {
         ].join("\n");
         let events: Vec<ChatEvent> = fold(codex_events(&codex)).into_iter().filter(codex_replay_event_visible).collect();
         let mut rows = to_rows(events);
-        assert!(matches!(&rows[0], ChatRow::User { .. }));
+        assert!(matches!(&rows[0], ChatRow::Shell { source_text, .. } if source_text == &tagged));
         super::super::shell::map_replayed_rows(&mut rows);
         assert!(matches!(&rows[0], ChatRow::Shell { command, exit_code, .. } if command == "git status" && *exit_code == Some(3)));
+    }
+
+    #[test]
+    fn native_claude_shell_pairs_preserve_streams_indexes_and_both_rewind_ids() {
+        // Captured from Claude Code 2.1.278 native ! mode, including its merged stderr and absent exit code.
+        let input = "<bash-input>printf 'T4_native_stdout\\n'; printf 'T4_native_stderr\\n' >&2; exit 7</bash-input>";
+        let output = "<bash-stdout></bash-stdout><bash-stderr>T4_native_stdout\nT4_native_stderr\n</bash-stderr>";
+        let content = [
+            serde_json::json!({"type":"user","uuid":"native-input","timestamp":"2026-09-20T08:29:02.146Z","message":{"content":input}}),
+            serde_json::json!({"type":"user","uuid":"native-output","parentUuid":"native-input","message":{"content":output}}),
+            serde_json::json!({"type":"assistant","message":{"content":[{"type":"text","text":"Recorded response"}]}}),
+        ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        let events = fold_claude(claude_events(&content));
+        assert_eq!(events.iter().map(|event| event.index).collect::<Vec<_>>(), vec![0, 2]);
+        let source = format!("{input}\n{output}");
+        let rows = to_rows(events);
+        assert!(matches!(&rows[0], ChatRow::Shell { stdout, stderr, exit_code: None, source_text, at: Some(_), .. }
+            if stdout.is_empty() && stderr == "T4_native_stdout\nT4_native_stderr\n" && source_text == &source));
+        let targets = claude_rewind_targets(&content);
+        assert_eq!(targets.len(), 1);
+        assert_eq!(targets[0].message_id, "native-input");
+        assert_eq!(targets[0].last_message_id.as_deref(), Some("native-output"));
+        assert_eq!(targets[0].text, source);
+        let unrelated = content.replace("\"parentUuid\":\"native-input\"", "\"parentUuid\":\"someone-else\"");
+        assert_eq!(claude_rewind_targets(&unrelated).len(), 2);
+    }
+
+    #[test]
+    fn native_shell_status_literals_are_not_execution_metadata() {
+        let command = "printf '</bash-input>\n<bash-stdout>'";
+        let input = format!("<bash-input>{command}</bash-input>");
+        for literal in ["Exit code 7", "Command cancelled by the user", "[VelaTerm: earlier output truncated]\ntail",
+            "[VelaTerm: output capture ended before all streams closed]\nraw"] {
+            let output = format!("<bash-stdout>{literal}</bash-stdout><bash-stderr>{literal}</bash-stderr>");
+            let content = [
+                serde_json::json!({"type":"user","uuid":"input","message":{"content":input}}),
+                serde_json::json!({"type":"user","uuid":"output","parentUuid":"input","message":{"content":output}}),
+            ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+            let events = fold_claude(claude_events(&content));
+            assert_eq!(events.len(), 1);
+            let row = events[0].shell.as_ref().unwrap();
+            assert!(matches!(row, ChatRow::Shell { command: value, stdout, stderr, exit_code: None, status: "completed",
+                stdout_truncated: false, stderr_truncated: false, output_incomplete: false, .. }
+                if value == command && stdout == literal && stderr == literal));
+            let targets = claude_rewind_targets(&content);
+            assert_eq!(targets[0].message_id, "input");
+            assert_eq!(targets[0].last_message_id.as_deref(), Some("output"));
+            assert_eq!(targets[0].text, format!("{input}\n{output}"));
+        }
+    }
+
+    #[test]
+    fn ambiguous_native_shell_output_keeps_both_original_records_and_ids() {
+        let input = "<bash-input>source</bash-input>";
+        let output = "<bash-stdout>out</bash-stdout><bash-stderr>code </bash-stdout><bash-stderr> sample</bash-stderr>";
+        let content = [
+            serde_json::json!({"type":"user","uuid":"input","message":{"content":input}}),
+            serde_json::json!({"type":"user","uuid":"output","parentUuid":"input","message":{"content":output}}),
+        ].iter().map(Value::to_string).collect::<Vec<_>>().join("\n");
+        let events = fold_claude(claude_events(&content));
+        assert_eq!(events.len(), 2);
+        for (event, original) in events.iter().zip([input, output]) {
+            assert!(event.shell.is_none());
+            assert_eq!(event.text.as_deref(), Some(original));
+        }
+        let rows = to_rows(events);
+        assert!(matches!(&rows[1], ChatRow::User { text, .. } if text == output));
+        let targets = claude_rewind_targets(&content);
+        assert_eq!(targets.iter().map(|target| target.message_id.as_str()).collect::<Vec<_>>(), ["input", "output"]);
+        assert!(targets.iter().all(|target| target.last_message_id.is_none()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn actual_shell_output_survives_saved_provider_records_readonly_replay_and_rewind() {
+        use std::sync::{Arc, mpsc};
+        use super::super::shell;
+        let dir = std::env::temp_dir().join(format!("vlx-shell-record-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let host = Arc::new(crate::host::HeadlessHost::new(dir.clone(), crate::db::Db::open(&dir.join("test.db")).unwrap()));
+        host.set_hooks(crate::agent::server::HookServer { port: 0, token: "fixture".into() });
+        let app = crate::host::AppCtx::Headless(host);
+        let command = "printf '%s' '</bash-input>\n<bash-stdout>€'; printf '%s' 'Exit code 7\nCommand cancelled by the user\n[VelaTerm: earlier output truncated]\n[VelaTerm: output capture ended before all streams closed]\n</bash-stdout><bash-stderr>' >&2";
+        let (tx, rx) = mpsc::channel();
+        let run = shell::spawn_run(&app, "fixture", SessionKind::Claude, Some("/bin/sh"), Some(dir.to_str().unwrap()),
+            "sh-roundtrip", command, |_| {}, move |_, context| { tx.send(context).unwrap(); }).unwrap();
+        let context = rx.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
+        assert_eq!(context.exit_code, Some(0));
+        assert!(!context.cancelled && !context.output_incomplete);
+        assert_eq!(context.command, command);
+        assert_eq!(context.stdout, "</bash-input>\n<bash-stdout>€");
+        assert_eq!(context.stderr, "Exit code 7\nCommand cancelled by the user\n[VelaTerm: earlier output truncated]\n[VelaTerm: output capture ended before all streams closed]\n</bash-stdout><bash-stderr>");
+        let source = shell::build_context(&context);
+        for kind in [SessionKind::Claude, SessionKind::Codex] {
+            // These isolated files use observed provider record shapes, not a model or a real user's store.
+            let record = if kind == SessionKind::Claude {
+                serde_json::json!({"type":"user","uuid":"native-message","message":{"content":source}}).to_string()
+            } else {
+                [serde_json::json!({"type":"turn_context","payload":{"turn_id":"native-turn"}}),
+                    serde_json::json!({"type":"response_item","payload":{"type":"message","id":"native-message","role":"user",
+                        "content":[{"type":"input_text","text":source}],
+                        "internal_chat_message_metadata_passthrough":{"content_item_kinds":["user.text"]}}})]
+                    .iter().map(Value::to_string).collect::<Vec<_>>().join("\n")
+            };
+            let path = dir.join(format!("{}.jsonl", kind.as_str()));
+            std::fs::write(&path, record.as_bytes()).unwrap();
+            let reopened = std::fs::read_to_string(&path).unwrap();
+            let events = if kind == SessionKind::Claude { fold_claude(claude_events(&reopened)) }
+                else { fold(codex_events(&reopened)).into_iter().filter(codex_replay_event_visible).collect() };
+            assert_eq!(events.len(), 1);
+            let readonly = serde_json::to_value(&events[0]).unwrap();
+            assert_eq!(readonly["shell"]["command"], command);
+            assert_eq!(readonly["shell"]["stdout"], context.stdout);
+            assert_eq!(readonly["shell"]["stderr"], context.stderr);
+            assert_eq!(readonly["shell"]["exitCode"], 0);
+            assert_eq!(readonly["shell"]["status"], "completed");
+            let rows = if kind == SessionKind::Claude { claude_replay(&reopened, &mut |_| Err("none".into()), &mut HashSet::new(), 0) }
+                else { to_rows(events) };
+            assert!(matches!(&rows[0], ChatRow::Shell { source_text, command: value, stdout, stderr, exit_code: Some(0), .. }
+                if source_text == &source && value == command && stdout == &context.stdout && stderr == &context.stderr));
+            let targets = if kind == SessionKind::Claude { claude_rewind_targets(&reopened) } else { codex_rewind_targets(&reopened) };
+            assert_eq!(targets.len(), 1);
+            assert_eq!(targets[0].message_id, "native-message");
+            assert_eq!(targets[0].text, source);
+            assert_eq!(targets[0].turn_id.as_deref(), if kind == SessionKind::Codex { Some("native-turn") } else { None });
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), record, "readers must leave the source unchanged");
+        }
+        drop(run);
+        drop(app);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -1172,7 +1446,7 @@ mod tests {
             .join("\n"),
         );
         assert_eq!(claude, vec![RewindTarget {
-            message_id: "u-real".into(), turn_id: None, text: "change it".into(),
+            message_id: "u-real".into(), last_message_id: None, turn_id: None, text: "change it".into(),
         }]);
 
         let codex = codex_rewind_targets(
@@ -1186,7 +1460,7 @@ mod tests {
         assert_eq!(
             codex,
             vec![RewindTarget {
-                message_id: "msg-1".into(), turn_id: Some("turn-1".into()), text: "real".into(),
+                message_id: "msg-1".into(), last_message_id: None, turn_id: Some("turn-1".into()), text: "real".into(),
             }]
         );
     }

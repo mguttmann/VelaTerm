@@ -126,7 +126,12 @@ pub async fn desktop_call(
     tauri::async_runtime::spawn_blocking(move || {
         let _context=crate::diagnostics::Context::enter(diagnostic_request_id.as_deref());
         let _operation=crate::diagnostics::Operation::enter(diagnostic_operation_id.as_deref());
-        crate::diagnostics::record("DEBUG", "rpc_queue", serde_json::json!({"command":cmd,"requestId":diagnostic_request_id,"queueMs":queued.elapsed().as_millis() as u64}));
+        // Queue time is how long this call waited for a thread in the blocking pool. It climbs when the pool
+        // is saturated, and the frontend cannot tell that apart from a frozen application even though the UI
+        // thread is free — so past the threshold it is reported at WARN, which survives the default log level.
+        let queue_ms = queued.elapsed().as_millis() as u64;
+        let level = if queue_ms >= RPC_QUEUE_REPORT_MS { "WARN" } else { "DEBUG" };
+        crate::diagnostics::record(level, "rpc_queue", serde_json::json!({"command":cmd,"requestId":diagnostic_request_id,"queueMs":queue_ms}));
         crate::web::dispatch::dispatch(
             &AppCtx::Tauri(app),
             &cmd,
@@ -256,10 +261,34 @@ pub fn pty_spawn(
     )
 }
 
+/// Queue delay at which a backend call is reported. Well below it the frontend still feels immediate; at a
+/// quarter second a click already appears to have been ignored.
+const RPC_QUEUE_REPORT_MS: u64 = 250;
+
+/// How long a command that runs on the UI thread may take before it is reported.
+///
+/// These commands are deliberately synchronous (see the command discipline in CLAUDE.md), which means they
+/// execute on the thread that also drives drawing and input for every window. The average is uninteresting;
+/// what matters is the occasional call that blocks the event loop long enough to be felt, and 50 ms is
+/// roughly where that begins.
+pub(crate) const UI_THREAD_REPORT_THRESHOLD: std::time::Duration = std::time::Duration::from_millis(50);
+
 /// Write keystroke data to a session. Input does not participate in size ownership.
 #[tauri::command]
 pub fn pty_write(state: State<PtyManager>, session_id: String, data: String) -> Result<(), String> {
-    state.write(&session_id, &data)
+    // Timed by hand rather than with a `Slow` guard: this runs on every keystroke, so the fast path must
+    // not build a diagnostic payload that is thrown away.
+    let started = std::time::Instant::now();
+    let outcome = state.write(&session_id, &data);
+    let elapsed = started.elapsed();
+    if elapsed >= UI_THREAD_REPORT_THRESHOLD {
+        crate::diagnostics::record(
+            "WARN",
+            "ui_thread_slow",
+            serde_json::json!({"command":"pty_write","sessionId":session_id,"durationMs":elapsed.as_millis() as u64}),
+        );
+    }
+    outcome
 }
 
 /// Resize a PTY only for takeover, no owner, or the current owner; otherwise ignore it. Successful
@@ -273,6 +302,11 @@ pub fn pty_resize(
     rows: u16,
     takeover: Option<bool>,
 ) -> Result<(), String> {
+    let _slow = crate::diagnostics::Slow::new(
+        "ui_thread_slow",
+        UI_THREAD_REPORT_THRESHOLD,
+        serde_json::json!({"command":"pty_resize","sessionId":session_id}),
+    );
     state.resize(
         &crate::host::AppCtx::Tauri(app),
         &session_id,
@@ -294,6 +328,11 @@ pub fn pty_kill(
     session_id: String,
     reason: Option<String>,
 ) -> Result<(), String> {
+    let _slow = crate::diagnostics::Slow::new(
+        "ui_thread_slow",
+        UI_THREAD_REPORT_THRESHOLD,
+        serde_json::json!({"command":"pty_kill","sessionId":session_id}),
+    );
     state.kill(
         &session_id,
         crate::pty::manager::DESKTOP_SOURCE,
@@ -565,6 +604,43 @@ pub async fn web_device_revoke(app: AppHandle, device_id: String) -> Result<bool
 
 // ─────────────────────────── Remote connection window ───────────────────────────
 
+/// Let a remote window save the files its page downloads.
+///
+/// URL and SSH windows download through `local_download`, which asks where to save and reports progress. Account
+/// remote windows load an external origin with no IPC permissions and cannot reach it, so their Download action
+/// still ends here, as does any other attachment link a page opens. Without a download handler wry lets WKWebView
+/// try to display an attachment, which it cannot, so the request ended with no file and no error. Files go to the
+/// OS Downloads folder under the name the webview already made unique. The outcome is reported to the page as a
+/// DOM event through `eval`, which needs no IPC permission. macOS reports no path on completion, so the
+/// destination is remembered from the request.
+fn with_download_handler<'a, R: tauri::Runtime, M: Manager<R>>(
+    builder: tauri::WebviewWindowBuilder<'a, R, M>,
+) -> tauri::WebviewWindowBuilder<'a, R, M> {
+    let pending: std::sync::Arc<std::sync::Mutex<std::collections::HashMap<String, std::path::PathBuf>>> = Default::default();
+    builder.on_download(move |webview, event| {
+        match event {
+            tauri::webview::DownloadEvent::Requested { url, destination } => {
+                if let Ok(mut map) = pending.lock() {
+                    map.insert(url.to_string(), destination.clone());
+                }
+            }
+            tauri::webview::DownloadEvent::Finished { url, path, success } => {
+                let recorded = pending.lock().ok().and_then(|mut map| map.remove(url.as_str()));
+                let detail = serde_json::json!({
+                    "url": url.as_str(),
+                    "path": path.or(recorded).map(|p| p.to_string_lossy().into_owned()),
+                    "success": success,
+                });
+                let _ = webview.eval(&format!(
+                    "window.dispatchEvent(new CustomEvent('vlx:download-finished',{{detail:{detail}}}))"
+                ));
+            }
+            _ => {}
+        }
+        true
+    })
+}
+
 /// Open a window connected to a remote vlx-term server, with initialization for auto-login/identity.
 ///
 /// Do **not** load remote HTTPS directly: wry 0.55 WKWebView cannot handle the self-signed certificate
@@ -630,7 +706,7 @@ pub async fn open_remote_window(
 }})();"#
     );
 
-    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed))
+    with_download_handler(tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed)))
         .title(format!("VelaTerm · Remote: {display_addr}"))
         .inner_size(1280.0, 820.0)
         .min_inner_size(900.0, 600.0)
@@ -654,6 +730,8 @@ pub async fn open_remote_window(
             .window(label.clone())
             .remote("http://127.0.0.1:*".to_string())
             .permission("local-fonts:allow-catalog")
+            .permission("local-download:allow-start")
+            .permission("local-download:allow-cancel")
             .permission("clipboard-manager:allow-write-text")
             .permission("clipboard-manager:allow-write-image")
             .permission("notification:default")
@@ -694,7 +772,7 @@ pub async fn open_account_remote_window(
   window.__VLX_FORCE_BROWSER__=true;
   if(typeof window.OffscreenCanvas!=='undefined')window.OffscreenCanvas=undefined;
 })();"#;
-    tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed))
+    with_download_handler(tauri::WebviewWindowBuilder::new(&app, &label, tauri::WebviewUrl::External(parsed)))
         .title("VelaTerm · Remote")
         .inner_size(1280.0, 820.0)
         .min_inner_size(720.0, 480.0)
@@ -827,6 +905,11 @@ pub fn open_devtools(window: tauri::WebviewWindow) {
 /// no I/O, so a synchronous command is correct here.
 #[tauri::command]
 pub fn set_native_theme(app: AppHandle, mode: String) {
+    let _slow = crate::diagnostics::Slow::new(
+        "ui_thread_slow",
+        UI_THREAD_REPORT_THRESHOLD,
+        serde_json::json!({"command":"set_native_theme"}),
+    );
     #[cfg(windows)]
     {
         let theme = match mode.as_str() {
@@ -1064,7 +1147,7 @@ fn open_login_window(
     } else {
         format!("VelaTerm · SSH: {host}")
     };
-    let win = tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::External(parsed))
+    let win = with_download_handler(tauri::WebviewWindowBuilder::new(app, &label, tauri::WebviewUrl::External(parsed)))
         .title(title)
         .inner_size(1280.0, 820.0)
         .min_inner_size(900.0, 600.0)
@@ -1144,6 +1227,8 @@ fn open_login_window(
             .window(label.clone())
             .remote("http://127.0.0.1:*".to_string())
             .permission("local-fonts:allow-catalog")
+            .permission("local-download:allow-start")
+            .permission("local-download:allow-cancel")
             .permission("clipboard-manager:allow-write-text")
             .permission("clipboard-manager:allow-write-image")
             .permission("notification:default")

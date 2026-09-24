@@ -38,6 +38,7 @@ import { Field, Seg, SectionTitle } from "./settingsParts";
 const SC_LABEL: Record<ShortcutAction, I18nKey> = {
   openProject: "settings.scOpenProject",
   newTab: "settings.scNewTab",
+  newAgentSession: "settings.scNewAgentSession",
   newBrowserTab: "settings.scNewBrowserTab",
   closePane: "settings.scClosePane",
   splitRight: "settings.scSplitRight",

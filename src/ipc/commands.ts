@@ -247,6 +247,8 @@ export interface ChatEvent {
   isError: boolean;
   /** The call has no result yet: still running, or the recording ends mid-call. */
   pending: boolean;
+  /** Structured shell history, rendered read-only by recorded conversation views. */
+  shell?: Extract<import("./chat").ChatRow, { kind: "shell" }>;
 }
 
 /**
@@ -761,20 +763,25 @@ export function uninstallSpawnSkills(): Promise<void> {
   return invoke("uninstall_spawn_skills");
 }
 
-/**
- * Answer a spawn confirmation card, so other clients dismiss theirs.
- *
- * Resolves to true only for the client that answered first. The same card is shown everywhere, so a
- * second answer arriving a moment later must not act on it: the winner is already creating the worktree
- * and the child session, and a loser that proceeded would run the whole task a second time.
- */
-export function resolveSpawn(
-  parentSessionId: string,
-  prompt: string,
-  confirmed: boolean,
-): Promise<boolean> {
-  return invoke<boolean>("resolve_spawn", { parentSessionId, prompt, confirmed });
+export interface SpawnReceipt {
+  resolvedPlanExecute?: import("./launch").PlanExecuteConfig | null;
+  requestId: string;
+  request: import("./events").SpawnRequest;
+  decision: "pending" | "confirmed" | "cancelled";
+  state: "pending" | "ready" | "waiting" | "failed" | "dispatching" | "uncertain" | "complete" | "cancelled";
+  sessionId: string;
+  messageId: string;
+  session: import("../types").Session | null;
+  error: string | null;
 }
+/** Decisions and execution results are persisted together on the backend. */
+export const resolveSpawn = (requestId: string, confirmed: boolean, request?: import("./events").SpawnRequest) =>
+  invoke<SpawnReceipt>("resolve_spawn", { requestId, confirmed, request });
+export const spawnRequests = () => invoke<SpawnReceipt[]>("spawn_requests");
+export const spawnRequest = (requestId: string) => invoke<SpawnReceipt>("spawn_request", { requestId });
+export const retrySpawn = (requestId: string) => invoke<SpawnReceipt>("spawn_retry", { requestId });
+export const prepareSpawn = (requestId: string, kind?: string) =>
+  invoke<{ kind: string; cwd: string | null; model: string | null; effort: string | null }>("spawn_prepare", { requestId, kind });
 
 // Pasted-image cleanup.
 

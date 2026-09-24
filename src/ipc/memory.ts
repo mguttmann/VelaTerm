@@ -22,7 +22,7 @@ export interface MemoryCollectionProject { id: string; name: string; kind: "proj
 /** Archived sessions grouped by their original project, plus the complete session objects for viewers. */
 export interface MemoryCollections { projects: MemoryCollectionProject[]; sessions: Session[] }
 export interface MemoryJob {
-  id: string; sourceId: string; sessionName: string; agent: string; model: string; effort: string; status: string; stage: string;
+  id: string; sourceId: string; sessionName: string; agent: string; agentLabel: string; model: string; effort: string; status: string; stage: string;
   progress: number; total: number; error: string; entries: string[]; createdAt: number; updatedAt: number;
 }
 export interface MemoryOptions { agents: { id: string; label: string; available: boolean }[]; defaultAgent: string; maxSourceChars: number; catalog: { id: string; title: string }[] }

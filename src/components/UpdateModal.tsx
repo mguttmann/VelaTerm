@@ -8,7 +8,8 @@
 //! tokenizes them and each token maps to a React element without dangerouslySetInnerHTML, ensuring
 //! even a compromised update endpoint cannot execute supplied HTML.
 
-import { marked, type Token, type Tokens } from "marked";
+import { type Token, type Tokens } from "marked";
+import { md } from "../markdownEngine";
 import type { ReactNode } from "react";
 
 import { getLocale, useT } from "../i18n";
@@ -228,7 +229,7 @@ function ReleaseNotes({ markdown }: { markdown: string }) {
       </div>
     );
   }
-  return <>{renderBlocks(marked.lexer(markdown), "n")}</>;
+  return <>{renderBlocks(md.lexer(markdown), "n")}</>;
 }
 
 // ── Dialog ────────────────────────────────────────────────────────────────

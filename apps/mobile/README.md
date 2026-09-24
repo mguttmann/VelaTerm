@@ -14,7 +14,7 @@
 
 SSH 两端均支持密码和 OpenSSH Ed25519 私钥。iOS 当前 SSH 依赖的私钥解密支持 AES-128/256-CTR，bcrypt 轮数须小于 32；测试覆盖未加密私钥及 AES-256-CTR、16 轮 bcrypt 的私钥。自定义高轮数或其他加密格式会明确报错。iOS 不启用依赖中的旧 RSA/SHA-1 认证；RSA 用户需使用其他认证方式，RSA SHA-2 支持仍待补齐。Android 使用 SSHJ 的 OpenSSH 私钥解析器，RSA 路径尚未单独验证。
 
-默认视图选择依赖本次服务端新增的 `prepare_mobile_session` RPC。旧服务会显示升级提示，用户可选择终端继续访问。构建手机壳不会更新远端 Web 界面或服务端程序；需部署包含本次改动的 VelaTerm 服务。自动下载暂时固定到项目版本 `0.1.108`，发布服务器上的同版本产物不一定包含这些尚未发布的改动。
+默认视图选择依赖服务端的 `prepare_mobile_session` RPC。旧服务会显示升级提示，用户可选择终端继续访问。构建手机壳不会更新远端 Web 界面或服务端程序。资源生成器以 `src-tauri/tauri.conf.json` 为服务端版本来源，写入前核对根 `package.json` 与 Cargo 版本一致，再同步自动下载脚本和 runtime；本批对应现有版本 `0.2.2`，手机包仍为 `0.1.0`，未升版或发布。已发布的同版本服务端产物不能视为包含本批尚未发布的修复，远端仍需更新到相应实现。
 
 ## 构建
 
@@ -46,7 +46,7 @@ xcodebuild -project ios/App/App.xcodeproj -scheme App \
   -derivedDataPath .build/ios CODE_SIGNING_ALLOWED=NO build
 ```
 
-真机安装需要在 Xcode 中设置开发团队及签名。2026-09-09 已完成开发签名构建，并安装到 iPhone 17 Pro；自动启动因手机锁屏被系统拒绝，真机界面和连接流程仍待验证。当前没有生成可分发 IPA，也没有上传源码、发布应用或创建推送资源。
+真机安装需要在 Xcode 中设置开发团队及签名。2026-09-09 曾完成开发签名构建并安装到 iPhone 17 Pro，当时自动启动因锁屏被拒绝。2026-09-20 复核时，该设备已使用 iOS 27.0（24A437），现有 Xcode 26.2 无法挂载所需的开发者磁盘映像（DDI），因此本批没有安装或运行真机新包。当前没有生成可分发 IPA，也没有发布应用或创建推送资源。
 
 `pnpm dev` 仅预览连接首页，固定监听 `127.0.0.1:41571`，浏览器中不会模拟原生 SSH 功能。远端项目 Web 界面仍从仓库根目录构建。
 
@@ -54,7 +54,7 @@ xcodebuild -project ios/App/App.xcodeproj -scheme App \
 
 `src/remote.ts` 定义统一插件接口：`list/save/remove/connect/disconnect/status/scanURL/account` 和 `state` 事件。Swift 与 Kotlin 分别实现系统安全存储、SSH、端口转发、项目 WebView 和账号操作。共享远端准备代码位于 `plugins/remote/shared/`；`pnpm sync` 生成压缩脚本和 iOS 资源副本，不能直接修改生成副本。
 
-原生插件的用户可见文本（Swift、Kotlin 以及 Android 注入的 `download.js`）不写在源码里，而是来自共享词典 `src/i18n/locales/`：键位于 `mobile.native.*` 组，参数用 `{name}` 占位符表示，由 `MobileText.get(key, values)`（Swift 与 Kotlin 同名）在原生侧按设备语言解析并替换；返回给起始页的 `call.reject(...)` 错误也经此本地化。`scripts/sync-resources.mjs` 自动收集英文词典中所有 `mobile.*` 键，写入两份 `native-text.json`（`plugins/remote/shared/` 与 iOS `Bootstrap/`），新增原生文本时只需在各语言词典中添加键并运行 `node scripts/sync-resources.mjs`（`pnpm sync` 已包含此步骤）。`download.js` 的文本由 Android 插件在注入脚本前以 `window.__VELATERM_DOWNLOAD_TEXT__` 提供。
+原生插件的用户可见文本（Swift、Kotlin 以及 Android 注入的 `download.js`）不写在源码里，而是来自共享词典 `src/i18n/locales/`：键位于 `mobile.native.*` 组，参数用 `{name}` 占位符表示，由 `MobileText.get(key, values)`（Swift 与 Kotlin 同名）在原生侧按设备语言解析并替换；返回给起始页的 `call.reject(...)` 错误也经此本地化。`scripts/sync-resources.mjs` 自动收集英文词典中所有 `mobile.*` 键，写入两份 `native-text.json`（`plugins/remote/shared/` 与 iOS `Bootstrap/`），新增原生文本时只需在各语言词典中添加键并运行 `node scripts/sync-resources.mjs`（`pnpm sync` 已包含此步骤）。`download.js` 的文本由 Android 插件在注入脚本前以 `window.__VELATERM_DOWNLOAD_TEXT__` 提供。 生成器还从两项 `mobile.native.*UsageDescription` 文案生成 11 种语言的 `InfoPlist.strings`，并将英文回退写入 `Info.plist`；iOS 相机和局域网权限说明与主词典保持一致。所有输入校验通过后才写入资源，内容不变时保留文件及其修改时间。
 
 凭据保存在 iOS Keychain 或由 Android Keystore 密钥加密的存储中，不返回连接列表、不进入 URL、不写入前端 localStorage。远端网页没有 Capacitor SSH 插件桥接权限。网页只能通过现有服务的登录与权限访问项目。
 
@@ -70,9 +70,9 @@ python3 -m unittest discover -s tests -p 'test_*.py'
 sh scripts/test-ios-native.sh
 ```
 
-`scripts/test-ios-native.sh` 用本机 `swiftc` 直接编译 iOS 插件中不依赖 UIKit 的指纹对话框协调逻辑（`TrustPromptCoordinator.swift`）及其测试，不需要设备、模拟器或 xcodebuild；覆盖并发合并、排队不重叠、弹出失败返回取消、连接代次变化返回取消。原生对话框的实际弹出和加载失败页仅经模拟器编译，未做行为测试。
+`scripts/test-ios-native.sh` 用本机 `swiftc` 编译不依赖 UIKit 的 `TrustPromptCoordinator.swift` 及其测试，无需设备、模拟器或 xcodebuild。测试覆盖相同指纹合并、不同请求串行、取消与代次失效、重复回调、显示失败和超时。UIKit 弹窗及加载恢复页另由 iOS 模拟器原生测试验证；主机测试不能代替原生界面或真机验证。
 
-`src/native-text.test.ts`（随 `pnpm test` 运行）对照真实产物检查原生文本：插件源码中不得残留中日韩字符，源码引用的每个 `mobile.*`/`common.*` 键必须存在于英文词典和全部语言的 `native-text.json` 中，两份 JSON 必须与词典一致，占位符在调用处与各语言词典中必须匹配。Android 端只按与 Swift 相同的模式修改，本机无法编译验证。
+`src/native-text.test.ts`（随 `pnpm test` 运行）对照真实产物检查原生文本：插件源码中的用户可见文案必须通过词典读取，调用键与占位符须在全部语言中完整匹配，两份 `native-text.json` 及 11 种语言的 `InfoPlist.strings` 须与主词典一致。`src/resource-sync.test.ts` 验证版本不一致、VERSION 缺失或重复时在写入前失败，以及资源内容和修改时间的幂等性。Android 的信任提示由主线程协调、worker 负责存储；本批已完成 JVM 测试、模拟器原生测试、编译和无源码变化的缓存复用验证。
 
 原生集成测试使用本机隔离的 SSH/HTTP/WebSocket 测试服务，不执行用户远端命令：
 
@@ -87,9 +87,9 @@ python3 -m venv .build/ssh-fixture-venv
 - iOS：将上述构建命令的 destination 换为已启动模拟器的 ID，并使用 `CODE_SIGNING_ALLOWED=YES CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual test`。Keychain 测试需要 ad-hoc 签名，不能用无签名测试宿主。
 - Android：构建 `:app:assembleDebug :app:assembleDebugAndroidTest`。专用模拟器使用 ports.json 中的 `console/device/grpc` 端口，ADB 服务使用 `adb` 端口，然后运行 `python3 tests/run_android.py`。模拟器通过 `10.0.2.2` 访问本机 fixture。
 
-已验证：两端原生编译；Android 无源码变化的再次构建复用 Kotlin 缓存；两端密码、Ed25519、加密 Ed25519、自动发现、HTTP 转发及错误密码拒绝；iOS WebSocket 回显；共享下载签名验证及篡改拒绝；后端默认视图选择及终端深层链接实际加载；vlx-browser 专用 Profile 中的手机宽度、深层 URL、前进及后退。
+2026-09-20 本批验证：两端模拟器构建与原生测试通过，Android 无源码变化的再次构建全部复用缓存。iOS 和 Android 模拟器均实际连接本机局域网地址上的隔离 VelaTerm TLS 服务，覆盖信任、拒绝后不重复提示、显式重试、旧代次失效及预置旧指纹后的确认；iOS 原生 URLSession 仍拒绝同一自签名证书。指纹变化测试使用预置旧记录，不能当作现场更换证书的证据。11 种语言的首页及连接表单在 vlx-browser 专用 Profile 中检查了布局、深层 URL、前进和后退，两端原生恢复页也逐语言检查；浏览器原生桥使用隔离替身，真实 TLS 连接由模拟器另行验证。
 
-尚未完成真机验收、自签名证书和指纹确认对话框的端到端交互测试、后台切换与附件选择测试，以及 Linux/macOS/Windows 真实远端的自动安装验收。文件导出已接入 iOS 系统分享面板和 Android 系统保存面板，Android 单次上限为 64 MB；浏览器已验证 Blob 导出内容，系统保存面板仍需真机验收。因此当前为可构建和测试的首版，不能视为完整发布验收通过。
+尚未完成物理手机的 LAN 与 Tailscale 验收：现有 iPhone 的系统版本与 Xcode 工具链不兼容，没有可用 Android 真机，也没有已配置的 Tailscale 测试端点。本批未执行公网账号或第三方登录、相机识别、系统权限和保存面板、后台推送，以及 Linux/macOS/Windows 真实远端自动安装验收。文件导出已接入 iOS 分享面板和 Android 保存面板，Android 单次上限为 64 MB；既有浏览器 Blob 导出验证不能替代系统面板验收。当前为部分完成，不能视为整体验收或发布完成。
 
 ## 图标维护
 
@@ -101,7 +101,7 @@ iOS 图标使用 `assets/icon-ios.svg` 满版母版，禁止复制桌面留白�
 
 iOS 使用 AVFoundation，Android 使用内置 ZXing 解码器；画面仅用于本机识别，不保存照片、不上传画面。二维码需直接包含服务 URL，复用手动输入的原生校验：公网使用 HTTPS，不允许地址内嵌账号密码；HTTP 仅限设备回环地址。扫码结果不会自动访问，也不会写入导航 URL。
 
-本次已通过路由测试、两端构建、Android 无改动再次构建，以及 vlx-browser 专用 Profile 中的 390px 布局和 13 项交互检查。浏览器检查使用隔离页面的原生桥接替身，覆盖填入、取消、无效内容、权限错误、保存连接和历史导航；不能代替相机硬件测试。新版已安装到已授权的 iPhone，iOS、Android 的实际相机识别及系统权限弹窗仍待真机验收。
+此前扫码功能的验证记录包括路由测试、两端构建、Android 无改动再次构建，以及 vlx-browser 专用 Profile 中的 390px 布局和 13 项交互检查。浏览器检查使用隔离页面的原生桥接替身，覆盖填入、取消、无效内容、权限错误、保存连接和历史导航；不能代替相机硬件测试。当时的版本曾安装到已授权的 iPhone；本批未安装或运行真机新包，iOS、Android 的实际相机识别及系统权限弹窗仍待真机验收。
 
 ## 手机视图接入约定
 

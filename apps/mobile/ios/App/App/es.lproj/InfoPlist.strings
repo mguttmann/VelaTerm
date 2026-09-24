@@ -1,0 +1,2 @@
+"NSCameraUsageDescription" = "VelaTerm usa la cámara para escanear códigos QR con direcciones de servicios.";
+"NSLocalNetworkUsageDescription" = "VelaTerm se conecta a servicios VelaTerm y servidores SSH de tu red local.";

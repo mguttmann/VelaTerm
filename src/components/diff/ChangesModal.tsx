@@ -8,9 +8,7 @@
 //! so committed and uncommitted changes are read through one viewer.
 
 import { useEffect, useRef, useState } from "react";
-import { MergeView } from "@codemirror/merge";
-import { EditorView, lineNumbers } from "@codemirror/view";
-import { EditorState } from "@codemirror/state";
+import type { MergeView } from "@codemirror/merge";
 import { useT } from "../../i18n";
 import { useSuspendNativeViews } from "../../hooks/nativeViewSuspend";
 import {
@@ -23,7 +21,6 @@ import {
 } from "../../ipc/commands";
 import { useTermStore } from "../../store/termStore";
 import { STATUS_META } from "./changeStatus";
-import { languageExtensionFor, vlxCmHighlighting } from "./codeMirrorTheme";
 
 /**
  * Render a single-file diff by loading both texts into a read-only MergeView, adding language support
@@ -69,14 +66,25 @@ function DiffView({
     let mv: MergeView | null = null;
     let cancelled = false;
     void (async () => {
-      const langExt = await languageExtensionFor(diff.path);
+      // CodeMirror and the language catalogue load on demand: the modal is opened rarely, and a static
+      // import would place roughly 330 kB of editor code in the entry chunk.
+      const [merge, view, state, theme] = await Promise.all([
+        import("@codemirror/merge"),
+        import("@codemirror/view"),
+        import("@codemirror/state"),
+        import("./codeMirrorTheme"),
+      ]);
+      const { MergeView } = merge;
+      const { EditorView, lineNumbers } = view;
+      const { EditorState } = state;
+      const langExt = await theme.languageExtensionFor(diff.path);
       if (cancelled || !ref.current) return;
       const base = [
         lineNumbers(),
         EditorView.editable.of(false),
         EditorState.readOnly.of(true),
         EditorView.lineWrapping,
-        vlxCmHighlighting(),
+        theme.vlxCmHighlighting(),
       ];
       const side = langExt ? [...base, langExt] : base;
       mv = new MergeView({

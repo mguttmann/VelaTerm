@@ -1,6 +1,6 @@
 [package]
 name = "velaterm"
-version = "0.2.2"
+version = "0.2.3"
 description = "VelaTerm multi-session terminal manager"
 authors = ["vlinx"]
 edition = "2021"
@@ -40,6 +40,16 @@ strip = true
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+# Tao 0.35.3 predates the Windows input-lock reentrancy fix (tao#1215). The
+# stable Tauri runtime still requires 0.35, so pin the compatible upstream fix.
+[patch.crates-io]
+tao = { git = "https://github.com/tauri-apps/tao", rev = "c704261c519c58cfdd0bc2d58ba24e06a0b71c92" }
+
+# The pinned tree has an older Android path dependency. Preserve the published
+# 0.1.4 JNI macro fixes instead of resolving that path's 0.1.3 implementation.
+[patch."https://github.com/tauri-apps/tao"]
+tao-macros = { version = "=0.1.4", registry = "crates-io" }
 
 [dependencies]
 # Native font enumeration belongs to the display host, not the remote headless server.
@@ -154,6 +164,10 @@ webview2-com = "0.38"
 # Enable Win32 modules used to repair taskbar icons and disable accelerators, sharing the windows dependency.
 windows = { version = "0.61", features = [
     "Win32_Foundation",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_JobObjects",
+    "Win32_System_Threading",
+    "Win32_Security",
     "Win32_UI_WindowsAndMessaging",
     "Win32_UI_Shell",
     # Native WinRT toast notifications with Activated navigation; the official plugin lacks desktop clicks.

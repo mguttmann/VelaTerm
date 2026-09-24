@@ -187,6 +187,35 @@ final class ConnectionStorageTests: XCTestCase {
 }
 
 final class ConnectionRecoveryTests: XCTestCase {
+    @MainActor func testLocalizedRecoveryLayoutForAllElevenLanguages() throws {
+        let defaults = UserDefaults.standard
+        let domain = Bundle.main.bundleIdentifier!
+        let original = defaults.persistentDomain(forName: domain)?["AppleLanguages"]
+        defer { if let original { defaults.set(original, forKey: "AppleLanguages") } else { defaults.removeObject(forKey: "AppleLanguages") } }
+        let directory = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        for locale in ["en", "zh-CN", "zh-TW", "ja", "ko", "fr", "de", "es", "pt-BR", "ru", "vi"] {
+            defaults.set([locale], forKey: "AppleLanguages")
+            XCTAssertEqual(Locale.preferredLanguages.first, locale)
+            let panel = ConnectionRecoveryView(frame: CGRect(x: 0, y: 0, width: 320, height: 640))
+            panel.show(MobileText.get("mobile.native.certificateRejected")); panel.layoutIfNeeded()
+            XCTAssertGreaterThanOrEqual(panel.backButton.frame.minY - panel.retryButton.frame.maxY, 16, locale)
+            for button in [panel.retryButton, panel.backButton] {
+                let label = try XCTUnwrap(button.titleLabel)
+                XCTAssertFalse((label.text ?? "").contains("mobile."), locale)
+                let measured = label.sizeThatFits(CGSize(width: label.bounds.width, height: .greatestFiniteMagnitude))
+                XCTAssertLessThanOrEqual(measured.height, label.bounds.height + 1, locale)
+                XCTAssertLessThanOrEqual(measured.width, label.bounds.width + 1, locale)
+            }
+            let image = UIGraphicsImageRenderer(size: panel.bounds.size).image { context in panel.layer.render(in: context.cgContext) }
+            try image.pngData()?.write(to: directory.appendingPathComponent("recovery-" + locale + ".png"))
+            let localization = locale == "zh-CN" ? "zh-Hans" : locale == "zh-TW" ? "zh-Hant" : locale
+            let bundle = try XCTUnwrap(Bundle(path: Bundle.main.bundlePath + "/" + localization + ".lproj"))
+            let privacy = bundle.localizedString(forKey: "NSCameraUsageDescription", value: nil, table: "InfoPlist")
+            XCTAssertNotEqual(privacy, "NSCameraUsageDescription", locale)
+            XCTAssertEqual(privacy, MobileText.get("mobile.native.cameraUsageDescription"), locale)
+        }
+    }
+
     @MainActor func testReturnRemainsAvailableWhileRetrying() throws {
         let panel = ConnectionRecoveryView(frame: CGRect(x: 0, y: 0, width: 360, height: 640))
         var returned = false; var retried = false

@@ -1,5 +1,5 @@
 import { beginDiagnosticOperation } from "../ipc/diagnosticSafety";
-import { diagnosticEvent, uploadImage } from "../ipc/transport";
+import { diagnosticEvent, } from "../ipc/transport";
 //! Global Zustand state: SQLite-backed tree data, session runtime state, and UI state.
 //! The center area uses tabs containing recursively splittable pane trees.
 
@@ -7,13 +7,16 @@ import { create } from "zustand";
 import { DEFAULT_CONVERSATION_FONT_SIZE, normalizeTextSize, normalizeTextLineHeight } from "../theme";
 import { t } from "../i18n";
 import { setBrowserUrl } from "../ipc/browser";
-import { chatClear, chatSend, chatStart, setSessionEngine, type ChatBackgroundTask } from "../ipc/chat";
+import { chatClear, setSessionEngine, type ChatBackgroundTask } from "../ipc/chat";
 import {
-  createWorktree,
   getSessionCwd,
   ptyKill,
   ptyWrite,
   resolveSpawn,
+  spawnRequests,
+  spawnRequest,
+  retrySpawn,
+  type SpawnReceipt,
   type ShellOption,
   type UsageSnapshot,
 } from "../ipc/commands";
@@ -24,6 +27,7 @@ import {
   sessionStates,
   type SessionStateBatch,
 } from "../ipc/sessionState";
+import type { BackgroundRun } from "../ipc/runs";
 import { pushSetting } from "../ipc/settingsSync";
 import { isTauri } from "../ipc/transport";
 import { env } from "../platform";
@@ -38,11 +42,11 @@ import { mobileNotifications } from "../mobile/nativeNotifications";
 import type { ScreenDetection } from "../terminal/screenDetect";
 import * as tree from "../ipc/tree";
 import { listAgentPresets } from "../ipc/presets";
-import { applyLaunchArgs, startPlanExecute } from "../ipc/launch";
 import { platform } from "../platform";
 import {
   collectSessionIds,
   findBySession,
+  findLeaf,
   firstLeaf,
   GRID_MAX,
   makeLeaf,
@@ -94,7 +98,7 @@ import type {
   SessionKind,
   SessionRuntime,
 } from "../types";
-import { effectiveStatus, matchesAgentState, supportsChatEngine } from "../types";
+import { effectiveStatus, matchesAgentState } from "../types";
 import {
   CLEAN_IMAGES_KEY,
   NOTIFY_KEY,
@@ -105,7 +109,6 @@ import {
   loadRecordSessions,
   loadSettings,
   loadSoundEnabled,
-  defaultEngineFor,
   sanitizeComposerInlineChips,
   saveSettings,
   visualOf,
@@ -133,7 +136,7 @@ export { docKindOf } from "./docTab";
 export type { DocKind, DocTab } from "./docTab";
 
 // A local claim lets a failed workflow or image upload retry its backend-owned request ID.
-const spawnLaunchClaims = new Set<string>();
+const spawnRecovery = new Map<string, Promise<void>>();
 
 const LEFT_MIN = 180;
 const LEFT_MAX = 480;
@@ -827,6 +830,17 @@ export interface TaskTab {
   taskType: string;
   /** The task as the opener saw it, for the first paint before the view's own snapshot arrives. */
   seed?: ChatBackgroundTask;
+  /** The exact pane to restore when leaving this task, including through a mirrored layout. */
+  returnTabId?: string;
+  returnPaneId?: string;
+}
+
+/** Restore a task's source only within the selected tab; other navigation keeps the first-leaf fallback. */
+function taskReturnLeaf(tree: PaneNode, tabId: string, task?: TaskTab) {
+  const source = task?.returnTabId === tabId && task.returnPaneId
+    ? findLeaf(tree, task.returnPaneId)
+    : null;
+  return source ?? firstLeaf(tree);
 }
 
 /**
@@ -856,12 +870,15 @@ interface TermStore {
    * workspace would otherwise launch every shell at once. `wakeSession` clears the flag on demand.
    */
   dormantSessions: Record<SessionId, true>;
+  /** Each session's `vrun` commands that are still running, as the backend's session records report them. */
+  backgroundRuns: Record<SessionId, BackgroundRun[]>;
   /** Initial prompt pending for a spawned child, consumed by `usePtySession` after startup. */
   pendingPrompts: Record<SessionId, string>;
   /** One-shot model/effort carried from a cleared chat into its fresh replacement. */
   pendingChatStarts: Record<SessionId, { model?: string; effort?: string }>;
   /** FIFO spawn-confirmation queue processed one item at a time by `SpawnConfirmModal`. */
   pendingSpawns: SpawnRequest[];
+  spawnReceipts: Record<string, SpawnReceipt>;
   /** Target ID for the open merge dialog, or `null`. */
   mergeTarget: SessionId | null;
   /** Working directory for the open changes dialog, or `null`. */
@@ -885,6 +902,8 @@ interface TermStore {
   lastActiveSessionTabId: SessionId | null;
   paneTrees: Record<SessionId, PaneNode>; // Pane tree for each tab.
   activeSessionId: SessionId | null; // Session in the focused pane.
+  /** Local navigation intent, including repeated opens of the already focused session. */
+  sessionOpenRequest: { sessionId: string; revision: number } | null;
   /**
    * One-shot sidebar reveal suppression for newly created, spawned, or forked sessions. It prevents an
    * automatic scroll from disrupting the user immediately after the new terminal opens. `ProjectTree` consumes it.
@@ -1156,9 +1175,11 @@ interface TermStore {
   /** Confirms and executes the first queued spawn using the possibly edited dialog values. */
   confirmSpawn: (req: SpawnRequest) => Promise<void>;
   /** Cancels the first queued spawn without creating a session. */
-  cancelSpawn: () => void;
+  cancelSpawn: (requestId?: string) => Promise<void>;
+  syncSpawnRequests: () => Promise<void>;
+  applySpawnReceipt: (receipt: SpawnReceipt, open?: boolean) => Promise<void>;
   /** Removes a spawn card dismissed by another client. */
-  handleSpawnResolved: (parentSessionId: string, prompt: string) => void;
+  handleSpawnResolved: (requestId: string, legacyPrompt?: string) => void;
   /** Opens branch merge for a session or group target. */
   openMerge: (id: SessionId) => void;
   /** Closes branch merge. */
@@ -1268,6 +1289,7 @@ interface TermStore {
    * Opens a tab for one of a conversation's background tasks, or focuses the tab already showing that task.
    */
   openTaskTab: (sessionId: string, task: ChatBackgroundTask) => void;
+  hydrateTaskTab: (sessionId: string, task: ChatBackgroundTask) => void;
   /** Applies Save As path/title/kind and converts a draft to normal read/write mode. */
   setDocTabPath: (id: string, path: string) => void;
   /** Refreshes a document by incrementing its reload nonce. */
@@ -1886,10 +1908,12 @@ export const useTermStore = create<TermStore>((set, get) => ({
   runtimes: {},
   epochs: {},
   dormantSessions: {},
+  backgroundRuns: {},
   ephemeralSessions: {},
   pendingPrompts: {},
   pendingChatStarts: {},
   pendingSpawns: [],
+  spawnReceipts: {},
   mergeTarget: null,
   changesCwd: null,
   changesPath: null,
@@ -1900,6 +1924,7 @@ export const useTermStore = create<TermStore>((set, get) => ({
   lastActiveSessionTabId: null,
   paneTrees: {},
   activeSessionId: null,
+  sessionOpenRequest: null,
   revealSuppressId: null,
   revealProjectId: null,
   focusedPaneId: null,
@@ -2238,100 +2263,74 @@ export const useTermStore = create<TermStore>((set, get) => ({
     get().openSession(created.id, { newTab: !get().singleTabMode });
   },
 
-  handleSpawnRequest: async (req) => {
-    // Queue for review when spawn confirmation is enabled; otherwise execute immediately. `vspawn --yes`
-    // asks for the same immediate start per call, so it overrides the setting for that one request.
-    if (!get().spawnConfirm || req.noConfirm) {
-      // Claim the request before running it. The spawn event reaches every connected client, so without
-      // a claim each one starts the same task: two clients with confirmation off ran it twice, and a
-      // client with confirmation on was left holding a card nobody would ever answer. Confirm and cancel
-      // already claim; this path was the only one that did not. A backend that cannot answer (older
-      // build, transport error) falls back to running, which is the previous behavior.
-      const won = await resolveSpawn(
-        req.parentSessionId,
-        req.prompt,
-        true,
-      ).catch(() => true);
-      if (!won) return;
-      const retryId = req.planExecute ? req.requestId : null;
-      if (retryId) spawnLaunchClaims.add(retryId);
-      try {
-        await get().executeSpawn(req);
-        if (retryId) spawnLaunchClaims.delete(retryId);
-      } catch (error) {
-        // A skipped launch dialog must not discard a failed workflow's identity or retry settings.
-        if (retryId) set((s) => ({ pendingSpawns: [req, ...s.pendingSpawns] }));
-        throw error;
-      }
-      return;
+  applySpawnReceipt: async (receipt, open = false) => {
+    const needsReview = receipt.decision === "pending" || receipt.state === "pending" || receipt.state === "failed" || receipt.state === "uncertain" || receipt.state === "dispatching";
+    set((s) => {
+      const index = s.pendingSpawns.findIndex((r) => r.requestId === receipt.requestId);
+      const next = s.pendingSpawns.filter((r) => r.requestId !== receipt.requestId);
+      if (needsReview) next.splice(index < 0 ? next.length : index, 0, receipt.request);
+      return { pendingSpawns: next, spawnReceipts: { ...s.spawnReceipts, [receipt.requestId]: receipt } };
+    });
+    if (open && receipt.session) {
+      await get().loadTree();
+      get().openSession(receipt.session.id, { newTab: !get().singleTabMode });
     }
-    set((s) => ({ pendingSpawns: [...s.pendingSpawns, req] }));
-    // A spawn-confirmation card always notifies when notifications are enabled, even in a focused window,
-    // because the nonmodal card is easy to miss. Dock badges derive reactively from queue length elsewhere.
-    const s = get();
-    if (s.notifyEnabled) {
+  },
+
+  syncSpawnRequests: async () => {
+    const receipts = await spawnRequests();
+    for (const receipt of receipts) {
+      await get().applySpawnReceipt(receipt, receipt.decision === "confirmed" && receipt.state === "ready");
+      // An interrupted creation is safe to resume: the backend reuses its fixed result identity.
+      // Failed or uncertain delivery stays visible for an explicit retry, without an event retry loop.
+      if (receipt.decision === "confirmed" && (receipt.state === "pending" || receipt.state === "waiting") && !spawnRecovery.has(receipt.requestId)) {
+        const recovery = retrySpawn(receipt.requestId).then((result) => get().applySpawnReceipt(result, true))
+          .finally(() => spawnRecovery.delete(receipt.requestId));
+        spawnRecovery.set(receipt.requestId, recovery);
+        await recovery;
+      }
+    }
+  },
+
+  handleSpawnRequest: async (req) => {
+    if (!req.requestId) { await get().syncSpawnRequests(); return; }
+    // The event is a hint. Settings, the decision and the result come from the durable backend row.
+    // Keep the hint visible if the read fails; reconnect can recover it without executing locally.
+    set((s) => ({ pendingSpawns: s.pendingSpawns.some((r) => r.requestId === req.requestId)
+      ? s.pendingSpawns : [...s.pendingSpawns, req] }));
+    const receipt = await spawnRequest(req.requestId);
+    await get().applySpawnReceipt(receipt, receipt.decision === "confirmed");
+    if (receipt.decision === "confirmed" && receipt.state === "pending") await get().syncSpawnRequests();
+    if (receipt.decision === "pending" && get().notifyEnabled) {
+      const s = get();
       const parent = s.sessions.find((x) => x.id === req.parentSessionId);
-      const from = parent?.name ?? t("common.session");
-      const preview = req.prompt.trim().replace(/\s+/g, " ").slice(0, 80);
-      void notify(
-        req.parentSessionId,
-        t("spawn.notifyTitle"),
-        `${from}: ${preview}`,
-        s.soundEnabled,
-      );
+      void notify(req.parentSessionId, t("spawn.notifyTitle"),
+        `${parent?.name ?? t("common.session")}: ${req.prompt.trim().replace(/\s+/g, " ").slice(0, 80)}`, s.soundEnabled);
     }
   },
 
   confirmSpawn: async (req) => {
-    // Capture the original (unedited) queue head for the claim before removing it.
-    const original = get().pendingSpawns[0];
-    // Remove the confirmed, possibly edited request before executing it.
-    set((s) => ({ pendingSpawns: s.pendingSpawns.slice(1) }));
-    // Claim the request with the *original* prompt, which is the key other clients hold. The card is on
-    // screen everywhere, so two clients can confirm within the same second; whoever loses the claim must
-    // stop here, or the task runs twice with two worktrees and two agents. A backend that cannot answer
-    // (older build, transport error) falls back to the previous behavior of just executing.
-    const retryId = req.planExecute || req.images?.length ? req.requestId : null;
-    if (original && !(retryId && spawnLaunchClaims.has(retryId))) {
-      const won = await resolveSpawn(
-        original.parentSessionId,
-        original.prompt,
-        true,
-      ).catch(() => true);
-      if (!won) return;
-      if (retryId) spawnLaunchClaims.add(retryId);
-    }
-    try {
-      await get().executeSpawn(req);
-      if (retryId) spawnLaunchClaims.delete(retryId);
-    } catch (error) {
-      if (retryId || req.images?.length) set((s) => ({ pendingSpawns: [req, ...s.pendingSpawns] }));
-      throw error;
-    }
+    if (!req.requestId) throw new Error(t("spawn.requestUnavailable"));
+    // Retain the edited task and images until an authoritative acknowledgement arrives.
+    set((s) => ({ pendingSpawns: s.pendingSpawns.map((r) => r.requestId === req.requestId ? req : r) }));
+    const receipt = await resolveSpawn(req.requestId, true, req);
+    await get().applySpawnReceipt(receipt, true);
+    if (receipt.error) throw new Error(receipt.error);
   },
 
-  cancelSpawn: () => {
-    const first = get().pendingSpawns[0];
-    // Cancel by removing the first request without creating a session.
-    set((s) => ({ pendingSpawns: s.pendingSpawns.slice(1) }));
-    // Claim it too, so a cancel racing a confirm on another client settles on one answer instead of
-    // dismissing the card here while the other side still spawns.
-    if (first?.requestId) spawnLaunchClaims.delete(first.requestId);
-    if (first) void resolveSpawn(first.parentSessionId, first.prompt, false);
+  cancelSpawn: async (requestId) => {
+    const id = requestId ?? get().pendingSpawns[0]?.requestId;
+    if (!id) return;
+    const receipt = await resolveSpawn(id, false);
+    await get().applySpawnReceipt(receipt);
+    if (receipt.error) throw new Error(receipt.error);
   },
 
-  handleSpawnResolved: (parentSessionId, prompt) => {
-    set((s) => {
-      const idx = s.pendingSpawns.findIndex(
-        (r) => r.parentSessionId === parentSessionId && r.prompt === prompt,
-      );
-      if (idx < 0) return s;
-      const requestId = s.pendingSpawns[idx].requestId;
-      if (requestId && spawnLaunchClaims.has(requestId)) return s;
-      const next = [...s.pendingSpawns];
-      next.splice(idx, 1);
-      return { pendingSpawns: next };
-    });
+  handleSpawnResolved: (requestId, legacyPrompt) => {
+    // Older events keyed by prompt cannot identify a request and must never dismiss another card.
+    if (legacyPrompt !== undefined) { void get().syncSpawnRequests().catch(() => {}); return; }
+    void spawnRequest(requestId).then((receipt) => get().applySpawnReceipt(receipt, receipt.state === "ready"))
+      .catch(() => {});
   },
 
   openMerge: (id) => set({ mergeTarget: id }),
@@ -2346,136 +2345,7 @@ export const useTermStore = create<TermStore>((set, get) => ({
     set({ changesCwd: null, changesPath: null, changesCommit: null }),
 
   executeSpawn: async (req) => {
-    if (req.planExecute) {
-      const result = await startPlanExecute(req);
-      await get().loadTree();
-      get().openSession(result.planner.id, { newTab: !get().singleTabMode });
-      if (result.run.state === "blocked") throw new Error(result.run.summary);
-      return;
-    }
-    const state = get();
-    const parent = state.sessions.find((s) => s.id === req.parentSessionId);
-    if (!parent) return; // Ignore a deleted or unknown parent session.
-    const project = state.projects.find((p) => p.id === parent.projectId);
-    // Child kind preference: request, parent agent kind, then Claude.
-    const fallbackKind =
-      parent.kind === "codex"
-        ? "codex"
-        : parent.kind === "opencode"
-          ? "opencode"
-          : parent.kind === "copilot"
-            ? "copilot"
-            : parent.kind === "cursor"
-              ? "cursor"
-              : parent.kind === "antigravity"
-                ? "antigravity"
-                : parent.kind === "cline"
-                  ? "cline"
-                  : parent.kind === "pi"
-                    ? "pi"
-                    : parent.kind === "omp"
-                    ? "omp"
-                    : parent.kind === "crush"
-                      ? "crush"
-                      : parent.kind === "kimi"
-                        ? "kimi"
-                        : parent.kind === "kiro"
-                          ? "kiro"
-                          : parent.kind === "grok"
-                            ? "grok"
-                            : parent.kind === "zoo"
-                              ? "zoo"
-                              : "claude";
-    const kind = ((req.kind ?? null) || fallbackKind) as Session["kind"];
-    const name = req.prompt.trim().slice(0, 24) || t("store.subtask");
-
-    // A spawned child launches like the session that asked for it: the parent's own permission mode, and
-    // its launch arguments when the child runs the same agent. Both fall back to the kind's global
-    // defaults, which is what the "new agent session" menu applies, so a spawned child is never more
-    // restricted than a hand-created one.
-    const kindDefaults = get().agentDefaults[kind] ?? {};
-    const permissionMode =
-      parent.permissionMode || kindDefaults.permissionMode || null;
-    const inheritedArgs = kind === parent.kind ? parent.agentArgs : null;
-    const agentArgs = (inheritedArgs || kindDefaults.args || "").trim() || "";
-    const finalArgs = req.model != null || req.effort != null
-      ? await applyLaunchArgs(kind, agentArgs || null, req.model, req.effort)
-      : agentArgs || null;
-
-    // Prefer the exact directory in which vspawn ran. This matters for sessions kept in a collection:
-    // neither the parent record nor its project has a directory, while the command itself may run inside a
-    // repository. Older clients do not send cwd, so ask the running parent before falling back to persisted data.
-    let liveParentCwd: string | null = null;
-    if (!req.cwd) {
-      try {
-        liveParentCwd = await getSessionCwd(parent.id);
-      } catch {
-        /* Fall back when the parent is not running or its cwd cannot be inspected. */
-      }
-    }
-    const spawnCwd =
-      req.cwd?.trim() || liveParentCwd || parent.cwd || project?.rootPath || null;
-    // A child opens in the view of the session that asked for it. Only an agent with a conversation view
-    // has a meaningful view to pass on; a plain terminal or another agent's parent falls back to the child
-    // kind's default view from settings. A child without a conversation view leaves the field unset.
-    const engine = !supportsChatEngine(kind)
-      ? null
-      : supportsChatEngine(parent.kind)
-        ? parent.engine ?? "tui"
-        : defaultEngineFor(kind, get().agentDefaults);
-    // Terminal-backed children read uploaded image paths, using the same path-mode convention as paste.
-    let initialPrompt = req.prompt;
-    for (const image of engine === "chat" ? [] : req.images ?? []) {
-      const bytes = Uint8Array.from(atob(image.data), character => character.charCodeAt(0));
-      const path = await uploadImage(bytes, image.mimeType.split("/")[1] || "png");
-      initialPrompt += kind === "codex" ? `\nimage_path: ${path}` : `\n${path}`;
-    }
-    // By default, create an isolated worktree in the resolved spawn repository.
-    const repoRoot = spawnCwd;
-    let cwd: string | null = spawnCwd;
-    let worktreePath: string | null = null;
-    let worktreeBaseRef: string | null = null;
-    if (req.worktree !== false && repoRoot) {
-      try {
-        const wt = await createWorktree(repoRoot, name);
-        cwd = wt.path;
-        worktreePath = wt.path;
-        worktreeBaseRef = wt.baseRef || null;
-      } catch {
-        // Worktree failure falls back to the parent directory without blocking the spawn.
-      }
-    }
-
-    const created = await get().addSession({
-      projectId: parent.projectId,
-      groupId: parent.groupId ?? null,
-      name,
-      kind,
-      cwd,
-      parentSessionId: parent.id,
-      worktreePath,
-      worktreeBaseRef,
-      agentArgs: finalArgs,
-      permissionMode,
-      engine,
-    });
-    if (!created) return;
-
-    if (engine === "chat") {
-      // A conversation has no launch argument to carry the prompt, so it is sent as the first message.
-      // Model and effort come from the launch arguments above, which the chat engine reads on start.
-      get().openSession(created.id, { newTab: !get().singleTabMode });
-      await chatStart(created.id);
-      await chatSend(created.id, req.prompt, "queue", req.images);
-      return;
-    }
-
-    // Store the prompt for `usePtySession` to inject as a positional launch argument, avoiding a timed later write.
-    set((s) => ({
-      pendingPrompts: { ...s.pendingPrompts, [created.id]: initialPrompt },
-    }));
-    // Follow single-tab policy by backgrounding the parent without stopping it, or use a new tab in multi-tab mode.
-    get().openSession(created.id, { newTab: !get().singleTabMode });
+    await get().confirmSpawn(req);
   },
 
   takePendingPrompt: (id) => {
@@ -2948,6 +2818,7 @@ export const useTermStore = create<TermStore>((set, get) => ({
         focusedPaneId: leaf.paneId,
       };
     });
+    set((state) => ({ sessionOpenRequest: { sessionId: id, revision: (state.sessionOpenRequest?.revision ?? 0) + 1 } }));
     get().pruneEphemeral();
     saveLayoutTick();
   },
@@ -2963,7 +2834,8 @@ export const useTermStore = create<TermStore>((set, get) => ({
         };
       }
       const t = state.paneTrees[tabId];
-      const leaf = t ? firstLeaf(t) : null;
+      const task = state.activeTabId ? state.taskTabs[state.activeTabId] : undefined;
+      const leaf = t ? taskReturnLeaf(t, tabId, task) : null;
       return {
         activeTabId: tabId,
         // Update the reusable-session anchor only for session tabs, preserving it while viewing documents/browsers.
@@ -3012,6 +2884,7 @@ export const useTermStore = create<TermStore>((set, get) => ({
       const browserTabs = { ...state.browserTabs };
       delete browserTabs[tabId];
       const taskTabs = { ...state.taskTabs };
+      const closingTask = taskTabs[tabId];
       delete taskTabs[tabId];
 
       let { activeTabId, activeSessionId, focusedPaneId } = state;
@@ -3019,7 +2892,7 @@ export const useTermStore = create<TermStore>((set, get) => ({
         const nextTab = openTabs[idx] ?? openTabs[idx - 1] ?? null;
         activeTabId = nextTab;
         if (nextTab && paneTrees[nextTab]) {
-          const leaf = firstLeaf(paneTrees[nextTab]);
+          const leaf = taskReturnLeaf(paneTrees[nextTab], nextTab, closingTask);
           activeSessionId = leaf.sessionId;
           focusedPaneId = leaf.paneId;
         } else {
@@ -3139,6 +3012,8 @@ export const useTermStore = create<TermStore>((set, get) => ({
         title: task.summary || task.description || task.task_id,
         taskType: task.task_type,
         seed: task,
+        returnTabId: state.activeTabId ? state.taskTabs[state.activeTabId]?.returnTabId ?? state.activeTabId : undefined,
+        returnPaneId: (state.activeTabId ? state.taskTabs[state.activeTabId]?.returnPaneId : undefined) ?? state.focusedPaneId ?? undefined,
       };
       return {
         taskTabs: { ...state.taskTabs, [id]: tab },
@@ -3149,6 +3024,16 @@ export const useTermStore = create<TermStore>((set, get) => ({
       };
     });
     saveLayoutTick();
+  },
+
+  hydrateTaskTab: (sessionId, task) => {
+    set((state) => {
+      const tab = Object.values(state.taskTabs).find((item) => item.sessionId === sessionId && item.taskId === task.task_id && !item.taskType);
+      if (!tab) return {};
+      return { taskTabs: { ...state.taskTabs, [tab.id]: { ...tab,
+        title: task.summary || task.description || task.task_id, taskType: task.task_type, seed: task,
+      } } };
+    });
   },
 
   setDocTabPath: (id, path) =>
@@ -4044,8 +3929,8 @@ export const useTermStore = create<TermStore>((set, get) => ({
     // Settle each dropped request as declined, the same answer cancelSpawn gives, so another client
     // holding the same card resolves it here instead of spawning the task after this one dismissed it.
     for (const req of pendingSpawns)
-      void resolveSpawn(req.parentSessionId, req.prompt, false).catch(() => {});
-    set({ notifications: {}, pendingSpawns: [] });
+      void get().cancelSpawn(req.requestId).catch(() => {});
+    set({ notifications: {} });
     // Push zero straight to the platform as well. The badge effect only reacts to a changed count, and
     // a stale badge left over from a previous run (macOS keeps it across quits) never sees a change.
     void platform.badge.setCount(0);
@@ -4066,9 +3951,11 @@ export const useTermStore = create<TermStore>((set, get) => ({
       const notifications = { ...state.notifications };
       const runtimes = { ...state.runtimes };
       const dormantSessions = { ...state.dormantSessions };
+      const backgroundRuns = { ...state.backgroundRuns };
       let unreadDirty = false;
       let runtimeDirty = false;
       let dormantDirty = false;
+      let runsDirty = false;
       // Sessions the layout will render. A record about anything else says nothing about what to mount.
       const laidOut = new Set<string>();
       for (const tabId of Object.keys(state.paneTrees)) {
@@ -4088,6 +3975,17 @@ export const useTermStore = create<TermStore>((set, get) => ({
         } else if (id in notifications) {
           delete notifications[id];
           unreadDirty = true;
+        }
+        // Runs are a fact of the session wherever it is shown, so they apply before any display filter.
+        const runs = record.runs ?? [];
+        if (runs.length === 0) {
+          if (id in backgroundRuns) {
+            delete backgroundRuns[id];
+            runsDirty = true;
+          }
+        } else if (JSON.stringify(backgroundRuns[id] ?? []) !== JSON.stringify(runs)) {
+          backgroundRuns[id] = runs;
+          runsDirty = true;
         }
         // Whether to mount a terminal for a laid-out session now follows the backend, because mounting is
         // what starts a process. A client that had not opened a session could not tell "not running" from
@@ -4142,6 +4040,7 @@ export const useTermStore = create<TermStore>((set, get) => ({
         ...(unreadDirty ? { notifications } : {}),
         ...(runtimeDirty ? { runtimes } : {}),
         ...(dormantDirty ? { dormantSessions } : {}),
+        ...(runsDirty ? { backgroundRuns } : {}),
       };
     });
     // Notify for results this client had not already heard about directly. A conclusion the backend

@@ -1,6 +1,6 @@
-import { marked } from "marked";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, expect, it, vi } from "vitest";
+import { md } from "../../../markdownEngine";
 import type { ChatEvent, ChatPermission, ChatSnapshot } from "../../../ipc/chat";
 import type { SessionPermissionState } from "../../../hooks/useSessionPermissionState";
 import type { PermissionAnswer } from "./permissionCards";
@@ -12,10 +12,10 @@ vi.mock("./engineSwitch", () => ({ useEngineSwitch: () => ({ switchTo: vi.fn(), 
 // Exercise the pane's orchestration; menu layout is covered separately by the controls themselves.
 vi.mock("./controls", () => ({
   LevelBar: () => null,
-  ControlChip: ({ title, value, options, onPick }: {
-    title: string; value: string; options: { value: string; label: string; tag?: string }[];
+  ControlChip: ({ title, label, value, options, onPick }: {
+    title: string; label?: string; value: string; options: { value: string; label: string; tag?: string }[];
     onPick: (value: string, keep: boolean) => void;
-  }) => <select aria-label={title} value={value} onChange={(event) => onPick(event.target.value, true)}>
+  }) => <select aria-label={title} data-label={label} value={value} onChange={(event) => onPick(event.target.value, true)}>
     {options.map((option) => <option key={option.value} value={option.value}>{option.label}{option.tag ? ` — ${option.tag}` : ""}</option>)}
   </select>,
 }));
@@ -113,10 +113,11 @@ it("replays newer events over a late snapshot without losing history or restorin
   expect(screen.getByText("New queue")).toBeTruthy();
 });
 
-async function mountPane(kind: "claude" | "codex" | "opencode" = "claude", expectedModel = "old-model") {
+async function mountPane(kind: "claude" | "codex" | "opencode" = "claude", expectedModel: string | null = "old-model") {
   const view = render(<ChatPane session={{ id: "s", projectId: "p", name: "Claude", kind, engine: "chat", collapsed: false, sortOrder: 0, createdAt: 0 }}
     area={{}} hidden={false} focused multi={false} onActivate={() => {}} onSplit={() => {}} onClose={() => {}} />);
-  await waitFor(() => expect((screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe(expectedModel));
+  if (expectedModel !== null) await waitFor(() => expect((screen.getByRole("combobox", { name: "Model" }) as HTMLSelectElement).value).toBe(expectedModel));
+  else await waitFor(() => expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "chat_snapshot")).toBe(true));
   return view;
 }
 
@@ -613,6 +614,14 @@ it("clears the Codex effort override when switching to a model without a saved l
   expect(useTermStore.getState().chatModelByKind.codex).toBe("new-model");
 });
 
+it("shows the backend's initialized extra-argument permission mode without relabeling it as Default", async () => {
+  snapshotOverrides = { mode: "dontAsk" };
+  await mountPane();
+  expect(screen.getByRole("combobox", { name: "Permission mode" }).getAttribute("data-label")).toBe("dontAsk");
+  act(() => eventCallback({ type: "settingsChanged", mode: "plan" }));
+  expect(screen.getByRole("combobox", { name: "Permission mode" }).getAttribute("data-label")).toBe("Plan Mode");
+});
+
 it("follows settings confirmed on another view, including resetting the model to default", async () => {
   await mountPane();
   act(() => eventCallback({ type: "settingsChanged", model: "new-model", mode: "plan" }));
@@ -644,6 +653,18 @@ for (const kind of ["claude", "codex", "opencode"] as const) {
     expect(screen.getByText("Steering message sent")).toBeTruthy();
   });
 }
+
+it("keeps the composer idle while a background task holds the session on working", async () => {
+  await mountPane();
+  act(() => eventCallback({ type: "extras", extras: { backgroundTasks: [
+    { task_id: "shell", task_type: "local_bash", description: "Wait in background", can_stop: true },
+  ] } }));
+  act(() => useTermStore.setState({ runtimes: { s: { status: "running", agent: "claude", agentState: "working" } } }));
+  expect(screen.queryByText(/Stop · Esc/)).toBeNull();
+  // The turn Claude opens to answer the task is a real turn again.
+  act(() => eventCallback({ type: "turnStarted", startedAt: Date.now() }));
+  expect(screen.getByText(/Stop · Esc/)).toBeTruthy();
+});
 
 it("sends normally when Alt+Enter arrives with no running turn", async () => {
   const { container } = await mountPane();
@@ -1351,7 +1372,7 @@ it("does not reparse unchanged history while typing or moving the caret, but upd
     { kind: "assistant", id: "reply", text: "Initial answer", streaming: true },
   ] };
   const { container } = await mountPane();
-  const lexer = vi.spyOn(marked, "lexer");
+  const lexer = vi.spyOn(md, "lexer");
   try {
     const input = container.querySelector<HTMLTextAreaElement>(".sv-box textarea")!;
     fireEvent.change(input, { target: { value: "Follow-up question" } });
@@ -1563,25 +1584,40 @@ it("shows Claude-specific login failures and folds a confirmed cancellation", as
   expect(screen.getByRole("button", { name: "Claude account" })).toBeTruthy();
 });
 
-it("shows only the default inline chips without a More toggle and follows the preference at runtime", async () => {
-  // The shipped default: what used to sit beside the message stays there; chips that are off are not
-  // rendered at all, and with everything fitting (jsdom reports no widths) no More toggle exists.
+it("keeps hidden chips in More and follows the inline preference at runtime", async () => {
+  // Inline preferences control placement; hidden available chips remain reachable through More.
   useTermStore.setState({ composerInlineChips: [...DEFAULT_COMPOSER_INLINE_CHIPS] });
   const { container } = await mountPane("codex");
   expect(screen.getByRole("combobox", { name: "Model" })).toBeTruthy();
   expect(screen.getByRole("combobox", { name: "Thinking effort" })).toBeTruthy();
   expect(screen.getByRole("combobox", { name: "Permission mode" })).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Codex account" })).toBeNull();
-  expect(screen.queryByRole("button", { name: "More" })).toBeNull();
-  expect(container.querySelector(".sv-controls-secondary")).toBeNull();
+  expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
+  expect(container.querySelector(".sv-controls-secondary")?.getAttribute("aria-hidden")).toBe("true");
   const inline = [...container.querySelectorAll(".sv-controls-primary .sv-chip-slot")].map((el) => (el as HTMLElement).dataset.chip);
   expect(inline).toEqual(["model", "effort", "permission"]);
+  fireEvent.click(screen.getByRole("button", { name: "More" }));
+  expect(screen.getByRole("button", { name: "Codex account" })).toBeTruthy();
+  fireEvent.click(screen.getByRole("button", { name: "More" }));
   // Changing the preference reorders and reveals chips without a remount.
   act(() => useTermStore.setState({ composerInlineChips: ["account", "permission"] }));
   expect(screen.getByRole("button", { name: "Codex account" })).toBeTruthy();
   expect(screen.queryByRole("combobox", { name: "Model" })).toBeNull();
   expect([...container.querySelectorAll(".sv-controls-primary .sv-chip-slot")].map((el) => (el as HTMLElement).dataset.chip)).toEqual(["account", "permission"]);
-  expect(screen.queryByRole("button", { name: "More" })).toBeNull();
+  expect(screen.getByRole("button", { name: "More" })).toBeTruthy();
+});
+
+it("keeps every offered chip reachable when all inline chips are off", async () => {
+  useTermStore.setState({ composerInlineChips: [] });
+  snapshotOverrides = { running: false };
+  const { container } = await mountPane("codex", null);
+  expect(container.querySelectorAll(".sv-controls-primary .sv-chip-slot")).toHaveLength(0);
+  expect(container.querySelector(".sv-controls-secondary")?.hasAttribute("inert")).toBe(true);
+  fireEvent.click(screen.getByRole("button", { name: "More" }));
+  expect(await screen.findByRole("combobox", { name: "Model" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Codex account" })).toBeTruthy();
+  expect(screen.getByRole("button", { name: "MCP" }).hasAttribute("disabled")).toBe(true);
+  expect(vi.mocked(invoke).mock.calls.some(call => call[0] === "chat_mcp_status")).toBe(false);
 });
 
 it("keeps MCP and Tasks chips in the row while no process runs, disabled and silent, and wakes them in place", async () => {

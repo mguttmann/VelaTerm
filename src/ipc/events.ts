@@ -95,7 +95,7 @@ export type StatusSignal =
         | "grok"
         | "zoo"
         | null;
-      stateSource?: "hooks" | "legacy";
+      stateSource?: "hooks" | "legacy" | "chat";
     }
   | { kind: "hook_ready" }
   | { kind: "tool"; tool: string | null }
@@ -159,6 +159,7 @@ export function onSpawnRequest(
 
 /** Payload broadcast when any client confirms or cancels a spawn confirmation card. */
 export interface SpawnResolved {
+  requestId: string;
   source: string;
   parentSessionId: string;
   prompt: string;

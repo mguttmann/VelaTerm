@@ -20,6 +20,7 @@ import { usageBrandIconEl } from "../../components/brandIcons";
 import { kindIconEl } from "../sessionViewers/sessionMeta";
 import { KV, Section } from "./parts";
 import { TurnSection } from "./TurnSection";
+import { KiroHistoryLink } from "../KiroHistory/navigation";
 
 /** Format uptime as 12s, 4m 12s, 1h 3m, or 2d 5h. */
 function fmtUptime(ms: number): string {
@@ -568,7 +569,7 @@ export function InfoTab({ session, cwd }: { session: Session; cwd: string | null
   const isGrok = session.kind === "grok";
   const isOpencode = session.kind === "opencode";
   const isPi = session.kind === "pi" || session.kind === "omp";
-  const hasContext = isClaude || isCodex || isGrok || isOpencode || isPi;
+  const hasContext = isClaude || isCodex || isGrok || isOpencode || isPi || session.kind === "kiro";
 
   const agentState = runtime?.agentState;
   const currentTool = runtime?.currentTool;
@@ -653,6 +654,7 @@ export function InfoTab({ session, cwd }: { session: Session; cwd: string | null
         <KV k="cwd" v={cwd || "—"} />
         <KV k="branch" v={branch || "—"} accent />
         <StartedKV startedAt={startedAt} />
+        {session.kind === "kiro" && <KiroHistoryLink sessionId={session.id} />}
       </Section>
 
       {provider && (

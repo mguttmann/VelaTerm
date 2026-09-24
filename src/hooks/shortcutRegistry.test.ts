@@ -63,6 +63,7 @@ describe("shortcut defaults per shell", () => {
     expect(DEFAULT_BINDINGS.splitRight).toBe("mod+d");
     expect(DEFAULT_BINDINGS.splitDown).toBe("mod+shift+d");
     expect(DEFAULT_BINDINGS.newTab).toBe("mod+t");
+    expect(DEFAULT_BINDINGS.newAgentSession).toBe("mod+n");
     expect(formatCombo("mod+shift+d")).toBe("\u2318\u21E7D");
   });
 
@@ -77,6 +78,7 @@ describe("shortcut defaults per shell", () => {
     expect(DEFAULT_BINDINGS.splitRight).toBe("cmd+d");
     expect(DEFAULT_BINDINGS.splitDown).toBe("cmd+shift+d");
     expect(DEFAULT_BINDINGS.newTab).toBe("mod+alt+t");
+    expect(DEFAULT_BINDINGS.newAgentSession).toBe("mod+alt+n");
     expect(DEFAULT_BINDINGS.saveDoc).toBe("mod+s");
     expect(formatCombo(DEFAULT_BINDINGS.splitRight)).toBe("⌘D");
     expect(formatCombo(DEFAULT_BINDINGS.splitDown)).toBe("⌘⇧D");
@@ -115,7 +117,7 @@ describe("shortcut defaults per shell", () => {
 
     // Defaults: every Ctrl+Alt letter an action claims is blocked from reaching xterm.
     expect([...appAltKeyCodes({})].sort()).toEqual(
-      ["KeyB", "KeyD", "KeyE", "KeyF", "KeyG", "KeyO", "KeyT", "KeyW"],
+      ["KeyB", "KeyD", "KeyE", "KeyF", "KeyG", "KeyN", "KeyO", "KeyT", "KeyW"],
     );
     // A rebound action moves the blocked key with it; the old letter goes back to the terminal.
     const overridden = appAltKeyCodes({ splitRight: "mod+alt+k" });

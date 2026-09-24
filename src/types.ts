@@ -191,11 +191,12 @@ export interface SessionRuntime {
   /** Agent activity state; meaningless when agent is absent. */
   agentState?: AgentState | null;
   /**
-   * Codex activity source selected by the backend at launch. Modern Codex is `hooks` and must never accept
+   * Activity source selected by the backend at launch. `chat` marks a conversation-view session, whose states
+   * come from the agent protocol. For a Codex terminal, modern Codex is `hooks` and must never accept
    * terminal-screen or output-activity guesses; `legacy` may receive turn-complete notify but likewise does not
-   * fabricate precise state. Other agents leave this unset.
+   * fabricate precise state. Other terminal agents leave this unset.
    */
-  agentStateSource?: "hooks" | "legacy";
+  agentStateSource?: "hooks" | "legacy" | "chat";
   /** Whether modern Codex has completed its SessionStart hook callback. False means hook health is unproven. */
   agentHookReady?: boolean;
   /**

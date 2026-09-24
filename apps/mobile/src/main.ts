@@ -129,7 +129,7 @@ async function render() {
     }
   } else if(route.page==='list') {
     app.append(el('h1',t('mobile.workspaceTitle')),el('p',t('mobile.workspaceHint'),'muted'));
-    const actions=el('nav',undefined,'actions');actions.append(link(t('mobile.newSsh'),'#/connections/new?mode=ssh'),link(t('mobile.newUrl'),'#/connections/new?mode=url'),link(t('mobile.remote'),'#/remote'),link(t('mobile.scanToConnect'),'#/connections/new?mode=url&scan=1'));app.append(actions);
+    const actions=el('nav',undefined,'actions');actions.append(link(t('mobile.newSsh'),'#/connections/new?mode=ssh'),link(t('mobile.newUrl'),'#/connections/new?mode=url'),link(t('mobile.myDevices'),'#/remote'),link(t('mobile.scanToConnect'),'#/connections/new?mode=url&scan=1'));app.append(actions);
     if(!records.length) app.append(el('section',t('mobile.noConnections'),'empty'));
     for(const row of records) {
       const card=el('article',undefined,'connection-card');

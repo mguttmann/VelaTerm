@@ -230,79 +230,54 @@ pub fn defaults(app: &AppCtx, parent_id: &str, config: &Config) -> Result<Value,
     Ok(json!(Config { plan, exec, ..config.clone() }))
 }
 
-fn child(
-    app: &AppCtx,
-    parent: &Session,
-    name: &str,
-    config: &RoleConfig,
-    cwd: Option<&str>,
-    worktree: Option<&str>,
-    base: Option<&str>,
-) -> Result<Session, String> {
-    create_role(
-        app,
-        &parent.project_id,
-        parent.group_id.as_deref(),
-        Some(parent),
-        name,
-        config,
-        cwd,
-        worktree,
-        base,
-    )
+/// Stable role identities close the creation window before the workflow result is committed.
+fn role_id(run_id: &str, role: &str) -> String {
+    let hash = Sha256::digest(format!("{run_id}:{role}"));
+    uuid::Uuid::from_bytes(hash[..16].try_into().unwrap()).to_string()
 }
 
 #[allow(clippy::too_many_arguments)]
-fn create_role(
-    app: &AppCtx,
-    project_id: &str,
-    group_id: Option<&str>,
-    parent: Option<&Session>,
-    name: &str,
-    config: &RoleConfig,
-    cwd: Option<&str>,
-    worktree: Option<&str>,
-    base: Option<&str>,
+fn create_role_bound(
+    app: &AppCtx, id: &str, project_id: &str, group_id: Option<&str>, parent: Option<&Session>,
+    name: &str, config: &RoleConfig, cwd: Option<&str>, new_worktree: bool,
+    inherited_worktree: Option<&str>, inherited_base: Option<&str>,
+    bind: impl FnOnce(&rusqlite::Connection, &Session) -> Result<(), String>,
 ) -> Result<Session, String> {
-    let kind = config.agent.ok_or("Missing workflow agent")?;
-    let args = super::launch_options::apply(
-        kind,
-        None,
-        config.model.as_deref(),
-        config.effort.as_deref(),
-    )?;
-    let created = core::create_session(
-        app,
-        project_id,
-        group_id,
-        name,
-        kind,
-        None,
-        cwd,
-        None,
-        parent.map(|p| p.id.as_str()),
-        worktree,
-        args.as_deref(),
-        parent
-            .filter(|p| p.kind == kind)
-            .and_then(|p| p.permission_mode.as_deref()),
-        None,
-        base,
-        None,
-        parent
-            .filter(|p| p.kind == kind)
-            .and_then(|p| p.agent_path.as_deref()),
-        Some("chat"),
-    )?;
-    super::session_settings::persist(
-        app,
-        &created,
-        &super::session_settings::Selection {
-            model: super::session_settings::clean(config.model.as_deref()),
-            effort: super::session_settings::clean(config.effort.as_deref()),
+    let _guard = super::spawn_requests::request_lock(app, id)?;
+    if let Some(existing) = repo::get_session(&app.db().conn.lock().unwrap(), id)? { return Ok(existing); }
+    let result = (|| -> Result<Session, String> {
+        let wt = if new_worktree { Some(super::spawn_requests::owned_worktree(app, id,
+            cwd.ok_or("Select a working directory")?, name, true)?) } else { None };
+        let directory = wt.as_ref().map(|w| w.path.as_str()).or(cwd);
+        let kind = config.agent.ok_or("Missing workflow agent")?;
+        let args = super::launch_options::apply(kind, None, config.model.as_deref(), config.effort.as_deref())?;
+        let mut conn = app.db().conn.lock().unwrap();
+        let tx = conn.transaction().map_err(|e| e.to_string())?;
+        if let Some(parent) = parent {
+            if repo::get_session(&tx, &parent.id)?.is_none_or(|s| s.archived_at.is_some()) {
+                return Err("The parent session is missing or archived".into());
+            }
+        }
+        let permission = super::permission_catalog::effective(&tx, kind,
+            parent.filter(|p| p.kind == kind).and_then(|p| p.permission_mode.as_deref()))?;
+        let created = repo::create_session_identified(&tx, id, project_id, group_id, name, kind, None,
+            directory, None, parent.map(|p| p.id.as_str()), wt.as_ref().map(|w| w.path.as_str()).or(inherited_worktree),
+            args.as_deref(), permission.as_deref(), wt.as_ref().map(|w| w.base_ref.as_str()).or(inherited_base), None,
+            parent.filter(|p| p.kind == kind).and_then(|p| p.agent_path.as_deref()), Some("chat"))?;
+        super::session_settings::save(&tx, id, &super::session_settings::Selection {
+            model: super::session_settings::clean(config.model.as_deref()), effort: super::session_settings::clean(config.effort.as_deref()),
+        }, &json!({}))?;
+        bind(&tx, &created)?;
+        super::spawn_requests::bind_worktree(&tx, id, id)?;
+        tx.commit().map_err(|e| e.to_string())?;
+        Ok(created)
+    })();
+    match result {
+        Ok(created) => { app.emit(crate::host::TREE_CHANGED, ()); Ok(created) }
+        Err(error) => match super::spawn_requests::cleanup_worktree(app, id) {
+            Ok(()) => Err(error), Err(cleanup) => Err(format!("{error}; worktree cleanup needs attention: {cleanup}")),
         },
-    )?;
-    Ok(created)
+    }
 }
 
 /// Called only after the ordinary spawn card has been confirmed (or explicitly skipped).
@@ -321,15 +296,31 @@ pub fn start(app: &AppCtx, request: &super::server::SpawnRequest) -> Result<Valu
     if request.prompt.trim().is_empty() {
         return Err("A workflow needs a task".into());
     }
-    let plan = normalize(app, &requested.plan, &parent)?;
-    // The execution role follows the selected agent unless explicitly configured, never a stale CLI flag.
-    let mut exec = requested.exec.clone();
-    if exec.agent.is_none() {
-        exec.agent = plan.agent;
+    core::check_images(&request.images)?;
+    let start_fingerprint = format!("start-v1:{:x}", Sha256::digest(serde_json::to_vec(&json!([
+        request.parent_session_id,request.prompt,request.images,requested,request.cwd,request.worktree
+    ])).map_err(|e| e.to_string())?));
+    if let Ok(existing) = get(app, &id) {
+        let saved: String = app.db().conn.lock().unwrap().query_row(
+            "SELECT fingerprint FROM plan_execute_messages WHERE run_id=?1 AND action='start'", [&id], |r| r.get(0)).map_err(|e| e.to_string())?;
+        if saved.starts_with("start-v1:") {
+            if saved != start_fingerprint { return Err("This request ID already has a different task or launch configuration".into()); }
+            let planner = session(app, &existing.planner_id)?;
+            if existing.round == 0 && existing.state == "blocked" { bootstrap(app, &existing)?; }
+            return Ok(json!({"run":brief(&get(app,&id)?),"planner":planner}));
+        }
     }
-    let exec = normalize(app, &exec, &parent)?;
-    let config = Config { plan, exec, ..requested.clone() };
+    let saved = super::spawn_requests::workflow_start_config(&app.db().conn.lock().unwrap(), &id, request)?;
+    let config = if let Some(saved) = saved { saved } else {
+        let plan = normalize(app, &requested.plan, &parent)?;
+        // The execution role follows the selected agent unless explicitly configured, never a stale CLI flag.
+        let mut exec = requested.exec.clone();
+        if exec.agent.is_none() { exec.agent = plan.agent; }
+        let exec = normalize(app, &exec, &parent)?;
+        Config { plan, exec, ..requested.clone() }
+    };
     validate_config(&config)?;
+    super::spawn_requests::save_workflow_config(&app.db().conn.lock().unwrap(), &id, &config)?;
     core::check_images(&request.images)?;
     if let Ok(existing) = get(app, &id) {
         if existing.owner_id != parent.id
@@ -349,45 +340,21 @@ pub fn start(app: &AppCtx, request: &super::server::SpawnRequest) -> Result<Valu
     }
     let root = repo::get_project_root(&app.db().conn.lock().unwrap(), &parent.project_id)?;
     let cwd = request.cwd.clone().or(parent.cwd.clone()).or(root);
-    let wt = if config.worktree_mode(request.worktree == Some(true)) != WorktreeMode::None {
-        Some(crate::git::worktree_add_sibling(
-            cwd.as_deref().ok_or("Select a working directory")?,
-            "plan-execute",
-        )?)
-    } else {
-        None
-    };
-    let cwd = wt.as_ref().map(|w| w.path.as_str()).or(cwd.as_deref());
-    let planner = child(
-        app,
-        &parent,
-        "Plan · Execute",
-        &config.plan,
-        cwd,
-        wt.as_ref().map(|w| w.path.as_str()),
-        wt.as_ref().map(|w| w.base_ref.as_str()),
-    )?;
-    let task = format!(
-        "{}\n\nWorkflow ID: {id}\nRole: planner\nWorking directory: {}\n\nUser task:\n{}",
-        include_str!("../../../skills/vspawn/references/plan-execute.md"),
-        cwd.unwrap_or(""),
-        request.prompt
-    );
-    let message_id = format!("msg-{id}");
-    let origin = json!({"sessionId":parent.id,"name":parent.name,"agent":parent.kind,"role":"initiator","runId":id,"round":0});
-    let wire = format!("[VelaTerm message {message_id}]\n{origin}\n\n{task}")
-        .trim_end()
-        .to_owned();
-    {
-        let mut conn = app.db().conn.lock().unwrap();
-        let tx = conn.transaction().map_err(|e| e.to_string())?;
-        tx.execute("INSERT INTO plan_execute_runs(id,owner_id,planner_id,config,task,state) VALUES (?1,?2,?3,?4,?5,'planning')",
-            params![id,parent.id,planner.id,serde_json::to_string(&config).map_err(|e|e.to_string())?,request.prompt]).map_err(|e|e.to_string())?;
-        tx.execute("INSERT INTO plan_execute_messages(id,run_id,sender_id,target_id,action,round,fingerprint,wire,origin) VALUES (?1,?2,?3,?4,'start',0,'start',?5,?6)",
-            params![message_id,id,parent.id,planner.id,wire,origin.to_string()]).map_err(|e|e.to_string())?;
-        save_images(&tx, &message_id, &request.images)?;
-        tx.commit().map_err(|e| e.to_string())?;
-    }
+    let planner = create_role_bound(app, &role_id(&id, "planner"), &parent.project_id,
+        parent.group_id.as_deref(), Some(&parent), "Plan · Execute", &config.plan, cwd.as_deref(),
+        config.worktree_mode(request.worktree == Some(true)) != WorktreeMode::None, None, None,
+        |tx, planner| {
+            let task = format!("{}\n\nWorkflow ID: {id}\nRole: planner\nWorking directory: {}\n\nUser task:\n{}",
+                include_str!("../../../skills/vspawn/references/plan-execute.md"), planner.cwd.as_deref().unwrap_or(""), request.prompt);
+            let message_id = format!("msg-{id}");
+            let origin = json!({"sessionId":parent.id,"name":parent.name,"agent":parent.kind,"role":"initiator","runId":id,"round":0});
+            let wire = format!("[VelaTerm message {message_id}]\n{origin}\n\n{task}").trim_end().to_owned();
+            tx.execute("INSERT INTO plan_execute_runs(id,owner_id,planner_id,config,task,state) VALUES (?1,?2,?3,?4,?5,'planning')",
+                params![id,parent.id,planner.id,serde_json::to_string(&config).map_err(|e|e.to_string())?,request.prompt]).map_err(|e|e.to_string())?;
+            tx.execute("INSERT INTO plan_execute_messages(id,run_id,sender_id,target_id,action,round,fingerprint,wire,origin) VALUES (?1,?2,?3,?4,'start',0,?7,?5,?6)",
+                params![message_id,id,parent.id,planner.id,wire,origin.to_string(),start_fingerprint]).map_err(|e|e.to_string())?;
+            save_images(tx, &message_id, &request.images)
+        })?;
     bootstrap(app, &get(app, &id)?)?;
     Ok(json!({"run":brief(&get(app,&id)?),"planner":planner}))
 }
@@ -640,23 +607,13 @@ fn apply_action(app: &AppCtx, req: &Request) -> Result<Value, String> {
             if run.executor_id.is_none() {
                 let planner = session(app, &run.planner_id)?;
                 let name = split::task_name(app, &run.id)?.unwrap_or_else(|| "Execute".into());
-                let wt = if run.config.worktree_mode == Some(WorktreeMode::Each) {
-                    Some(crate::git::worktree_add_sibling(
-                        planner.cwd.as_deref().ok_or("Select a working directory")?,
-                        &name,
-                    )?)
-                } else {
-                    None
-                };
-                let executor = child(
-                    app,
-                    &planner,
-                    &name,
-                    &run.config.exec,
-                    wt.as_ref().map(|w| w.path.as_str()).or(planner.cwd.as_deref()),
-                    wt.as_ref().map(|w| w.path.as_str()),
-                    wt.as_ref().map(|w| w.base_ref.as_str()),
-                )?;
+                let executor = create_role_bound(app, &role_id(&run.id, "executor"), &planner.project_id,
+                    planner.group_id.as_deref(), Some(&planner), &name, &run.config.exec, planner.cwd.as_deref(),
+                    run.config.worktree_mode == Some(WorktreeMode::Each), None, None, |tx, executor| {
+                        tx.execute("UPDATE plan_execute_runs SET executor_id=?2 WHERE id=?1 AND executor_id IS NULL",
+                            params![run.id,executor.id]).map_err(|e| e.to_string())?;
+                        Ok(())
+                    })?;
                 run.executor_id = Some(executor.id);
             }
             (run.executor_id.clone().unwrap(), "executing", "plan")
@@ -761,7 +718,9 @@ fn deliver(app: &AppCtx, run: &Run, target: &str, wire: &str, id: &str) -> Resul
         );
     }
     let outcome =
-        super::tell::deliver_with_images(app, target, wire, id, message_images(app, id)?)?;
+        // Workflow handoffs always wait for the recipient's turn to end: a dispatch or a report is a new
+        // assignment, not a remark on work already under way.
+        super::tell::deliver_with_images(app, target, wire, id, message_images(app, id)?, "queue")?;
     Ok(json!({"delivery":outcome,"messageId":id,"targetSessionId":target,"run":brief(&run)}))
 }
 

@@ -1,0 +1,17 @@
+{
+  "info": {
+    "id": "msg_0ce504d72002809a420c421148",
+    "role": "user",
+    "time": {
+      "created": 1790167764342
+    }
+  },
+  "parts": [
+    {
+      "type": "text",
+      "text": "<bash-input>printf '%s\\n' 'VLX_STDOUT_871316b6da51'; printf '%s\\n' 'VLX_STDERR_871316b6da51' >&2; exit 7</bash-input>\n<bash-stdout>VLX_STDOUT_871316b6da51\n</bash-stdout><bash-stderr>VLX_STDERR_871316b6da51\n</bash-stderr>\n<velaterm-shell-metadata>{\"version\":1,\"commandBytes\":92,\"stdoutBytes\":24,\"stderrBytes\":24,\"exitCode\":7,\"cancelled\":false,\"stdoutTruncated\":false,\"stderrTruncated\":false,\"outputIncomplete\":false}</velaterm-shell-metadata>",
+      "id": "prt_0ce504d7a001Q26YoyzPDRjK5B",
+      "messageID": "msg_0ce504d72002809a420c421148"
+    }
+  ]
+}

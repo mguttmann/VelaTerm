@@ -1,3 +1,51 @@
+## v0.2.3 — 2026-09-24
+
+- 🪟 Les sessions existantes peuvent être placées dans les volets. Le menu contextuel de la barre latérale ouvre une session dans un volet à droite, un volet en bas ou le volet actif ; en faisant glisser une session depuis la barre latérale vers le bord d'un volet, la division suit cette direction, et un dépôt au centre remplace la session affichée. Deux à quatre sessions sélectionnées se disposent en mosaïque dans un même onglet divisé à parts égales, et les sessions présentes dans les autres volets de l'onglet courant sont signalées dans la barre latérale.
+
+- 🗂️ Les tâches d'arrière-plan lancées par un agent s'ouvrent dans leurs propres onglets à côté de la conversation, avec l'état, le temps écoulé, les jetons, le nombre d'appels d'outils, le dernier outil signalé et les phases de chaque agent. Une tâche possède sa propre adresse et, lorsque vous la quittez, vous revenez au volet depuis lequel elle a été ouverte.
+
+- 💬 Dans la vue conversation, un message commençant par `!` s'exécute dans le shell de la session. La sortie s'affiche au fil de l'eau, le code de sortie apparaît à la fin, la commande peut être annulée pendant son exécution et elle reste dans l'historique de lecture des sessions Claude, Codex, OpenCode, Pi et OMP.
+
+- ⏱️ La nouvelle commande `vrun` lance une commande longue et l'attend en un seul appel : l'agent sait ainsi quand le travail s'est réellement terminé. Les commandes lancées de cette façon apparaissent au-dessus du terminal avec leur durée d'exécution, une fenêtre de journal et un bouton d'arrêt qui demande confirmation.
+
+- ⌨️ La création d'une session d'agent dispose de sa propre page et d'un raccourci clavier : recherchez les agents et les préréglages, reprenez celui utilisé la dernière fois et choisissez si la session est créée au même niveau que la session courante ou sous celle-ci.
+
+- 🧰 La barre d'outils de saisie se configure dans les réglages : choisissez les éléments affichés à côté du message et leur ordre. Les éléments désactivés, comme ceux qui ne tiennent pas dans la largeur, restent accessibles depuis le menu Plus.
+
+- 📥 Le téléchargement d'un fichier dans une fenêtre de connexion URL ou SSH commence par une boîte de dialogue d'enregistrement sur cette machine, puis affiche la progression du téléchargement, avec un bouton pour l'annuler.
+
+- 🗃️ Les sessions Kiro peuvent être importées dans un projet puis consultées : l'import associe les sessions par répertoire de travail et chacune s'ouvre dans une vue d'historique en lecture seule avec recherche. Seuls les enregistrements textuels sont pris en charge pour l'instant.
+
+- 🧠 L'organisation de la base de connaissances fonctionne avec Grok, OpenCode, Pi et OMP en plus de Claude et Codex, et l'agent se choisit dans le même type de liste déroulante que partout ailleurs dans l'application.
+
+- 📱 iOS et Android : la page d'accueil conserve vos connexions SSH et URL, permet de se connecter à un compte VelaTerm et liste les appareils qui partagent leur contenu. L'empreinte d'un hôte se confirme une fois et reste mémorisée, un code QR remplit l'adresse du service, et tous les écrans natifs et messages système sont traduits dans les 11 langues de l'interface.
+
+- 🔐 Les sessions Claude démarrent dans le mode d'autorisation choisi : les arguments de lancement supplémentaires conservent leur priorité, le mode est confronté à celui que le CLI signale au démarrage, et une session démarrée sans confirmations reste signalée comme telle.
+
+- 🧩 Le menu des modèles propose Opus 5.5 et ajoute les modèles supplémentaires signalés par le CLI sélectionné tout en conservant l'ordre intégré ; un modèle apporté par une mise à jour du CLI apparaît sans redémarrer l'application.
+
+- 🌱 Les demandes de session dérivée résistent aux interruptions : une demande dont la réponse a été perdue peut être récupérée après reconnexion, un lancement déjà confirmé réutilise la même session et les mêmes réglages lors d'une nouvelle tentative, et un arbre de travail qui n'a pas pu être créé est annulé sans toucher à ce qui existait auparavant.
+
+- ⚡ L'application démarre plus vite : le code chargé au démarrage représente environ la moitié de sa taille précédente, et les pages base de connaissances, audit de sécurité, import de sessions et projets partagés se chargent à leur ouverture.
+
+- 🖼️ Les images collées ou déposées dans un message sont réduites à 1568 pixels sur le plus grand côté avant l'envoi.
+
+- 🐚 Les sessions Bash chargent la complétion du shell depuis un fichier de démarrage : une nouvelle session Bash ne s'ouvre plus avec une commande déjà saisie. Les fichiers de profil de connexion sont toujours lus dans l'ordre propre à Bash.
+
+- ✍️ Markdown : un tilde isolé ne barre plus le reste de la ligne, ce qui laisse lisible une invite de shell collée, et le gras ou l'italique se terminant juste après des caractères chinois, japonais ou coréens se ferme correctement au lieu de laisser des astérisques à l'écran.
+
+- 📨 `vtell --steer` insère le message dans le tour en cours du destinataire au lieu d'attendre la fin de ce tour. Un destinataire arrêté sur une question répond blocked, car le message n'est lu qu'une fois cette question traitée.
+
+- 🔁 Dans la vue conversation, l'état d'une session se termine en même temps que son tour, la marque « non lu » disparaît lorsque le travail commence réellement, et une session dont le travail d'arrière-plan continue reste signalée comme active.
+
+- 🪟 Windows : les hooks de Cursor démarrent correctement et la couche fenêtre a été mise à jour pour les problèmes de saisie clavier signalés après une reconnexion RDP ou un changement de bureau virtuel.
+
+- 🛡️ Audit de sécurité : la liste des modèles et les noms d'agents proviennent du même catalogue de lancement que le reste de l'application, si bien que les exécutions passées affichent le nom actuel de chaque agent.
+
+- 🩹 Corrections diverses : les messages d'erreur de la conversation s'alignent sur la colonne centrale ; les deux boîtes de dialogue de lancement peuvent toujours être fermées et un lancement confirmé mais échoué peut être annulé ; les messages et les messages en attente indiquent leur expéditeur ; une file d'attente longue défile dans une hauteur fixe ; les ancres HTML vides n'affichent plus de repère pendant l'édition d'un document ; et le filtre d'état du téléphone prend en compte les sessions qui y correspondent par la suite.
+
+---
+
 ## v0.2.2 — 2026-09-15
 
 - ⏳ Reprise automatique après une limite d’utilisation, désactivée par défaut dans les paramètres : lorsque Claude ou Codex s’arrête sur une limite de 5 heures ou hebdomadaire, la session reprend d’elle-même une fois la limite réinitialisée. Un bandeau au-dessus de la zone de saisie affiche l’heure de réinitialisation avec un bouton « Annuler » ; l’attente survit au redémarrage de l’application et se termine dès que vous envoyez un message, revenez en arrière, videz la session ou désactivez le réglage.

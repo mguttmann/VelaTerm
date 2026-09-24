@@ -1,133 +1,29 @@
-//! Regression coverage for orchestration spawns: a child created through `spawn://request` must launch with
-//! the same permission mode and launch arguments a hand-created session would get. Before this, `executeSpawn`
-//! passed neither, so every spawned child persisted `permission_mode = NULL` and came up asking for
-//! confirmations even when the parent ran with them skipped.
-
-import { beforeEach, describe, expect, it, vi } from "vitest";
-
-const commandMocks = vi.hoisted(() => ({
-  createWorktree: vi.fn(),
-  getSessionCwd: vi.fn().mockResolvedValue(null),
-}));
-
-vi.mock("../ipc/commands", () => ({
-  createWorktree: commandMocks.createWorktree,
-  getSessionCwd: commandMocks.getSessionCwd,
-  ptyKill: vi.fn().mockResolvedValue(undefined),
-  ptyWrite: vi.fn().mockResolvedValue(undefined),
-  listShells: vi.fn().mockResolvedValue([]),
-}));
-vi.mock("../ipc/tree", () => ({
-  listTree: vi.fn().mockResolvedValue({ projects: [], groups: [], sessions: [] }),
-}));
-vi.mock("../notify", () => ({
-  notify: vi.fn(),
-  getNotifyPermission: vi.fn().mockResolvedValue("granted"),
-  requestNotifyPermission: vi.fn().mockResolvedValue("granted"),
-  getEffectiveNotifyPermission: vi.fn().mockResolvedValue("granted"),
-  requestEffectiveNotifyPermission: vi.fn().mockResolvedValue("granted"),
-}));
-
+//! Business defaults are resolved on the backend; stale frontend caches cannot change a spawn.
+import { beforeEach, expect, it, vi } from "vitest";
+const resolveSpawn = vi.hoisted(() => vi.fn());
+vi.mock("../ipc/commands", async original => ({ ...await original<typeof import("../ipc/commands")>(), resolveSpawn }));
 import { useTermStore } from "./termStore";
-import type { Session } from "../types";
-
-const parent = {
-  id: "parent-1",
-  projectId: "proj-1",
-  groupId: null,
-  name: "lead",
-  kind: "claude",
-  cwd: "/repo",
-  permissionMode: "skip",
-  agentArgs: "--model opus",
-} as unknown as Session;
-
-/** Returns the input `executeSpawn` handed to `addSession`, with worktree creation left out of the picture. */
-async function spawnInput(
-  overrides: Partial<Session>,
-  agentDefaults: Record<string, { args?: string; permissionMode?: string }>,
-  kind?: "claude" | "codex",
-) {
-  const addSession = vi.fn().mockResolvedValue(null);
-  useTermStore.setState({
-    sessions: [{ ...parent, ...overrides } as Session],
-    projects: [],
-    agentDefaults,
-    addSession,
-  } as never);
-  await useTermStore.getState().executeSpawn({
-    parentSessionId: "parent-1",
-    prompt: "investigate the failing test",
-    kind: kind ?? null,
-    worktree: false,
-  });
-  expect(addSession).toHaveBeenCalledTimes(1);
-  return addSession.mock.calls[0][0];
-}
-
+import type { SpawnRequest } from "../ipc/events";
+const req: SpawnRequest = { requestId: "stable", parentSessionId: "parent", prompt: "task", worktree: false };
 beforeEach(() => {
   vi.clearAllMocks();
+  resolveSpawn.mockResolvedValue({ requestId: "stable", request: req, decision: "confirmed", state: "complete", sessionId: "child", session: { id: "child" }, error: null });
+  useTermStore.setState({ pendingSpawns: [req], spawnReceipts: {}, loadTree: vi.fn().mockResolvedValue(undefined), openSession: vi.fn(), addSession: vi.fn() });
 });
-
-describe("spawned child launch configuration", () => {
-  it("creates and persists a worktree from the vspawn invocation directory", async () => {
-    commandMocks.createWorktree.mockResolvedValue({
-      path: "/repo/.vlx-worktrees/task-a1b2c3",
-      branch: "vlx/task-a1b2c3",
-      baseRef: "refs/heads/main",
-    });
-    const addSession = vi.fn().mockResolvedValue(null);
-    useTermStore.setState({
-      sessions: [{ ...parent, cwd: null } as Session],
-      projects: [{ id: "proj-1", rootPath: "" }],
-      agentDefaults: {},
-      addSession,
-    } as never);
-
-    await useTermStore.getState().executeSpawn({
-      parentSessionId: "parent-1",
-      prompt: "task",
-      worktree: true,
-      cwd: "/repo",
-    });
-
-    expect(commandMocks.createWorktree).toHaveBeenCalledWith("/repo", "task");
-    expect(commandMocks.getSessionCwd).not.toHaveBeenCalled();
-    expect(addSession).toHaveBeenCalledWith(
-      expect.objectContaining({
-        cwd: "/repo/.vlx-worktrees/task-a1b2c3",
-        worktreePath: "/repo/.vlx-worktrees/task-a1b2c3",
-        worktreeBaseRef: "refs/heads/main",
-      }),
-    );
-  });
-
-  it("inherits the parent's permission mode and arguments when it runs the same agent", async () => {
-    const input = await spawnInput({}, {});
-    expect(input.permissionMode).toBe("skip");
-    expect(input.agentArgs).toBe("--model opus");
-  });
-
-  it("falls back to the agent kind's global defaults when the parent carries none", async () => {
-    const input = await spawnInput(
-      { permissionMode: null, agentArgs: null },
-      { claude: { permissionMode: "skip", args: "--model sonnet" } },
-    );
-    expect(input.permissionMode).toBe("skip");
-    expect(input.agentArgs).toBe("--model sonnet");
-  });
-
-  it("does not carry the parent's arguments into a child running a different agent", async () => {
-    const input = await spawnInput({}, { codex: { args: "--full-auto" } }, "codex");
-    // Arguments are agent-specific, so only the kind's own defaults apply.
-    expect(input.agentArgs).toBe("--full-auto");
-    // The permission mode is a user intent rather than an agent flag, so it still follows the parent.
-    expect(input.permissionMode).toBe("skip");
-  });
-
-  it("leaves both unset when neither the parent nor the defaults specify anything", async () => {
-    const input = await spawnInput({ permissionMode: null, agentArgs: null }, {});
-    expect(input.permissionMode).toBeNull();
-    expect(input.agentArgs).toBeNull();
-  });
+it.each(["claude", "codex", "opencode", "pi", "omp", "cursor"] as const)("does not manufacture %s defaults from a stale client", async kind => {
+  useTermStore.setState({ sessions: [], projects: [], agentDefaults: { [kind]: { permissionMode: "invalid-local-value", args: "--model stale", engine: "chat" } } });
+  const request = { ...req, kind };
+  await useTermStore.getState().executeSpawn(request);
+  expect(resolveSpawn).toHaveBeenCalledExactlyOnceWith("stable", true, request);
+  expect(useTermStore.getState().addSession).not.toHaveBeenCalled();
+  expect(useTermStore.getState().pendingPrompts.child).toBeUndefined();
+});
+it("preserves backend defaults and the request identity across an explicit retry", async () => {
+  const result = { requestId: "stable", request: req, decision: "confirmed", state: "failed", sessionId: "child", session: { id: "child" }, error: "start failed" };
+  resolveSpawn.mockResolvedValueOnce(result).mockResolvedValueOnce({ ...result, state: "ready", error: null });
+  await expect(useTermStore.getState().executeSpawn(req)).rejects.toThrow("start failed");
+  useTermStore.setState({ agentDefaults: { claude: { args: "--model newly-changed" } } });
+  await useTermStore.getState().executeSpawn(req);
+  expect(resolveSpawn).toHaveBeenNthCalledWith(2, "stable", true, req);
+  expect(useTermStore.getState().addSession).not.toHaveBeenCalled();
 });

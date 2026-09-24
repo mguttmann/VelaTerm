@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
   shortcutOverrides: {} as Record<string, string>,
   splitNew: vi.fn(),
   newScratchTab: vi.fn(),
+  projects: [], groups: [], sessions: [], inspectTarget: null, selection: [],
 }));
 
 vi.mock("../platform", () => ({ env: { isBrowser: true, isRemoteWindow: false } }));
@@ -17,6 +18,7 @@ beforeEach(async () => {
   vi.resetModules();
   state.activeSessionId = "session-1";
   state.shortcutOverrides = {};
+  window.history.replaceState(null, "", "/");
   const { useKeyboardShortcuts } = await import("./useKeyboardShortcuts");
   renderHook(() => useKeyboardShortcuts());
 });
@@ -67,4 +69,26 @@ it("does not claim browser commands without an active terminal session", () => {
   expect(press("d", { metaKey: true }).defaultPrevented).toBe(false);
   expect(press("d", { metaKey: true, shiftKey: true }).defaultPrevented).toBe(false);
   expect(state.splitNew).not.toHaveBeenCalled();
+});
+
+it("opens the agent picker without an active session, respects overrides and ignores IME/repeats", () => {
+  state.activeSessionId = null;
+  state.shortcutOverrides = { newAgentSession: "mod+alt+j" };
+  expect(press("n", { ctrlKey: true, altKey: true }).defaultPrevented).toBe(false);
+  for (const extra of [{ isComposing: true }, { keyCode: 229 }, { repeat: true }]) {
+    expect(press("j", { ctrlKey: true, altKey: true, ...extra }).defaultPrevented).toBe(false);
+    expect(window.location.search).toBe("");
+  }
+  expect(press("j", { ctrlKey: true, altKey: true }).defaultPrevented).toBe(true);
+  const url = window.location.href;
+  expect(new URL(url).searchParams.has("newAgent")).toBe(true);
+  expect(press("j", { ctrlKey: true, altKey: true }).defaultPrevented).toBe(true);
+  expect(window.location.href).toBe(url);
+});
+
+it("preserves an older action rebound onto the new action's default", () => {
+  state.shortcutOverrides = { newTab: "mod+alt+n" };
+  expect(press("n", { ctrlKey: true, altKey: true }).defaultPrevented).toBe(true);
+  expect(state.newScratchTab).toHaveBeenCalledOnce();
+  expect(new URLSearchParams(window.location.search).has("newAgent")).toBe(false);
 });

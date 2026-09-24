@@ -154,9 +154,13 @@ pub enum ChatRow {
         command: String,
         stdout: String,
         stderr: String,
+        /// Provider text is retained exactly for rewind identity, independently of presentation.
+        #[serde(skip)]
+        source_text: String,
         /// The head of the stream was cut; only the tail is kept.
         stdout_truncated: bool,
         stderr_truncated: bool,
+        output_incomplete: bool,
         status: &'static str,
         #[serde(skip_serializing_if = "Option::is_none")]
         exit_code: Option<i32>,
@@ -264,7 +268,7 @@ impl Timeline {
     /// duration cannot look like several independent measurements. Child-agent answers stay inside their
     /// Task card and are deliberately excluded.
     fn finish_latest_turn(&mut self, duration_ms: u64) {
-        let turn_start = self.rows.iter().rposition(|row| matches!(row, ChatRow::User { .. }));
+        let turn_start = self.rows.iter().rposition(|row| matches!(row, ChatRow::User { .. } | ChatRow::Shell { .. }));
         let Some(index) = self
             .rows
             .iter()
@@ -362,6 +366,7 @@ impl Timeline {
             .iter()
             .filter_map(|row| match row {
                 ChatRow::User { id, text, .. } => Some((id.clone(), text.clone())),
+                ChatRow::Shell { id, source_text, status, .. } if *status != super::shell::STATUS_RUNNING => Some((id.clone(), source_text.clone())),
                 _ => None,
             })
             .collect()
@@ -373,7 +378,7 @@ impl Timeline {
     /// exactly like total conversation loss.
     fn trim_from_user(&mut self, id: &str) -> bool {
         let Some(index) = self.at.get(id).copied() else { return false };
-        if !matches!(self.rows.get(index), Some(ChatRow::User { .. })) {
+        if !matches!(self.rows.get(index), Some(ChatRow::User { .. } | ChatRow::Shell { .. })) {
             return false;
         }
         self.rows.truncate(index);
@@ -566,14 +571,30 @@ fn nested_children_mut<'a>(
 ///
 /// It is not a timeline row: nothing has been said yet, and it can still be edited or dropped. It becomes
 /// a `User` row at the moment it is actually written to the agent.
-#[derive(Clone, Debug, serde::Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug)]
 pub struct QueuedMessage {
     pub id: String,
     pub text: String,
     /// Images attached to it, waiting along with the text.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub images: Vec<ChatImage>,
+}
+
+impl serde::Serialize for QueuedMessage {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = serializer.serialize_map(None)?;
+        map.serialize_entry("id", &self.id)?;
+        map.serialize_entry("text", &self.text)?;
+        if self.images.is_empty() {
+            // Events and reconnect snapshots use the same backend interpretation of shell context.
+            if let Some(context) = super::shell::parse_context(&self.text) {
+                map.serialize_entry("shellCommand", &context.command)?;
+            }
+        } else {
+            map.serialize_entry("images", &self.images)?;
+        }
+        map.end()
+    }
 }
 
 /// A saved permission choice that differs from the last policy accepted by Codex.
@@ -689,6 +710,20 @@ const FINISHED_TASK_CAP: usize = 20;
 /// this grace so nothing leaks.
 const TASK_SETTLE_GRACE: Duration = Duration::from_secs(2);
 
+/// How long a session held on working for its background work waits, once that work is over, for the
+/// turn in which Claude answers it.
+///
+/// Claude begins that turn's request within moments of the last task notification, so a wait this long
+/// without one means no turn is coming and the session is idle.
+#[cfg(not(test))]
+const WAKE_GRACE: Duration = Duration::from_secs(5);
+#[cfg(test)]
+const WAKE_GRACE: Duration = Duration::from_millis(150);
+
+/// The longest a request Claude started on its own may hold working before its response begins. A slow
+/// first token is expected on a large context; a request that never produces one must not pin the state.
+const WAKE_LIMIT: Duration = Duration::from_secs(300);
+
 /// One background task as the composer and the task tab see it: the inventory entry merged with every
 /// task-protocol frame that named the same task_id. Wire keys stay Claude's snake_case.
 #[derive(Clone, Debug, Default, serde::Serialize)]
@@ -703,6 +738,10 @@ pub struct BackgroundTask {
     pub summary: Option<String>,
     /// "running", one of Claude's terminal values, or the synthesized "ended".
     pub status: String,
+    /// Derived by the backend when publishing; unknown provider states are not terminal.
+    pub finished: bool,
+    pub can_stop: bool,
+    pub elapsed_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tool_use_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -725,11 +764,48 @@ pub struct BackgroundTask {
     /// Seen in a `background_tasks_changed` inventory; only listed tasks are published.
     #[serde(skip)]
     pub listed: bool,
+    #[serde(skip)]
+    in_inventory: bool,
+    #[serde(skip)]
+    synthetic_end: bool,
 }
 
 impl BackgroundTask {
     fn finished(&self) -> bool {
         FINISHED_TASK_STATUSES.contains(&self.status.as_str())
+    }
+
+    fn set_status(&mut self, status: &str, now: u64) {
+        if matches!(status, "running" | "pending" | "paused") && self.finished() {
+            self.started_at = Some(now);
+            self.ended_at = None;
+            self.summary = None;
+            self.output_file = None;
+            self.last_tool_name = None;
+            self.usage = None;
+            self.workflow_progress = None;
+        }
+        if self.synthetic_end { self.ended_at = None; }
+        self.synthetic_end = false;
+        self.status = status.into();
+        if self.finished() && self.ended_at.is_none() { self.ended_at = Some(now); }
+    }
+
+    fn publish(&mut self, now: u64) {
+        self.finished = self.finished();
+        self.can_stop = self.in_inventory && !self.finished;
+        self.elapsed_ms = self.started_at.map(|start| self.ended_at.unwrap_or(now).saturating_sub(start))
+            .or_else(|| self.usage.as_ref()?.get("duration_ms")?.as_u64()).unwrap_or(0);
+        if let Some(entries) = self.workflow_progress.as_mut().and_then(Value::as_array_mut) {
+            for entry in entries {
+                if entry["type"] != "workflow_agent" { continue; }
+                let elapsed = entry["durationMs"].as_u64().or_else(|| {
+                    entry["startedAt"].as_u64().map(|start| self.ended_at.unwrap_or(now).saturating_sub(start))
+                });
+                if let Some(elapsed) = elapsed { entry["elapsedMs"] = json!(elapsed); }
+                entry["elapsedRunning"] = json!(!self.finished && entry["state"] == "start");
+            }
+        }
     }
 }
 
@@ -789,6 +865,8 @@ impl ClaudeExtras {
     fn published(&self) -> ClaudeExtras {
         let mut extras = self.clone();
         extras.background_tasks.retain(|task| task.listed);
+        let now = now_ms();
+        for task in &mut extras.background_tasks { task.publish(now); }
         extras
     }
 }
@@ -919,6 +997,7 @@ struct ChatProcess {
     stderr: Mutex<String>,
     alive: AtomicBool,
     /// A view let go of this conversation while a turn was running: stop as soon as it is idle.
+    shell_running: AtomicBool,
     release_when_idle: AtomicBool,
     /// This process was stopped on purpose. The exit that follows is then reported as asked-for, so no
     /// client draws it as the agent failing.
@@ -961,6 +1040,9 @@ struct TurnQueue {
     interrupted: bool,
     /// Start of the running logical turn. Steering adds another user row but does not reset this clock.
     started_at: Option<u64>,
+    /// When Claude began a request of its own while no turn was running, typically to answer a finished
+    /// background task. Keeps the session on working until that turn's first response adopts it.
+    waking: Option<std::time::Instant>,
 }
 
 impl ChatProcess {
@@ -1063,6 +1145,18 @@ pub struct ChatManager {
     shell_runs: Mutex<HashMap<String, Arc<super::shell::ShellRun>>>,
 }
 
+#[derive(Debug)]
+pub enum SubmissionFailure {
+    Rejected(String),
+    Uncertain(String),
+}
+
+impl SubmissionFailure {
+    pub fn into_string(self) -> String {
+        match self { Self::Rejected(error) | Self::Uncertain(error) => error }
+    }
+}
+
 impl ChatManager {
     pub fn new() -> Self {
         Self::default()
@@ -1092,35 +1186,49 @@ impl ChatManager {
     ///
     /// One command at a time per session; a second one is refused with `chat_shell_running`. The agent
     /// process must be alive: the row lives on its timeline, which is the only thing the views follow.
+    pub fn run_shell_checked(&self, app: &AppCtx, session_id: &str, command: &str, message_id: &str) -> Result<(), SubmissionFailure> {
+        self.run_shell(app, session_id, command, message_id).map_err(|error| {
+            if error.starts_with("chat_shell_start_uncertain") { SubmissionFailure::Uncertain(error) }
+            else { SubmissionFailure::Rejected(error) }
+        })
+    }
+
     pub fn run_shell(&self, app: &AppCtx, session_id: &str, command: &str, message_id: &str) -> Result<(), String> {
         let proc = self.get(session_id)?;
-        if !proc.alive.load(Ordering::Relaxed) {
+        let _action = proc.action.lock().unwrap();
+        if !proc.alive.load(Ordering::Relaxed) || !self.owns_process(session_id, &proc) {
             return Err("This session has no running agent".into());
         }
         let session = {
             let conn = app.db().conn.lock().unwrap();
             crate::db::repo::get_session(&conn, session_id)?.ok_or("Session not found")?
         };
-        // Held across the spawn so two submissions racing each other cannot both pass the check.
         let mut runs = self.shell_runs.lock().unwrap();
-        if runs.contains_key(session_id) {
-            return Err("chat_shell_running".into());
+        if let Some(run) = runs.get(session_id) {
+            return if run.id == message_id && run.command == command { Ok(()) } else { Err("chat_shell_running".into()) };
         }
         let update_app = app.clone();
         let update_session = session_id.to_string();
+        let update_proc = proc.clone();
         let finish_app = app.clone();
         let finish_session = session_id.to_string();
-        let run = super::shell::spawn_run(
-            app,
-            session_id,
-            session.kind,
-            session.shell.as_deref(),
-            proc.cwd.as_deref(),
-            message_id,
-            command,
-            move |run| update_app.chat().upsert_shell_row(&update_session, run.running_row()),
-            move |run, ctx| finish_app.chat().finish_shell_run(&finish_app, &finish_session, run, ctx),
-        )?;
+        let finish_proc = proc.clone();
+        {
+            // Idle release uses the same lock, so it cannot retire the provider between this check
+            // and publishing that a shell command still needs it.
+            let _turn = proc.turn.lock().unwrap();
+            if !proc.alive.load(Ordering::Relaxed) { return Err("This session has no running agent".into()); }
+            proc.shell_running.store(true, Ordering::Relaxed);
+        }
+        let result = super::shell::spawn_run(
+            app, session_id, session.kind, session.shell.as_deref(), proc.cwd.as_deref(), message_id, command,
+            move |run| update_app.chat().upsert_shell_row(&update_session, &update_proc, run.running_row()),
+            move |run, ctx| finish_app.chat().finish_shell_run(&finish_app, &finish_session, &finish_proc, run, ctx),
+        );
+        let run = match result {
+            Ok(run) => run,
+            Err(error) => { proc.shell_running.store(false, Ordering::Relaxed); return Err(error); }
+        };
         proc.timeline.lock().unwrap().upsert(run.running_row());
         runs.insert(session_id.to_string(), run);
         Ok(())
@@ -1135,38 +1243,46 @@ impl ChatManager {
         Ok(())
     }
 
-    /// Refresh a command's row on whichever process currently owns the conversation.
-    pub(crate) fn upsert_shell_row(&self, session_id: &str, row: ChatRow) {
-        if let Some(proc) = self.sessions.lock().unwrap().get(session_id).cloned() {
-            proc.timeline.lock().unwrap().upsert(row);
+    fn owns_process(&self, session_id: &str, expected: &Arc<ChatProcess>) -> bool {
+        self.sessions.lock().unwrap().get(session_id).is_some_and(|proc| Arc::ptr_eq(proc, expected))
+    }
+
+    fn upsert_shell_row(&self, session_id: &str, expected: &Arc<ChatProcess>, row: ChatRow) {
+        let sessions = self.sessions.lock().unwrap();
+        if sessions.get(session_id).is_some_and(|proc| Arc::ptr_eq(proc, expected)) {
+            expected.timeline.lock().unwrap().upsert(row);
         }
     }
 
-    /// A command ended: show its final state and tell the agent, as the terminal UI's shell mode does.
-    ///
-    /// The context message goes through the ordinary send path under the row's own id, so `dispatch`
-    /// replaces the row with its final form instead of adding a user bubble. An agent that went away
-    /// meanwhile is started again first, the way a normal send would.
-    pub(crate) fn finish_shell_run(&self, app: &AppCtx, session_id: &str, run: &super::shell::ShellRun, ctx: super::shell::ShellContext) {
-        {
-            let mut runs = self.shell_runs.lock().unwrap();
-            if runs.get(session_id).is_some_and(|current| current.id == run.id) {
-                runs.remove(session_id);
-            }
-        }
-        if run.abandoned() {
+    /// Completion belongs only to the process that accepted the command. Never restart or publish into
+    /// a replacement process: doing so can attach old output to another provider's conversation.
+    fn finish_shell_run(&self, app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>, run: &super::shell::ShellRun, ctx: super::shell::ShellContext) {
+        let current_run = self.shell_runs.lock().unwrap().get(session_id)
+            .is_some_and(|current| std::ptr::eq(current.as_ref(), run));
+        if !current_run { return; }
+        if run.abandoned() || !self.owns_process(session_id, proc) {
+            self.retire_shell_run(session_id, proc, run);
             return;
         }
-        self.upsert_shell_row(session_id, super::shell::row(run.id.clone(), Some(run.started_at), &ctx, ctx.status()));
-        let result = (|| {
-            if !self.is_alive(session_id) {
-                crate::command_core::chat_start(app, session_id, None, None, false)?;
+        self.upsert_shell_row(session_id, proc, super::shell::row(run.id.clone(), Some(run.started_at), &ctx, ctx.status()));
+        let result = self.send_on_process(app, session_id, proc, &super::shell::build_context(&ctx), Vec::new(), "queue", Some(&run.id), &mut false);
+        self.retire_shell_run(session_id, proc, run);
+        if let Err(error) = result {
+            if self.owns_process(session_id, proc) {
+                crate::diagnostic_warn!("chat: shell result for {session_id} not delivered: {error}");
+                emit(app, session_id, json!({"type":"error","message":error}));
             }
-            self.send_identified(app, session_id, &super::shell::build_context(&ctx), Vec::new(), "queue", Some(&run.id))
-        })();
-        if let Err(e) = result {
-            crate::diagnostic_warn!("chat: shell result for {session_id} not delivered: {e}");
-            emit(app, session_id, json!({"type":"error","message":e}));
+        }
+        release_if_idle(app, session_id, proc);
+    }
+
+    /// Keep the slot until its context has been handed off. A late callback must never clear the
+    /// running marker of a newer command, including one using the same provider process.
+    fn retire_shell_run(&self, session_id: &str, proc: &Arc<ChatProcess>, run: &super::shell::ShellRun) {
+        let mut runs = self.shell_runs.lock().unwrap();
+        if runs.get(session_id).is_some_and(|current| std::ptr::eq(current.as_ref(), run)) {
+            runs.remove(session_id);
+            proc.shell_running.store(false, Ordering::Relaxed);
         }
     }
 
@@ -1269,7 +1385,9 @@ impl ChatManager {
         };
 
         // The mode the view is told about is the mode the process is launched with: one value, two uses.
-        let mode = initial_mode(kind, permission_mode);
+        let mode = if kind == SessionKind::Claude {
+            protocol::launch_permission_mode(permission_mode, extra_args)
+        } else { initial_mode(kind, permission_mode) };
         let mut cmd = crate::host::command(bin);
         // OpenCode is reached over HTTP: the port it listens on and the password that guards it.
         let mut opencode_launch: Option<(u16, String)> = None;
@@ -1334,6 +1452,8 @@ impl ChatManager {
         let stdout = child.stdout.take().ok_or("The agent has no output stream")?;
         let stderr = child.stderr.take();
 
+        let bypass_capable = kind == SessionKind::Claude
+            && permission_restart::claude_bypass_capable(Some(&mode), extra_args);
         let proc = Arc::new(ChatProcess {
             kind,
             bin: bin.to_string(),
@@ -1357,18 +1477,15 @@ impl ChatManager {
             codex_turn_error: Mutex::new(None),
             extras: Mutex::new(ClaudeExtras { fast_mode, ..ClaudeExtras::default() }),
             claude_models: Mutex::new(Vec::new()),
-            agent_session_id: Mutex::new(if matches!(kind, SessionKind::Codex | SessionKind::Opencode | SessionKind::Pi | SessionKind::Omp) {
-                resume.map(str::to_string)
-            } else {
-                None
-            }),
+            // A resumed transcript is already addressable before the provider emits its first user turn.
+            // The native session event still replaces this value when the provider confirms its identity.
+            agent_session_id: Mutex::new(resume.map(str::to_string)),
             settings_change: Mutex::new(()),
             model: Mutex::new(model.map(str::to_string)),
             effort: Mutex::new(effort.map(str::to_string)),
             mode: Mutex::new(mode),
             permission_confirmed: AtomicBool::new(matches!(kind, SessionKind::Opencode | SessionKind::Omp)),
-            bypass_capable: kind == SessionKind::Claude
-                && permission_restart::claude_bypass_capable(permission_mode, extra_args),
+            bypass_capable,
             codex_permission_state: Mutex::new(CodexPermissionState::default()),
             collaboration_mode: Mutex::new(match kind {
                 SessionKind::Codex => Some(
@@ -1399,6 +1516,7 @@ impl ChatManager {
             turn: Mutex::new(TurnQueue::default()),
             stderr: Mutex::new(String::new()),
             alive: AtomicBool::new(true),
+            shell_running: AtomicBool::new(false),
             release_when_idle: AtomicBool::new(false),
             released: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
@@ -1448,9 +1566,10 @@ impl ChatManager {
         // a chat session, and without it the authoritative record holds no agent — so the work state that
         // follows is never read, and the sidebar dot, the tab marker and this pane's own "working" line
         // all stay silent. A session that had first run in a terminal was carrying the PTY's answer.
+        // The `chat` source exempts its states from the end-of-turn display hold meant for hook callbacks.
         app.emit(
             &StatusSignal::event_name(session_id),
-            StatusSignal::Agent { agent: Some(kind.as_str().to_string()), state_source: None },
+            StatusSignal::Agent { agent: Some(kind.as_str().to_string()), state_source: Some("chat".to_string()) },
         );
 
         // Report the session as running, the same way a PTY does. Everything downstream — the sidebar, and
@@ -1541,7 +1660,11 @@ impl ChatManager {
     ///
     /// `images` ride along with the text as part of the same turn, and wait with it when it is queued.
     ///
-    /// Returns `"sent"` when the message went out and `"queued"` when it is waiting.
+    /// Returns `"sent"` when the message went out, `"steered"` when it joined a turn already running,
+    /// `"blocked"` when it joined a turn whose agent is waiting for an answer to a permission question,
+    /// and `"queued"` when it is waiting. `"steered"` is the only receipt that proves the message
+    /// interrupted work in progress, which is what a caller asking to steer needs to know; `"blocked"`
+    /// says it was delivered but will not be read until that question is answered.
     pub fn send(
         &self,
         app: &AppCtx,
@@ -1557,15 +1680,39 @@ impl ChatManager {
         &self, app: &AppCtx, session_id: &str, text: &str,
         images: Vec<ChatImage>, behavior: &str, message_id: Option<&str>,
     ) -> Result<&'static str, String> {
+        self.send_identified_checked(app, session_id, text, images, behavior, message_id)
+            .map_err(SubmissionFailure::into_string)
+    }
+
+    /// A typed failure distinguishes a proven pre-dispatch rejection from a write or queue insertion
+    /// whose effects must never be repeated merely because the acknowledgement was lost.
+    pub fn send_identified_checked(
+        &self, app: &AppCtx, session_id: &str, text: &str,
+        images: Vec<ChatImage>, behavior: &str, message_id: Option<&str>,
+    ) -> Result<&'static str, SubmissionFailure> {
+        let proc = self.get(session_id).map_err(SubmissionFailure::Rejected)?;
+        let mut attempted = false;
+        self.send_on_process(app, session_id, &proc, text, images, behavior, message_id, &mut attempted)
+            .map_err(|error| if attempted { SubmissionFailure::Uncertain(error) } else { SubmissionFailure::Rejected(error) })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn send_on_process(
+        &self, app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>, text: &str,
+        images: Vec<ChatImage>, behavior: &str, message_id: Option<&str>, attempted: &mut bool,
+    ) -> Result<&'static str, String> {
         crate::diagnostics::record("INFO","agent_submission",json!({"sessionId":session_id,"originalChars":text.chars().count(),"imageCount":images.len(),"status":"started"}));
-        let proc = self.get(session_id)?;
         let _action = proc.action.lock().unwrap();
         self.check_permission_restart(session_id)?;
+        if !self.owns_process(session_id, proc) || !proc.alive.load(Ordering::Relaxed) {
+            return Err("This session has no running agent".into());
+        }
         if auth::active(&proc) {
             return Err("Finish or cancel Codex sign-in before sending a message.".into());
         }
         // Steering is a prompt, never a local command or a queued replacement.
         if proc.kind == SessionKind::Opencode && behavior != "steer" && proc.ready.load(Ordering::Relaxed) {
+            *attempted = true;
             if let Some(handled) = opencode::local_command(app, session_id, &proc, text)? {
                 return Ok(if message_id.is_some() { "command" } else { handled });
             }
@@ -1576,9 +1723,13 @@ impl ChatManager {
             // steer, the request falls through to the ordinary paths below instead of failing.
             if proc.ready.load(Ordering::Relaxed) && turn.running && !turn.interrupted {
                 drop(turn);
+                *attempted = true;
                 dispatch_steer(app, session_id, &proc, text, &images, message_id)
                     .map_err(|error| if message_id.is_some() { "chat_submission_pending".into() } else { error })?;
-                return Ok("sent");
+                // A turn stopped on a permission question is still running, so the message is written
+                // into it as usual. Its agent, though, is blocked waiting for that answer and reads
+                // nothing until someone gives it. The sender is told which of the two happened.
+                return Ok(if proc.permissions.lock().unwrap().is_empty() { "steered" } else { "blocked" });
             }
         }
         if !proc.ready.load(Ordering::Relaxed) {
@@ -1587,6 +1738,7 @@ impl ChatManager {
                 text: text.to_string(),
                 images,
             };
+            *attempted = true;
             turn.waiting.push(item);
             drop(turn);
             emit_queue(app, session_id, &proc);
@@ -1600,6 +1752,7 @@ impl ChatManager {
             };
             // Interrupting means "do this instead of what you are doing", so this message goes ahead of
             // anything already waiting rather than behind it.
+            *attempted = true;
             if behavior == "interrupt" {
                 turn.waiting.insert(0, item);
             } else {
@@ -1626,6 +1779,7 @@ impl ChatManager {
         if prune_finished_tasks(&mut proc.extras.lock().unwrap()) {
             emit_extras(app, session_id, &proc);
         }
+        *attempted = true;
         if let Err(e) = dispatch(app, session_id, &proc, text, &images, message_id) {
             // Nothing was written, so nothing will report a result to clear this again.
             let mut turn = proc.turn.lock().unwrap();
@@ -1674,7 +1828,10 @@ impl ChatManager {
         let _action = proc.action.lock().unwrap();
         {
             let mut turn = proc.turn.lock().unwrap();
-            turn.waiting.retain(|item| item.id != id);
+            if turn.waiting.iter().any(|item| item.id == id) {
+                crate::agent::spawn_requests::cancel_queued(app, session_id, id)?;
+                turn.waiting.retain(|item| item.id != id);
+            }
         }
         emit_queue(app, session_id, &proc);
         Ok(())
@@ -1695,6 +1852,9 @@ impl ChatManager {
             let mut turn = proc.turn.lock().unwrap();
             for item in turn.waiting.iter_mut() {
                 if item.id == id {
+                    // A delayed editor from another client must not rewrite completed execution facts.
+                    if item.images.is_empty() && super::shell::parse_context(&item.text).is_some() { continue; }
+                    crate::agent::spawn_requests::edit_queued(app, session_id, id, text, &item.images)?;
                     item.text = text.to_string();
                 }
             }
@@ -2464,7 +2624,7 @@ impl ChatManager {
                     let response = proc.request_and_wait("rewind_conversation", |request_id| {
                         protocol::control_request(
                             request_id,
-                            protocol::rewind_conversation(&target.message_id, &last_seen.message_id),
+                            protocol::rewind_conversation(&target.message_id, last_seen.last_message_id.as_deref().unwrap_or(&last_seen.message_id)),
                         )
                     })?;
                     if response.get("rewound").and_then(Value::as_bool) != Some(true) {
@@ -2530,17 +2690,21 @@ impl ChatManager {
         if !sessions.get(session_id).is_some_and(|current| Arc::ptr_eq(current, &proc)) {
             return Ok(());
         }
-        sessions.remove(session_id);
-        crate::session_state::set_stopped(app, session_id);
-        proc.alive.store(false, Ordering::Relaxed);
-        proc.released.store(true, Ordering::Relaxed);
         {
             let mut turn = proc.turn.lock().unwrap();
+            let ids = turn.waiting.iter().map(|item| item.id.clone()).collect::<Vec<_>>();
+            crate::agent::spawn_requests::cancel_queued_many(app, session_id, &ids)?;
             turn.running = false;
             turn.started_at = None;
             turn.waiting.clear();
         }
+        sessions.remove(session_id);
+        crate::session_state::set_stopped(app, session_id);
+        proc.alive.store(false, Ordering::Relaxed);
+        proc.released.store(true, Ordering::Relaxed);
         emit_queue(app, session_id, &proc);
+        end_background_tasks(&mut proc.extras.lock().unwrap());
+        emit_extras(app, session_id, &proc);
         // Closing stdin asks the agent to finish; killing is the fallback for one that does not.
         *proc.stdin.lock().unwrap() = None;
         let _ = proc.child.lock().unwrap().kill();
@@ -2591,6 +2755,7 @@ fn release_if_idle(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>) {
     if proc.release_when_idle.load(Ordering::Relaxed)
         && proc.alive.load(Ordering::Relaxed)
         && !turn.running
+        && !proc.shell_running.load(Ordering::Relaxed)
         && !auth::active(proc)
         && turn.waiting.is_empty()
         && turn.active_tasks.is_empty()
@@ -2602,11 +2767,42 @@ fn release_if_idle(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>) {
     }
 }
 
+/// Whether Claude still has background work that will report back, as opposed to being idle.
+///
+/// The inventory is the authority on live tasks. A task it just dropped still counts until its final
+/// frames arrive or their grace runs out, because the notification that wakes Claude follows them.
+fn background_pending(turn: &TurnQueue) -> bool {
+    let now = std::time::Instant::now();
+    !turn.background_tasks.is_empty() || turn.settling.values().any(|deadline| *deadline > now)
+}
+
+/// Return a session held on working for its background work to waiting, once that work is over and no
+/// turn has come to answer it.
+///
+/// Nothing is decided while a turn runs or a task is still live: the turn's own end reports the state,
+/// and the next drop of the inventory schedules this again. The state goes out under the turn lock, so a
+/// turn adopted at the same moment cannot have its working overwritten.
+fn settle_background_state(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>) {
+    let (app, session_id, proc) = (app.clone(), session_id.to_string(), proc.clone());
+    std::thread::spawn(move || loop {
+        std::thread::sleep(WAKE_GRACE);
+        let turn = proc.turn.lock().unwrap();
+        if turn.running || !turn.background_tasks.is_empty() || !proc.alive.load(Ordering::Relaxed) {
+            return;
+        }
+        if background_pending(&turn) || turn.waking.is_some_and(|since| since.elapsed() < WAKE_LIMIT) {
+            continue;
+        }
+        emit_state(&app, &session_id, AgentState::Waiting);
+        return;
+    });
+}
+
 /// Track task liveness independently of Task cards: shell tasks have no subagent card at all.
 fn track_claude_task(proc: &Arc<ChatProcess>, subtype: &str, message: &Value) {
     let Some(id) = message.get("task_id").and_then(Value::as_str) else { return };
     let status = message.pointer("/patch/status").or_else(|| message.get("status")).and_then(Value::as_str);
-    let finished = matches!(status, Some("completed" | "failed" | "error" | "killed" | "stopped" | "canceled" | "cancelled"))
+    let finished = status.is_some_and(|status| FINISHED_TASK_STATUSES.contains(&status))
         || (subtype == "task_notification" && status.is_none());
     let mut turn = proc.turn.lock().unwrap();
     if subtype == "task_notification" {
@@ -2631,11 +2827,11 @@ fn fold_task_frame(extras: &mut ClaudeExtras, subtype: &str, message: &Value) {
     let task = upsert_task(&mut extras.background_tasks, task_id);
     match subtype {
         "task_started" => {
+            task.set_status("running", now_ms());
             if let Some(task_type) = text("task_type") { task.task_type = task_type; }
             if let Some(description) = text("description") { task.description = description; }
             if let Some(tool_use_id) = text("tool_use_id") { task.tool_use_id = Some(tool_use_id); }
             if let Some(workflow_name) = text("workflow_name") { task.workflow_name = Some(workflow_name); }
-            task.status = "running".into();
         }
         "task_progress" => {
             if let Some(description) = text("description") { task.description = description; }
@@ -2643,23 +2839,64 @@ fn fold_task_frame(extras: &mut ClaudeExtras, subtype: &str, message: &Value) {
             if let Some(summary) = text("summary") { task.summary = Some(summary); }
             if let Some(usage) = message.get("usage").filter(|usage| usage.is_object()) { task.usage = Some(usage.clone()); }
             if let Some(progress) = message.get("workflow_progress").filter(|progress| progress.is_array()) {
-                task.workflow_progress = Some(progress.clone());
+                task.workflow_progress = Some(normalize_workflow_progress(progress));
             }
         }
         "task_updated" => {
             if let Some(status) = message.pointer("/patch/status").and_then(Value::as_str).filter(|value| !value.is_empty()) {
-                task.status = status.into();
+                task.set_status(status, now_ms());
             }
-            if let Some(end_time) = message.pointer("/patch/end_time").and_then(Value::as_u64) { task.ended_at = Some(end_time); }
+            if let Some(end_time) = message.pointer("/patch/end_time").and_then(Value::as_u64) {
+                task.ended_at = Some(end_time);
+                task.synthetic_end = false;
+            }
         }
         "task_notification" => {
-            task.status = text("status").unwrap_or_else(|| "ended".into());
+            task.set_status(text("status").as_deref().unwrap_or("ended"), now_ms());
             if let Some(summary) = text("summary") { task.summary = Some(summary); }
             if let Some(usage) = message.get("usage").filter(|usage| usage.is_object()) { task.usage = Some(usage.clone()); }
             if let Some(output_file) = text("output_file") { task.output_file = Some(output_file); }
-            if task.ended_at.is_none() { task.ended_at = Some(now_ms()); }
         }
         _ => {}
+    }
+    cap_finished_tasks(&mut extras.background_tasks);
+}
+
+/// Validate the provider's optional workflow tree once, before any client sees it. Provider indexes are
+/// optional and not unique; display identities use type, available identity, and occurrence together.
+fn normalize_workflow_progress(progress: &Value) -> Value {
+    let mut occurrences: HashMap<String, usize> = HashMap::new();
+    let entries: Vec<Value> = progress.as_array().into_iter().flatten().filter_map(|entry| {
+        let source = entry.as_object()?;
+        let kind = source.get("type")?.as_str()?;
+        if !matches!(kind, "workflow_phase" | "workflow_agent") { return None; }
+        let mut out = serde_json::Map::new();
+        out.insert("type".into(), json!(kind));
+        for key in ["title", "label", "phaseTitle", "agentId", "model", "state", "promptPreview", "resultPreview", "lastToolName"] {
+            if let Some(value) = source.get(key).and_then(Value::as_str) { out.insert(key.into(), json!(value)); }
+        }
+        for key in ["index", "phaseIndex", "startedAt", "queuedAt", "attempt", "lastProgressAt", "tokens", "toolCalls", "durationMs"] {
+            if let Some(value) = source.get(key).and_then(Value::as_u64) { out.insert(key.into(), json!(value)); }
+        }
+        if let Some(value) = source.get("promptFramed").and_then(Value::as_bool) { out.insert("promptFramed".into(), json!(value)); }
+        let identity = source.get("agentId").and_then(Value::as_str).map(str::to_string)
+            .or_else(|| source.get("index").and_then(Value::as_u64).map(|index| index.to_string()))
+            .unwrap_or_else(|| source.get(if kind == "workflow_phase" { "title" } else { "label" })
+                .and_then(Value::as_str).unwrap_or("").to_string());
+        let base = format!("{kind}:{identity}");
+        let occurrence = occurrences.entry(base.clone()).or_default();
+        out.insert("id".into(), json!(format!("{base}:{}", *occurrence)));
+        *occurrence += 1;
+        Some(Value::Object(out))
+    }).collect();
+    Value::Array(entries)
+}
+
+fn end_background_tasks(extras: &mut ClaudeExtras) {
+    let now = now_ms();
+    for task in &mut extras.background_tasks {
+        if !task.finished() { task.set_status("ended", now); }
+        task.in_inventory = false;
     }
     cap_finished_tasks(&mut extras.background_tasks);
 }
@@ -2676,6 +2913,12 @@ fn fold_task_inventory(extras: &mut ClaudeExtras, tasks: &[Value]) {
         current.insert(task_id);
         let task = upsert_task(&mut extras.background_tasks, task_id);
         task.listed = true;
+        // An inventory without status can revive a synthetic disappearance, but cannot downgrade a
+        // provider terminal frame that arrived before a delayed inventory.
+        if !task.in_inventory && task.synthetic_end {
+            task.set_status("running", now_ms());
+        }
+        task.in_inventory = true;
         if task.task_type.is_empty() {
             if let Some(task_type) = entry.get("task_type").and_then(Value::as_str) { task.task_type = task_type.into(); }
         }
@@ -2683,14 +2926,17 @@ fn fold_task_inventory(extras: &mut ClaudeExtras, tasks: &[Value]) {
             if let Some(description) = entry.get("description").and_then(Value::as_str) { task.description = description.into(); }
         }
         if let Some(status) = entry.get("status").and_then(Value::as_str).filter(|value| !value.is_empty()) {
-            task.status = status.into();
+            if !task.finished() || !matches!(status, "running" | "pending" | "paused") {
+                task.set_status(status, now_ms());
+            }
         }
     }
     let now = now_ms();
     for task in extras.background_tasks.iter_mut() {
-        if task.listed && !task.finished() && !current.contains(task.task_id.as_str()) {
-            task.status = "ended".into();
-            task.ended_at = Some(now);
+        task.in_inventory = current.contains(task.task_id.as_str());
+        if task.listed && !task.finished() && !task.in_inventory {
+            task.set_status("ended", now);
+            task.synthetic_end = true;
         }
     }
     cap_finished_tasks(&mut extras.background_tasks);
@@ -2712,9 +2958,15 @@ fn upsert_task<'a>(tasks: &'a mut Vec<BackgroundTask>, task_id: &str) -> &'a mut
 
 /// Keep at most `FINISHED_TASK_CAP` finished tasks, dropping the oldest first.
 fn cap_finished_tasks(tasks: &mut Vec<BackgroundTask>) {
-    while tasks.iter().filter(|task| task.finished()).count() > FINISHED_TASK_CAP {
-        let Some(index) = tasks.iter().position(BackgroundTask::finished) else { break };
-        tasks.remove(index);
+    // Foreground work has its own quota; it must not evict the completed background tasks users see.
+    for listed in [true, false] {
+        while tasks.iter().filter(|task| task.listed == listed && task.finished()).count() > FINISHED_TASK_CAP {
+            let Some(index) = tasks.iter().enumerate()
+                .filter(|(_, task)| task.listed == listed && task.finished())
+                .min_by_key(|(index, task)| (task.ended_at.unwrap_or(0), *index))
+                .map(|(index, _)| index) else { break };
+            tasks.remove(index);
+        }
     }
 }
 
@@ -2847,7 +3099,7 @@ fn ensure_rewind_idle(proc: &ChatProcess) -> Result<(), String> {
     if !turn.waiting.is_empty() {
         return Err("Remove queued messages before rewinding".to_string());
     }
-    if !turn.active_tasks.is_empty() || !turn.background_tasks.is_empty() {
+    if proc.shell_running.load(Ordering::Relaxed) || !turn.active_tasks.is_empty() || !turn.background_tasks.is_empty() {
         return Err("Wait for background tasks to finish before rewinding".into());
     }
     drop(turn);
@@ -2870,7 +3122,7 @@ fn rewind_target(proc: &ChatProcess, row_id: &str) -> Result<super::history::Rew
             };
             return Ok(super::history::RewindTarget {
                 message_id: message_id.to_string(),
-                turn_id: None,
+                last_message_id: None, turn_id: None,
                 text,
             });
         }
@@ -3062,6 +3314,8 @@ fn spawn_stdout_reader(
             return;
         }
         crate::session_state::set_alive(&app, &session_id, false);
+        end_background_tasks(&mut proc.extras.lock().unwrap());
+        emit_extras(&app, &session_id, &proc);
         emit_queue(&app, &session_id, &proc);
         let stderr = proc.stderr.lock().unwrap().clone();
         let released = proc.released.load(Ordering::Relaxed);
@@ -3162,6 +3416,10 @@ fn handle_line(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>, line: &s
     }
     auth::claude::observe(app, session_id, proc, line);
     if let Ok(value) = serde_json::from_str::<Value>(line) {
+        // Before the generation clock sees the frame: adopting a turn restarts that clock.
+        if opens_agent_turn(&value) {
+            adopt_agent_turn(app, session_id, proc);
+        }
         let mut extras = proc.extras.lock().unwrap();
         extras.generation.claude(&value, now_ms());
         // Claude marks a turn refused by a quota, or by a short-term rate limit, with this error. Which of
@@ -3172,6 +3430,14 @@ fn handle_line(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>, line: &s
     }
     match protocol::parse_line(line) {
         Incoming::Init { session_id: agent_id, model } => {
+            // Claude opens every turn with this frame. Outside a turn it is answering something of its own,
+            // such as a finished background task, and the response follows once its request is served.
+            {
+                let mut turn = proc.turn.lock().unwrap();
+                if !turn.running {
+                    turn.waking = Some(std::time::Instant::now());
+                }
+            }
             let model = model
                 .map(|value| crate::agent::claude_models::normalize_id(&value).to_string());
             *proc.agent_session_id.lock().unwrap() = Some(agent_id.clone());
@@ -3249,12 +3515,14 @@ fn handle_line(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>, line: &s
             emit_extras(app, session_id, proc);
         }
         Incoming::BackgroundTasks(tasks) => {
+            let drained;
             {
                 let mut turn = proc.turn.lock().unwrap();
                 let current: HashSet<String> = tasks.iter()
-                    .filter(|task| !matches!(task.get("status").and_then(Value::as_str), Some("completed" | "failed" | "killed" | "stopped" | "canceled" | "cancelled")))
+                    .filter(|task| !task.get("status").and_then(Value::as_str).is_some_and(|status| FINISHED_TASK_STATUSES.contains(&status)))
                     .filter_map(|task| task.get("task_id").and_then(Value::as_str).map(str::to_string)).collect();
                 let previous = std::mem::replace(&mut turn.background_tasks, current.clone());
+                drained = !previous.is_empty() && current.is_empty() && !turn.running;
                 let deadline = std::time::Instant::now() + TASK_SETTLE_GRACE;
                 for ended in previous.difference(&current) {
                     turn.active_tasks.remove(ended);
@@ -3272,6 +3540,9 @@ fn handle_line(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>, line: &s
                 }
             }
             emit_extras(app, session_id, proc);
+            if drained {
+                settle_background_state(app, session_id, proc);
+            }
             release_if_idle(app, session_id, proc);
         }
         Incoming::LocalCommand { id, text } => {
@@ -3285,10 +3556,19 @@ fn handle_line(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>, line: &s
             handle_compaction(proc, true, trigger, pre_tokens)
         }
         Incoming::Task { subtype, message } => {
+            let was_live = !proc.turn.lock().unwrap().background_tasks.is_empty();
             fold_task_frame(&mut proc.extras.lock().unwrap(), &subtype, &message);
             track_claude_task(proc, &subtype, &message);
             handle_claude_task(proc, &subtype, &message);
             emit_extras(app, session_id, proc);
+            // A final status can retire the last live task before the inventory says so.
+            let drained = {
+                let turn = proc.turn.lock().unwrap();
+                was_live && turn.background_tasks.is_empty() && !turn.running
+            };
+            if drained {
+                settle_background_state(app, session_id, proc);
+            }
             release_if_idle(app, session_id, proc);
         }
         Incoming::Result { subtype, duration_ms, total_cost_usd, model_usage } => {
@@ -3762,6 +4042,39 @@ fn remember_codex_thread(
     );
 }
 
+/// Whether a Claude frame begins a model response in the main conversation.
+///
+/// Every response opens with `message_start` while partial messages are on, which the engine always
+/// asks for. A subagent's frames carry the tool call that runs it and belong to a turn already going.
+fn opens_agent_turn(value: &Value) -> bool {
+    value.get("type").and_then(Value::as_str) == Some("stream_event")
+        && value.pointer("/event/type").and_then(Value::as_str) == Some("message_start")
+        && value.get("parent_tool_use_id").map_or(true, Value::is_null)
+}
+
+/// Take over a turn Claude started without a message from us.
+///
+/// When a background task Claude launched finishes, the task notification wakes it and it answers in a
+/// turn of its own. Nothing was dispatched, so nothing marked that turn running and the session read as
+/// waiting until it ended. Adopting the turn at its first response gives it the bookkeeping a dispatched
+/// turn has: the session reports working, and a message sent meanwhile queues behind it.
+fn adopt_agent_turn(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>) {
+    let started_at = {
+        let mut turn = proc.turn.lock().unwrap();
+        if turn.running {
+            return;
+        }
+        let now = now_ms();
+        turn.running = true;
+        turn.started_at = Some(now);
+        turn.waking = None;
+        now
+    };
+    proc.extras.lock().unwrap().generation = generation::GenerationTiming::default();
+    emit(app, session_id, json!({"type":"turnStarted","startedAt":started_at}));
+    emit_state(app, session_id, AgentState::Working);
+}
+
 fn start_waiting_message(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>) {
     if auth::blocks_queue(proc) { return; }
     let next = {
@@ -4005,7 +4318,7 @@ fn handle_codex_notification(
                         row_id,
                         super::history::RewindTarget {
                             message_id: id.to_string(),
-                            turn_id: Some(id.to_string()),
+                            last_message_id: None, turn_id: Some(id.to_string()),
                             text: String::new(),
                         },
                     );
@@ -4613,10 +4926,11 @@ fn handle_turn_end(
     reported_duration_ms: Option<u64>,
 ) {
     let completed_at = now_ms();
-    let (next, interrupted, started_at) = {
+    let (next, interrupted, started_at, background) = {
         let mut turn = proc.turn.lock().unwrap();
         let interrupted = std::mem::take(&mut turn.interrupted);
         let started_at = turn.started_at.take();
+        turn.waking = None;
         let next = if turn.steering || turn.waiting.is_empty() || auth::blocks_queue(proc) {
             turn.running = false;
             None
@@ -4624,7 +4938,7 @@ fn handle_turn_end(
             // Stays running: the message about to go out is the next turn, without an idle gap between.
             Some(turn.waiting.remove(0))
         };
-        (next, interrupted, started_at)
+        (next, interrupted, started_at, background_pending(&turn))
     };
     if let Some(duration_ms) = reported_duration_ms.or_else(|| {
         started_at.map(|started| completed_at.saturating_sub(started))
@@ -4644,7 +4958,14 @@ fn handle_turn_end(
         emit(app, session_id, json!({"type":"turnInterrupted"}));
     }
     let Some(item) = next else {
-        emit_state(app, session_id, AgentState::Waiting);
+        // Background work this turn left running keeps the session busy. Claude answers it in a turn of
+        // its own when it finishes, and that turn's end is the one that means the work is done.
+        if background {
+            emit_state(app, session_id, AgentState::Working);
+            settle_background_state(app, session_id, proc);
+        } else {
+            emit_state(app, session_id, AgentState::Waiting);
+        }
         emit(app, session_id, json!({"type":"turnCompleted"}));
         // The view that asked for this went away while the turn was running; now that the turn is
         // over and nothing waits behind it, the process has nothing left to do.
@@ -4759,7 +5080,9 @@ fn send_interrupt_locked(proc: &Arc<ChatProcess>, turn: &mut TurnQueue) -> Resul
 fn user_row(id: String, text: &str, images: Vec<ChatImage>, at: Option<i64>) -> ChatRow {
     if images.is_empty() {
         if let Some(ctx) = super::shell::parse_context(text) {
-            return super::shell::row(id, at, &ctx, ctx.status());
+            let mut row = super::shell::row(id, at, &ctx, ctx.status());
+            if let ChatRow::Shell { source_text, .. } = &mut row { *source_text = text.to_string(); }
+            return row;
         }
     }
     ChatRow::User { id, text: text.to_string(), images, at }
@@ -4779,6 +5102,7 @@ fn dispatch_steer(
     let text = normalized.as_ref();
     let row_id = message_id.map(str::to_owned).unwrap_or_else(|| format!("u-{}", proc.next_request.fetch_add(1, Ordering::Relaxed)));
     let sent_at = now_ms();
+    if let Some(id) = message_id { super::submissions::begin_dispatch(&app.db().conn.lock().unwrap(), session_id, id)?; }
     match proc.kind {
         SessionKind::Codex => {
             let thread_id = proc.agent_session_id.lock().unwrap().clone()
@@ -4790,7 +5114,7 @@ fn dispatch_steer(
                 skills::with_inputs(codex_protocol::turn_steer(id, &thread_id, &turn_id, text, images), text, &commands)
             })?;
             proc.user_targets.lock().unwrap().insert(row_id.clone(), super::history::RewindTarget {
-                message_id: turn_id.clone(), turn_id: Some(turn_id), text: text.to_string(),
+                message_id: turn_id.clone(), last_message_id: None, turn_id: Some(turn_id), text: text.to_string(),
             });
         }
         SessionKind::Opencode => opencode::steer(proc, &row_id, text, images)?,
@@ -4801,6 +5125,10 @@ fn dispatch_steer(
         crate::agent::server::try_auto_rename(app, session_id, text);
     }
     proc.timeline.lock().unwrap().upsert(user_row(row_id, text, images.to_vec(), Some(sent_at as i64)));
+    if let Some(id) = message_id {
+        let receipt = if proc.permissions.lock().unwrap().is_empty() { "steered" } else { "blocked" };
+        super::submissions::finish_dispatch(&app.db().conn.lock().unwrap(), session_id, id, receipt)?;
+    }
     emit(app, session_id, json!({"type":"steerAccepted"}));
     Ok(())
 }
@@ -4833,6 +5161,7 @@ fn dispatch(
     if newly_started { proc.extras.lock().unwrap().generation = generation::GenerationTiming::default(); }
     let row_id = message_id.map(str::to_owned).unwrap_or_else(|| format!("u-{}", proc.next_request.fetch_add(1, Ordering::Relaxed)));
     proc.timeline.lock().unwrap().upsert(user_row(row_id.clone(), text, images.to_vec(), Some(sent_at as i64)));
+    if let Some(id) = message_id { super::submissions::begin_dispatch(&app.db().conn.lock().unwrap(), session_id, id)?; }
     if proc.kind == SessionKind::Opencode {
         opencode::dispatch(app, session_id, proc, &row_id, text, images)?;
     } else if matches!(proc.kind, SessionKind::Pi | SessionKind::Omp) {
@@ -4851,7 +5180,7 @@ fn dispatch(
                 row_id,
                 super::history::RewindTarget {
                     message_id: turn_id.clone(),
-                    turn_id: Some(turn_id.clone()),
+                    last_message_id: None, turn_id: Some(turn_id.clone()),
                     text: text.to_string(),
                 },
             );
@@ -4890,6 +5219,9 @@ fn dispatch(
         }
     } else {
         proc.write(&protocol::user_message(text, images))?;
+    }
+    if let Some(id) = message_id {
+        super::submissions::finish_dispatch(&app.db().conn.lock().unwrap(), session_id, id, "sent")?;
     }
     // Direct sends and dequeued messages share this path. Rename only after a successful write;
     // OpenCode supplies its own title through session.updated and must retain its placeholder until then.
@@ -5262,7 +5594,13 @@ fn handle_control_response(
             }
             return;
         }
-        Some("initialize") => {}
+        Some("initialize") => {
+            if let Some(mode) = response.get("current_permission_mode").and_then(Value::as_str).filter(|mode| !mode.is_empty()) {
+                *proc.mode.lock().unwrap() = mode.to_string();
+                proc.permission_confirmed.store(true, Ordering::Relaxed);
+                emit(app, session_id, json!({"type":"settingsChanged","mode":mode}));
+            }
+        }
         _ => return,
     }
     let commands = match skills::claude_commands(&response) {
@@ -5335,7 +5673,14 @@ fn emit_queue(app: &AppCtx, session_id: &str, proc: &ChatProcess) {
 
 /// Report work state through the same channel PTY sessions use, so the sidebar, tab dots, and notifications
 /// treat a chat session exactly like any other agent session.
+///
+/// The process-wide status view behind `vstat` and plan-execute health is fed separately: the hook
+/// service records into it for terminal sessions, and a chat session has no hooks, so this is its only
+/// way in.
 fn emit_state(app: &AppCtx, session_id: &str, state: AgentState) {
+    // The session's `vrun` work keeps it busy past the end of a turn, exactly as for a terminal session.
+    let state = crate::agent::runs::hold(session_id, state);
+    crate::agent::status_watch::record(session_id, state);
     app.emit(
         &StatusSignal::event_name(session_id),
         StatusSignal::State { state, silent: false, authoritative: true },
@@ -5366,7 +5711,8 @@ mod tests {
     #[test]
     fn claude_launches_with_the_mode_the_view_reports() {
         for (stored, shown) in [(None, "default"), (Some(""), "default"), (Some("nonsense"), "default"),
-            (Some("skip"), "bypassPermissions"), (Some("plan"), "plan")] {
+            (Some("skip"), "bypassPermissions"), (Some("plan"), "plan"), (Some("acceptEdits"), "acceptEdits"),
+            (Some("auto"), "auto"), (Some("default"), "default")] {
             let mode = initial_mode(SessionKind::Claude, stored);
             assert_eq!(mode, shown, "stored {stored:?}");
             let args = protocol::launch_args(None, None, None, &mode).join(" ");
@@ -5473,6 +5819,7 @@ mod tests {
             turn: Mutex::new(TurnQueue::default()),
             stderr: Mutex::new(String::new()),
             alive: AtomicBool::new(true),
+            shell_running: AtomicBool::new(false),
             release_when_idle: AtomicBool::new(false),
             released: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
@@ -6552,6 +6899,7 @@ mod tests {
             turn: Mutex::new(TurnQueue::default()),
             stderr: Mutex::new(String::new()),
             alive: AtomicBool::new(true),
+            shell_running: AtomicBool::new(false),
             release_when_idle: AtomicBool::new(false),
             released: AtomicBool::new(false),
             next_request: AtomicU64::new(1),
@@ -6642,7 +6990,7 @@ mod tests {
         let context = super::super::shell::parse_context(text).expect("the wire text is the tagged context");
         assert_eq!(context.command, "echo hello; exit 3");
         assert_eq!(context.exit_code, Some(3));
-        assert!(text.ends_with("Exit code 3</bash-stderr>"), "{text}");
+        assert_eq!(context.stderr, "", "execution facts must not be inserted into stderr");
         // The timeline holds the command row under the same id and no user bubble at all.
         let rows = app.chat().snapshot("s").rows;
         assert_eq!(rows.iter().filter(|row| matches!(row, ChatRow::Shell { .. })).count(), 1);
@@ -6653,6 +7001,31 @@ mod tests {
         // The second command runs now that the first is done.
         app.chat().run_shell(&app, "s", "true", "sh-2").unwrap();
         wait_for_shell_row(&app, "completed");
+        app.chat().stop(&app, "s").unwrap();
+        proc.child.lock().unwrap().wait().unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn shell_completion_keeps_its_slot_until_delivery_and_cannot_clear_a_new_run() {
+        let (app, proc, wire) = shell_fixture("shell-finish-slot");
+        app.chat().run_shell(&app, "s", "sleep 0.05; printf first", "sh-first").unwrap();
+        let old = app.chat().shell_runs.lock().unwrap().get("s").cloned().unwrap();
+        let action = proc.action.lock().unwrap();
+        wait_for_shell_row(&app, "completed");
+        assert!(app.chat().shell_runs.lock().unwrap().get("s").is_some_and(|run| Arc::ptr_eq(run, &old)),
+            "a result waiting for provider delivery still owns its slot");
+        drop(action);
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while app.chat().shell_runs.lock().unwrap().contains_key("s") || wire.lock().unwrap().is_empty() {
+            assert!(std::time::Instant::now() < deadline, "shell delivery never released its slot");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(!wire.lock().unwrap().is_empty());
+        app.chat().run_shell(&app, "s", "sleep 30", "sh-next").unwrap();
+        app.chat().finish_shell_run(&app, "s", &proc, &old, super::super::shell::ShellContext::default());
+        assert!(proc.shell_running.load(Ordering::Relaxed), "the stale callback must preserve the new command's marker");
+        assert_eq!(app.chat().shell_runs.lock().unwrap().get("s").unwrap().id, "sh-next");
         app.chat().stop(&app, "s").unwrap();
         proc.child.lock().unwrap().wait().unwrap();
     }
@@ -6674,7 +7047,11 @@ mod tests {
         }
         let lines = wire.lock().unwrap().clone();
         assert_eq!(lines.len(), 1, "{lines:?}");
-        assert!(lines[0].contains("Command cancelled by the user"), "{}", lines[0]);
+        let frame: Value = serde_json::from_str(&lines[0]).unwrap();
+        let context = super::super::shell::parse_context(frame["message"]["content"][0]["text"].as_str().unwrap()).unwrap();
+        assert!(context.cancelled);
+        assert_eq!(context.exit_code, None);
+        assert_eq!(context.stderr, "");
         assert_eq!(app.chat().cancel_shell("s", "sh-1").unwrap_err(), "chat_shell_not_found");
         app.chat().stop(&app, "s").unwrap();
         proc.child.lock().unwrap().wait().unwrap();
@@ -6708,7 +7085,7 @@ mod tests {
         match user_row("m-1".into(), text, Vec::new(), Some(7)) {
             ChatRow::Shell { id, command, stdout, status, exit_code, at, .. } => {
                 assert_eq!((id.as_str(), command.as_str(), stdout.as_str()), ("m-1", "ls", "a\n"));
-                assert_eq!((status, exit_code, at), ("completed", Some(0), Some(7)));
+                assert_eq!((status, exit_code, at), ("completed", None, Some(7)));
             }
             other => panic!("expected a shell row, got {other:?}"),
         }
@@ -6718,15 +7095,40 @@ mod tests {
         assert!(matches!(user_row("m-3".into(), text, vec![image], None), ChatRow::User { .. }));
     }
 
-    /// Shell rows are not rewind boundaries: the alignment against the recording walks user rows only,
-    /// so the message before a command still finds its own target.
     #[test]
-    fn user_messages_skip_shell_rows() {
+    fn queued_shell_preview_uses_backend_parsing_for_events_and_reconnects() {
+        let command = "printf '</bash-input>\n<bash-stdout>€'";
+        let text = super::super::shell::build_context(&super::super::shell::ShellContext {
+            command: command.into(), stderr: "Exit code 7".into(), exit_code: Some(0), ..Default::default()
+        });
+        let mut item = QueuedMessage { id: "queued-shell".into(), text: text.clone(), images: vec![] };
+        let event = serde_json::to_value(&item).unwrap();
+        let snapshot = snapshot_queue_item(&item);
+        assert_eq!(event, snapshot);
+        assert_eq!(event["shellCommand"], command);
+        assert_eq!(event["text"], text);
+        item.images.push(ChatImage { mime_type: "image/png".into(), data: "AA==".into() });
+        assert!(serde_json::to_value(&item).unwrap().get("shellCommand").is_none());
+        assert!(snapshot_queue_item(&item).get("shellCommand").is_none());
+        item.images.clear();
+        for raw in ["plain message", "<bash-input>x</bash-input>\n<bash-stdout>a</bash-stdout><bash-stderr>code </bash-stdout><bash-stderr> sample</bash-stderr>"] {
+            item.text = raw.into();
+            let value = snapshot_queue_item(&item);
+            assert!(value.get("shellCommand").is_none());
+            assert_eq!(value["text"], raw);
+        }
+    }
+
+    /// Shell context is a real provider turn even though its display is not a user bubble.
+    #[test]
+    fn user_messages_keep_shell_provider_turns_for_rewind_depth() {
         let mut timeline = Timeline::default();
         timeline.upsert(ChatRow::User { id: "a".into(), text: "A".into(), images: Vec::new(), at: None });
         timeline.upsert(user_row("sh".into(), "<bash-input>ls</bash-input>\n<bash-stdout></bash-stdout>", Vec::new(), None));
         timeline.upsert(ChatRow::User { id: "b".into(), text: "B".into(), images: Vec::new(), at: None });
-        assert_eq!(timeline.user_messages(), vec![("a".to_string(), "A".to_string()), ("b".to_string(), "B".to_string())]);
+        assert_eq!(timeline.user_messages(), vec![("a".to_string(), "A".to_string()),
+            ("sh".to_string(), "<bash-input>ls</bash-input>\n<bash-stdout></bash-stdout>".to_string()),
+            ("b".to_string(), "B".to_string())]);
     }
 
     /// Text of every user row on the timeline, in order — what the agent has actually been told.
@@ -6813,7 +7215,7 @@ mod tests {
 
     fn tell_report(app: &AppCtx, req: &crate::agent::plan_execute::Request) -> Result<serde_json::Value, String> {
         crate::agent::tell::send(app, &crate::agent::tell::Request {
-            session_id:req.session_id.clone(), target:None, report:true, round:Some(req.round),
+            session_id:req.session_id.clone(), target:None, report:true, steer:false, round:Some(req.round),
             message_id:req.message_id.clone(), text:req.text.clone(),
         })
     }
@@ -7021,7 +7423,7 @@ mod tests {
         let (app, _, _) = plan_execute_fixture();
         flow::action(&app,&flow_request("planner","dispatch",1,"Implement")).unwrap();
         flow::action(&app,&flow_request("planner","block",1,"Waiting for the executor's update")).unwrap();
-        let mut req = tell::Request {session_id:"executor".into(), target:None, report:true, round:Some(1),
+        let mut req = tell::Request {session_id:"executor".into(), target:None, report:true, steer:false, round:Some(1),
             text:"Ready".into(), message_id:format!("msg-{}",uuid::Uuid::new_v4())};
         req.target=Some("owner".into()); assert!(tell::send(&app,&req).unwrap_err().contains("planning session"));
         req.target=None; req.session_id="planner".into(); assert!(tell::send(&app,&req).is_err());
@@ -7045,6 +7447,28 @@ mod tests {
         assert_eq!(app.chat().snapshot("planner").queue.len(),1); // A workflow stop preserves ordinary tells.
         req.round=Some(2); req.message_id=format!("msg-{}",uuid::Uuid::new_v4());
         assert!(tell::send(&app,&req).is_err()); // Blocking permits reports; explicitly stopping does not.
+        for id in ["planner","executor"] {app.chat().stop(&app,id).unwrap();}
+        let dir=app.data_dir().unwrap();drop(app);std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Steering is a delivery option on its own; only a report refuses it. The receipt names which of the
+    /// three states the recipient was in, so the sender can say whether the message was actually read.
+    #[test]
+    fn tell_steers_into_a_running_turn_and_names_a_blocked_recipient() {
+        use crate::agent::tell;
+        let (app,peers,_)=plan_execute_fixture();
+        let mut req=tell::Request{session_id:"planner".into(),target:Some("executor".into()),steer:true,
+            text:"A correction".into(),message_id:format!("msg-{}",uuid::Uuid::new_v4()),..Default::default()};
+        assert_eq!(tell::send(&app,&req).unwrap()["delivery"],"sent"); // Idle: an ordinary send, not an error.
+        peers[1].turn.lock().unwrap().running=true;
+        req.text="A second correction".into();req.message_id=format!("msg-{}",uuid::Uuid::new_v4());
+        assert_eq!(tell::send(&app,&req).unwrap()["delivery"],"steered");
+        peers[1].permissions.lock().unwrap().insert("req-1".into(),json!({"toolName":"AskUserQuestion"}));
+        req.text="A third correction".into();req.message_id=format!("msg-{}",uuid::Uuid::new_v4());
+        assert_eq!(tell::send(&app,&req).unwrap()["delivery"],"blocked");
+        let report=tell::Request{session_id:"executor".into(),target:None,report:true,steer:true,round:Some(1),
+            text:"Done".into(),message_id:format!("msg-{}",uuid::Uuid::new_v4())};
+        assert!(tell::send(&app,&report).unwrap_err().contains("cannot be combined"));
         for id in ["planner","executor"] {app.chat().stop(&app,id).unwrap();}
         let dir=app.data_dir().unwrap();drop(app);std::fs::remove_dir_all(dir).unwrap();
     }
@@ -7535,9 +7959,24 @@ mod tests {
         let app = ctx("steer");
         let m = manager_with_session("s");
         m.send(&app, "s", "first", Vec::new(), "queue").unwrap();
-        assert_eq!(m.send(&app, "s", "and also this", Vec::new(), "steer").unwrap(), "sent");
+        assert_eq!(m.send(&app, "s", "and also this", Vec::new(), "steer").unwrap(), "steered");
         assert_eq!(said(&m, "s"), vec!["first", "and also this"]);
         assert!(queued(&m, "s").is_empty(), "nothing is waiting; it was said");
+    }
+
+    /// A recipient stopped on a permission question has a turn that is still running, so the message is
+    /// written into it. Saying `"steered"` would claim it reached work in progress, and it has not.
+    #[test]
+    fn steering_a_turn_stopped_on_a_question_reports_a_blocked_delivery() {
+        let app = ctx("steer-blocked");
+        let m = manager_with_session("s");
+        m.send(&app, "s", "first", Vec::new(), "queue").unwrap();
+        let proc = m.get("s").unwrap();
+        proc.permissions.lock().unwrap().insert("req-1".into(), json!({"toolName":"AskUserQuestion"}));
+        assert_eq!(m.send(&app, "s", "a remark", Vec::new(), "steer").unwrap(), "blocked");
+        assert_eq!(said(&m, "s"), vec!["first", "a remark"], "the message is delivered either way");
+        proc.permissions.lock().unwrap().clear();
+        assert_eq!(m.send(&app, "s", "another remark", Vec::new(), "steer").unwrap(), "steered");
     }
 
     /// An accidental steer with nothing running is an ordinary send, not an error. This is what an
@@ -7641,7 +8080,7 @@ mod tests {
         proc.turn.lock().unwrap().started_at = Some(123);
         let manager = ChatManager::new();
         manager.sessions.lock().unwrap().insert("s".into(), proc.clone());
-        assert_eq!(manager.send(&app, "s", "/compact is just prose here", Vec::new(), "steer").unwrap(), "sent");
+        assert_eq!(manager.send(&app, "s", "/compact is just prose here", Vec::new(), "steer").unwrap(), "steered");
         assert!(manager.send(&app, "s", "/compact is just prose here", Vec::new(), "steer").is_err());
         assert_eq!(said(&manager, "s"), vec!["/compact is just prose here"]);
         assert!(queued(&manager, "s").is_empty());
@@ -7682,7 +8121,7 @@ mod tests {
                 handle_codex_line(&response_app, "s", &responder, &response.to_string());
             }
         });
-        assert_eq!(manager.send(&app, "s", "accepted", Vec::new(), "steer").unwrap(), "sent");
+        assert_eq!(manager.send(&app, "s", "accepted", Vec::new(), "steer").unwrap(), "steered");
         assert!(manager.send(&app, "s", "rejected", Vec::new(), "steer").unwrap_err().contains("steer refused"));
         assert_eq!(said(&manager, "s"), vec!["accepted"]);
         assert!(queued(&manager, "s").is_empty());
@@ -7786,6 +8225,25 @@ mod tests {
         m.queue_update(&app, "s", &id, "the real question").unwrap();
         finish_turn(&m, &app, "s", "success");
         assert_eq!(said(&m, "s"), vec!["first", "the real question"]);
+    }
+
+    #[test]
+    fn delayed_queue_edits_cannot_replace_recorded_shell_facts() {
+        let app = ctx("edit-shell-context");
+        let m = manager_with_session("s");
+        m.send(&app, "s", "first", Vec::new(), "queue").unwrap();
+        let text = super::super::shell::build_context(&super::super::shell::ShellContext {
+            command: "printf '€'".into(), stderr: "Exit code 7".into(), exit_code: Some(0), ..Default::default()
+        });
+        m.send(&app, "s", &text, Vec::new(), "queue").unwrap();
+        let id = m.snapshot("s").queue[0].id.clone();
+        for stale in ["stale client edit", ""] {
+            m.queue_update(&app, "s", &id, stale).unwrap();
+            assert_eq!(queued(&m, "s"), vec![text.clone()]);
+        }
+        finish_turn(&m, &app, "s", "success");
+        assert!(matches!(&m.snapshot("s").rows[1], ChatRow::Shell { source_text, stderr, exit_code: Some(0), .. }
+            if source_text == &text && stderr == "Exit code 7"));
     }
 
     // ── Attached images ──
@@ -7894,7 +8352,7 @@ mod tests {
         let proc = manager.get("s").unwrap();
         proc.turn.lock().unwrap().started_at = Some(123);
 
-        assert_eq!(manager.send(&app, "s", "clarification", Vec::new(), "steer").unwrap(), "sent");
+        assert_eq!(manager.send(&app, "s", "clarification", Vec::new(), "steer").unwrap(), "steered");
         assert_eq!(manager.snapshot("s").turn_started_at, Some(123));
     }
 
@@ -8332,7 +8790,8 @@ mod tests {
             assert_eq!(request["method"], "turn/steer");
             assert!(request["params"].get("sandboxPolicy").is_none());
             handle_codex_line(&app, "s", &proc, &json!({"id":request["id"], "result":{"turnId":"turn-first"}}).to_string());
-            assert_eq!(worker.join().unwrap().unwrap(), "sent");
+            // The approval raised above is still waiting, so the steer lands in a turn that cannot read it.
+            assert_eq!(worker.join().unwrap().unwrap(), "blocked");
         });
         assert!(manager.snapshot("s").pending_permission_mode.is_some());
         manager.send(&app, "s", "second", Vec::new(), "queue").unwrap();
@@ -8484,6 +8943,103 @@ mod tests {
         handle_line(&app, "s", &proc, r#"{"type":"system","subtype":"task_notification","task_id":"shell","status":"completed"}"#);
         assert!(!running(&manager, "s"));
         assert!(manager.snapshot("s").rows.iter().any(|row| matches!(row, ChatRow::Tool { output: Some(output), .. } if output == "done")));
+    }
+
+    /// A turn Claude opens by itself, answering a finished background task, reports working to the
+    /// sidebar and to `vstat` and ends like a dispatched one. Frame order is taken from a real run.
+    #[test]
+    fn a_turn_the_agent_opens_itself_reports_working() {
+        let _state_guard = crate::session_state::test_lock();
+        let app = ctx("agent-turn");
+        let sid = format!("agent-turn-{}", uuid::Uuid::new_v4());
+        let proc = inert_process(SessionKind::Claude);
+        app.emit(&StatusSignal::event_name(&sid), StatusSignal::Agent {
+            agent: Some("claude".into()), state_source: Some("chat".into()),
+        });
+        let shown = || crate::session_state::snapshot().get(&sid).and_then(|record| record.agent_state.clone());
+        let watched = || {
+            crate::agent::status_watch::snapshot().1.into_iter().find(|row| row.session_id == sid).map(|row| row.state)
+        };
+
+        handle_line(&app, &sid, &proc, r#"{"type":"system","subtype":"task_notification","task_id":"shell","status":"completed"}"#);
+        handle_line(&app, &sid, &proc, r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"sub"}},"parent_tool_use_id":"tool"}"#);
+        assert!(!proc.turn.lock().unwrap().running, "neither a notification nor a subagent's output opens a turn");
+
+        handle_line(&app, &sid, &proc, r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m"}},"parent_tool_use_id":null}"#);
+        assert!(proc.turn.lock().unwrap().running);
+        assert!(proc.turn.lock().unwrap().started_at.is_some());
+        assert_eq!(shown().as_deref(), Some("working"));
+        assert_eq!(watched(), Some(AgentState::Working));
+
+        handle_line(&app, &sid, &proc, r#"{"type":"result","subtype":"success","duration_ms":5}"#);
+        assert!(!proc.turn.lock().unwrap().running);
+        assert_eq!(shown().as_deref(), Some("waiting"));
+        assert_eq!(watched(), Some(AgentState::Waiting));
+    }
+
+    /// A live Claude conversation with a turn running, as the background-work tests below need it.
+    fn background_fixture(tag: &str) -> (AppCtx, String, Arc<ChatProcess>) {
+        let app = ctx(tag);
+        let sid = format!("{tag}-{}", uuid::Uuid::new_v4());
+        let proc = inert_process(SessionKind::Claude);
+        proc.alive.store(true, Ordering::Relaxed);
+        proc.turn.lock().unwrap().running = true;
+        app.emit(&StatusSignal::event_name(&sid), StatusSignal::Agent {
+            agent: Some("claude".into()), state_source: Some("chat".into()),
+        });
+        (app, sid, proc)
+    }
+
+    const LIVE_SHELL: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[{"task_id":"shell","task_type":"local_bash"}]}"#;
+    const NO_TASKS: &str = r#"{"type":"system","subtype":"background_tasks_changed","tasks":[]}"#;
+    const SHELL_DONE: &str = r#"{"type":"system","subtype":"task_notification","task_id":"shell","status":"completed"}"#;
+    const TURN_DONE: &str = r#"{"type":"result","subtype":"success","duration_ms":5}"#;
+
+    /// A turn that leaves a background task running keeps the session working, with nothing to read yet.
+    /// Claude answers the finished task in a turn of its own, and only that turn's end means waiting.
+    #[test]
+    fn background_work_holds_working_until_the_turn_that_answers_it() {
+        let _state_guard = crate::session_state::test_lock();
+        let (app, sid, proc) = background_fixture("bg-hold");
+        let record = || crate::session_state::snapshot().get(&sid).cloned().unwrap_or_default();
+
+        handle_line(&app, &sid, &proc, LIVE_SHELL);
+        handle_line(&app, &sid, &proc, TURN_DONE);
+        assert_eq!(record().agent_state.as_deref(), Some("working"));
+        assert!(!record().unread);
+        std::thread::sleep(WAKE_GRACE * 3);
+        assert_eq!(record().agent_state.as_deref(), Some("working"), "the task is still live");
+
+        // The task ends and Claude begins its answer. A slow first response keeps the hold.
+        handle_line(&app, &sid, &proc, NO_TASKS);
+        handle_line(&app, &sid, &proc, SHELL_DONE);
+        handle_line(&app, &sid, &proc, r#"{"type":"system","subtype":"init","session_id":"agent-1","model":"claude-opus-5"}"#);
+        std::thread::sleep(WAKE_GRACE * 3);
+        assert_eq!(record().agent_state.as_deref(), Some("working"), "the answering turn is on its way");
+
+        handle_line(&app, &sid, &proc, r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"m"}},"parent_tool_use_id":null}"#);
+        handle_line(&app, &sid, &proc, TURN_DONE);
+        assert_eq!(record().agent_state.as_deref(), Some("waiting"));
+        assert!(record().unread, "the answer is the result to read");
+    }
+
+    /// Background work that ends with no turn answering it returns the session to waiting on its own.
+    #[test]
+    fn background_work_that_ends_unanswered_settles_to_waiting() {
+        let _state_guard = crate::session_state::test_lock();
+        let (app, sid, proc) = background_fixture("bg-settle");
+        let shown = || crate::session_state::snapshot().get(&sid).and_then(|record| record.agent_state.clone());
+
+        handle_line(&app, &sid, &proc, LIVE_SHELL);
+        handle_line(&app, &sid, &proc, TURN_DONE);
+        assert_eq!(shown().as_deref(), Some("working"));
+
+        handle_line(&app, &sid, &proc, NO_TASKS);
+        handle_line(&app, &sid, &proc, SHELL_DONE);
+        std::thread::sleep(WAKE_GRACE * 4);
+        assert_eq!(shown().as_deref(), Some("waiting"));
+        let watched = crate::agent::status_watch::snapshot().1.into_iter().find(|row| row.session_id == sid).map(|row| row.state);
+        assert_eq!(watched, Some(AgentState::Waiting));
     }
 
     #[test]
@@ -8716,6 +9272,105 @@ mod tests {
         assert_eq!(listed[0].status, "ended", "a notification without a status still ends the task");
         assert!(listed[0].ended_at.is_some());
         manager.stop(&app, "s").unwrap();
+    }
+
+    #[test]
+    fn task_restart_clears_previous_outcome_and_unknown_status_is_not_terminal() {
+        let mut extras = ClaudeExtras::default();
+        fold_task_inventory(&mut extras, &[json!({"task_id":"one","task_type":"local_agent"})]);
+        fold_task_frame(&mut extras, "task_notification", &json!({"task_id":"one","status":"completed","summary":"old","output_file":"old.log","usage":{"duration_ms":100}}));
+        fold_task_frame(&mut extras, "task_updated", &json!({"task_id":"one","patch":{"status":"running"}}));
+        let task = &extras.published().background_tasks[0];
+        assert!(!task.finished);
+        assert!(task.can_stop);
+        assert!(task.ended_at.is_none() && task.summary.is_none() && task.output_file.is_none() && task.usage.is_none());
+        fold_task_frame(&mut extras, "task_updated", &json!({"task_id":"one","patch":{"status":"waiting_for_peer"}}));
+        let task = &extras.published().background_tasks[0];
+        assert!(!task.finished);
+        assert_eq!(task.status, "waiting_for_peer");
+        assert!(task.can_stop);
+    }
+
+    #[test]
+    fn inventory_reappearance_revives_only_a_synthetic_end() {
+        let mut extras = ClaudeExtras::default();
+        let inventory = [json!({"task_id":"one","task_type":"local_agent"})];
+        fold_task_inventory(&mut extras, &inventory);
+        fold_task_inventory(&mut extras, &[]);
+        assert!(extras.published().background_tasks[0].finished);
+        fold_task_inventory(&mut extras, &inventory);
+        assert_eq!(extras.background_tasks[0].status, "running");
+        assert!(extras.background_tasks[0].ended_at.is_none());
+        fold_task_frame(&mut extras, "task_updated", &json!({"task_id":"one","patch":{"status":"completed"}}));
+        fold_task_inventory(&mut extras, &[json!({"task_id":"one","status":"running"})]);
+        assert!(extras.published().background_tasks[0].finished, "a stale inventory cannot undo a terminal provider frame");
+    }
+
+    #[test]
+    fn provider_terminal_time_replaces_a_synthetic_inventory_end() {
+        let mut extras = ClaudeExtras::default();
+        let inventory = [json!({"task_id":"one"})];
+        fold_task_inventory(&mut extras, &inventory);
+        fold_task_inventory(&mut extras, &[]);
+        extras.background_tasks[0].ended_at = Some(1);
+        fold_task_frame(&mut extras, "task_notification", &json!({"task_id":"one","status":"completed"}));
+        assert!(extras.background_tasks[0].ended_at.unwrap() > 1);
+        fold_task_frame(&mut extras, "task_updated", &json!({"task_id":"one","patch":{"end_time":123}}));
+        fold_task_frame(&mut extras, "task_notification", &json!({"task_id":"one","status":"completed"}));
+        assert_eq!(extras.background_tasks[0].ended_at, Some(123));
+        fold_task_frame(&mut extras, "task_started", &json!({"task_id":"one"}));
+        fold_task_frame(&mut extras, "task_notification", &json!({"task_id":"one"}));
+        fold_task_inventory(&mut extras, &[]);
+        fold_task_inventory(&mut extras, &inventory);
+        assert_eq!(extras.background_tasks[0].status, "ended", "an explicit terminal notification stays terminal");
+    }
+
+    #[test]
+    fn foreground_completion_does_not_consume_background_retention() {
+        let mut extras = ClaudeExtras::default();
+        fold_task_inventory(&mut extras, &[json!({"task_id":"visible"})]);
+        fold_task_frame(&mut extras, "task_notification", &json!({"task_id":"visible","status":"completed"}));
+        for index in 0..50 {
+            fold_task_frame(&mut extras, "task_notification", &json!({"task_id":format!("hidden-{index}"),"status":"completed"}));
+        }
+        assert_eq!(extras.published().background_tasks[0].task_id, "visible");
+        assert_eq!(extras.background_tasks.len(), FINISHED_TASK_CAP + 1);
+    }
+
+    #[test]
+    fn workflow_progress_validates_entries_and_provides_distinct_stable_ids() {
+        let raw = json!([null, 1, {}, {"type":"future"},
+            {"type":"workflow_phase","title":"Alpha"},
+            {"type":"workflow_agent","label":"A","index":1,"tokens":"bad"},
+            {"type":"workflow_agent","label":"B","index":1},
+            {"type":"workflow_agent","label":"C","phaseIndex":null}]);
+        let normalized = normalize_workflow_progress(&raw);
+        let entries = normalized.as_array().unwrap();
+        assert_eq!(entries.len(), 4);
+        let ids: HashSet<_> = entries.iter().map(|entry| entry["id"].as_str().unwrap()).collect();
+        assert_eq!(ids.len(), entries.len());
+        assert!(entries[0].get("index").is_none());
+        assert!(entries[1].get("tokens").is_none());
+        assert_eq!(normalized, normalize_workflow_progress(&raw));
+    }
+
+    #[test]
+    fn task_elapsed_and_shutdown_are_backend_facts() {
+        let mut extras = ClaudeExtras::default();
+        fold_task_inventory(&mut extras, &[json!({"task_id":"one"})]);
+        extras.background_tasks[0].started_at = Some(1000);
+        extras.background_tasks[0].workflow_progress = Some(normalize_workflow_progress(&json!([
+            {"type":"workflow_agent","label":"A","state":"start","startedAt":1500}])));
+        let mut task = extras.background_tasks[0].clone();
+        task.publish(4000);
+        assert_eq!(task.elapsed_ms, 3000);
+        assert_eq!(task.workflow_progress.as_ref().unwrap()[0]["elapsedMs"], 2500);
+        assert_eq!(task.workflow_progress.as_ref().unwrap()[0]["elapsedRunning"], true);
+        end_background_tasks(&mut extras);
+        let task = &extras.published().background_tasks[0];
+        assert!(task.finished && !task.can_stop);
+        assert!(task.ended_at.is_some());
+        assert_eq!(task.workflow_progress.as_ref().unwrap()[0]["elapsedRunning"], false);
     }
 
     // ── Releasing the process when its view goes away ──

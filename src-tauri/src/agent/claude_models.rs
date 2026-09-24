@@ -21,9 +21,10 @@
 //! Everything here reads files and spawns `claude --version`, so callers must stay off the main
 //! thread; dispatch already runs this inside a blocking worker.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -53,8 +54,9 @@ const SETTINGS_ENV_KEYS: &[&str] = &[
 /// The right-hand side tracks what an alias currently resolves to, which moves when a new default
 /// ships: update these rows alongside the manifest whenever a family's newest release changes.
 const ALIASES: &[(&str, &str)] = &[
-    ("opus", "claude-opus-5"),
-    ("opus[1m]", "claude-opus-5"),
+    ("opus", "claude-opus-5-5"),
+    ("opus[1m]", "claude-opus-5-5"),
+    ("claude-opus-5-5[1m]", "claude-opus-5-5"),
     ("claude-opus-5[1m]", "claude-opus-5"),
     ("claude-fable-5[1m]", "claude-fable-5"),
     ("claude-fable-5-1[1m]", "claude-fable-5-1"),
@@ -197,9 +199,17 @@ pub fn from_live(models: &[serde_json::Value]) -> Vec<ClaudeModel> {
 /// The curated table, in the order the menu shows it: newest first, each family's 1M variant beside it.
 const MANIFEST: &[Entry] = &[
     Entry {
+        id: "claude-opus-5-5",
+        label: "Opus 5.5",
+        description: "Opus 5.5 · Latest release",
+        context_window: 1_000_000,
+        effort: EFFORT_XHIGH,
+        min_version: Some((2, 1, 280)),
+    },
+    Entry {
         id: "claude-opus-5",
         label: "Opus 5",
-        description: "Opus 5 · Latest release",
+        description: "Opus 5 · Previous release",
         context_window: 1_000_000,
         effort: EFFORT_XHIGH,
         min_version: Some((2, 1, 219)),
@@ -310,17 +320,59 @@ const MANIFEST: &[Entry] = &[
     },
 ];
 
+/// The model list a running Claude process last reported, kept per executable.
+///
+/// The installed CLI is the only source that knows a model released after the table below was written.
+/// A conversation that already answered leaves its list here, so a resting session and the new-session
+/// dialog offer the same models instead of falling back to the table alone. Nothing is spawned to fill
+/// this: it holds what a session reported on its own.
+static REPORTED: Mutex<Option<HashMap<String, Vec<ClaudeModel>>>> = Mutex::new(None);
+
+/// Record what the CLI behind `bin` reported, for the menus that have no process of their own.
+pub fn remember_reported(bin: &str, models: &[ClaudeModel]) {
+    if models.is_empty() {
+        return;
+    }
+    let mut guard = REPORTED.lock().unwrap();
+    guard
+        .get_or_insert_with(HashMap::new)
+        .insert(bin.to_string(), models.to_vec());
+}
+
+fn reported(bin: &str) -> Option<Vec<ClaudeModel>> {
+    REPORTED.lock().unwrap().as_ref()?.get(bin).cloned()
+}
+
+/// The path the installed Claude Code is launched from, or the bare name when no install is found.
+fn installed_bin() -> String {
+    crate::agent::install::locate_installed_bin("claude").unwrap_or_else(|| "claude".to_string())
+}
+
 /// The models a Claude chat session can be switched to.
 ///
 /// A failure to read the version or the settings file is not an error: the catalogue degrades to the
 /// full curated table, which is still usable, rather than leaving the chip empty.
+///
+/// The version is read on every call rather than once per run. Claude Code updates itself in the
+/// background, so a version remembered from startup keeps hiding the models a newer binary accepts
+/// until the whole application restarts.
 pub fn list() -> Vec<ClaudeModel> {
-    list_with_version(installed_version())
+    list_for_bin(&installed_bin())
 }
 
 /// Catalogue for the executable selected in application settings.
+///
+/// What this binary reported earlier is appended rather than substituted: the curated order stays as
+/// written, and a model only the CLI knows still reaches the menu instead of being hidden until the
+/// table catches up.
 pub fn list_for_bin(bin: &str) -> Vec<ClaudeModel> {
-    list_with_version(read_version_for_bin(bin))
+    let mut out = list_with_version(read_version_for_bin(bin));
+    for model in reported(bin).unwrap_or_default() {
+        if !out.iter().any(|m| m.id == model.id) {
+            out.push(model);
+        }
+    }
+    out
 }
 
 fn list_with_version(version: Option<(u32, u32, u32)>) -> Vec<ClaudeModel> {
@@ -377,22 +429,6 @@ fn accepts(entry: &Entry, version: Option<(u32, u32, u32)>) -> bool {
         (Some(min), Some(have)) => have >= min,
         _ => true,
     }
-}
-
-/// The installed Claude Code version, resolved once per run.
-///
-/// Caching is safe here in the way that matters: an upgrade mid-run can only leave the catalogue
-/// listing slightly fewer models than the new binary accepts, and the next launch corrects it.
-fn installed_version() -> Option<(u32, u32, u32)> {
-    static CACHE: OnceLock<Option<(u32, u32, u32)>> = OnceLock::new();
-    *CACHE.get_or_init(read_version)
-}
-
-/// Run `claude --version` and parse the leading `major.minor.patch`.
-fn read_version() -> Option<(u32, u32, u32)> {
-    let bin = crate::agent::install::locate_installed_bin("claude")
-        .unwrap_or_else(|| "claude".to_string());
-    read_version_for_bin(&bin)
 }
 
 fn read_version_for_bin(bin: &str) -> Option<(u32, u32, u32)> {
@@ -503,11 +539,12 @@ mod tests {
             .iter()
             .any(|m| m.id == "default" || m.id == "gateway-x"));
         assert_eq!(models.iter().filter(|m| m.id == "claude-opus-5").count(), 1);
-        assert_eq!(models[0].label, "Opus 5");
-        assert_eq!(models[0].effort_levels, vec!["low", "high"]);
-        assert!(models[0].supports_fast_mode);
+        let opus5 = models.iter().find(|m| m.id == "claude-opus-5").unwrap();
+        assert_eq!(opus5.label, "Opus 5");
+        assert_eq!(opus5.effort_levels, vec!["low", "high"]);
+        assert!(opus5.supports_fast_mode);
         assert!(
-            models[0].context_window.is_some(),
+            opus5.context_window.is_some(),
             "borrowed from the curated table"
         );
         let gateway = models.iter().find(|m| m.id == "gateway-y").unwrap();
@@ -518,7 +555,7 @@ mod tests {
         assert!(!disabled.iter().any(|m| m.id == "claude-sonnet-4-6"));
         assert!(disabled.iter().any(|m| m.id == "claude-sonnet-4-6[1m]"));
         for entry in MANIFEST {
-            if accepts(entry, installed_version()) {
+            if accepts(entry, read_version_for_bin(&installed_bin())) {
                 assert!(
                     models.iter().any(|m| m.id == entry.id),
                     "missing {}",
@@ -536,11 +573,15 @@ mod tests {
 
     #[test]
     fn hides_entries_the_installed_cli_predates() {
-        let opus5 = &MANIFEST[0];
+        let entry = |id: &str| MANIFEST.iter().find(|e| e.id == id).unwrap();
+        let opus5 = entry("claude-opus-5");
         assert!(!accepts(opus5, Some((2, 1, 200))));
         assert!(accepts(opus5, Some((2, 1, 219))));
         // An unknown version must not hide anything.
         assert!(accepts(opus5, None));
+        let opus55 = entry("claude-opus-5-5");
+        assert!(!accepts(opus55, Some((2, 1, 278))));
+        assert!(accepts(opus55, Some((2, 1, 280))));
     }
 
     #[test]
@@ -580,6 +621,38 @@ mod tests {
             .map(|entry| entry.id)
             .collect();
         assert_eq!(opus5, vec!["claude-opus-5"]);
+    }
+
+    #[test]
+    fn folds_the_live_opus_5_5_one_million_spelling_into_one_entry() {
+        // Claude Code 2.1.280 reports its Opus row as `opus[1m]` resolving to `claude-opus-5-5[1m]`.
+        let models = from_live(&[serde_json::json!({
+            "value": "opus[1m]", "resolvedModel": "claude-opus-5-5[1m]",
+            "displayName": "Opus (1M context)", "supportsFastMode": true
+        })]);
+        assert_eq!(models.iter().filter(|m| m.id == "claude-opus-5-5").count(), 1);
+        assert!(!models.iter().any(|m| m.id == "claude-opus-5-5[1m]"));
+    }
+
+    #[test]
+    fn appends_reported_models_the_curated_table_does_not_list() {
+        let bin = "/test/appends-reported/claude";
+        let reported = from_live(&[serde_json::json!({
+            "value": "test-unreleased", "displayName": "Unreleased",
+            "supportedEffortLevels": ["low", "high"]
+        })]);
+        remember_reported(bin, &reported);
+        let models = list_for_bin(bin);
+        let curated = list_with_version(None);
+        // The curated order is untouched and the model only the CLI named is offered after it.
+        assert_eq!(
+            models.iter().position(|m| m.id == "test-unreleased"),
+            Some(models.len() - 1)
+        );
+        for entry in &curated {
+            assert!(models.iter().any(|m| m.id == entry.id), "dropped {}", entry.id);
+        }
+        assert_eq!(models.iter().filter(|m| m.id == "claude-opus-5-5").count(), 1);
     }
 
     #[test]

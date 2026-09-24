@@ -1,4 +1,4 @@
-import type { ChatModel } from "./chat";
+import type { LaunchModel } from "./launch";
 import { invoke } from "./transport";
 import { getLocale } from "../i18n";
 export interface AuditRequest { projectId: string; agent: string; scope: string; path: string; language?: string; model?: string | null; effort?: string | null }
@@ -15,7 +15,7 @@ export interface CanonicalFinding {
   codeEvidence?: {id: string; path: string; startLine: number; endLine?: number; code: string}[];
 }
 export interface AuditRun extends AuditRequest {
-  id: string; sessionId: string; root: string; status: string; phase: string; createdAt: number; updatedAt: number;
+  id: string; sessionId: string; agentLabel: string; root: string; status: string; phase: string; createdAt: number; updatedAt: number;
   files: { path: string; sha256: string }[]; excluded: string[]; reviewed: string[];
   findings: AuditFinding[]; threatModel: string; gaps: string[]; error: string;
   steps: { id: string; phase: string; summary: string; durationMs: number; findingCount: number }[];
@@ -32,7 +32,7 @@ export interface AuditRun extends AuditRequest {
     coverage?: { completeness: string; deferred: {id: string; reason: string}[] };
   } | null;
 }
-export type AuditSummary = Pick<AuditRun,"id"|"agent"|"status"|"phase"|"createdAt"|"scope"|"path"|"model"|"effort"> & {findingCount: number};
+export type AuditSummary = Pick<AuditRun,"id"|"agent"|"agentLabel"|"status"|"phase"|"createdAt"|"scope"|"path"|"model"|"effort"> & {findingCount: number};
 export interface AuditOptions { agents: {id: string; label: string}[]; scopes: string[]; defaultAgent: string; defaultScope: string; workflow: {phases: string[]; package: string; packageVersion: string; pluginVersion: string; adapter: string} }
 export const auditOptions = () => invoke<AuditOptions>("security_options");
 export const auditList = (projectId: string) => invoke<AuditSummary[]>("security_list",{projectId});
@@ -41,4 +41,4 @@ export const auditStart = (request: AuditRequest) => invoke<AuditRun>("security_
 export const auditCancel = (id: string) => invoke<AuditRun>("security_cancel",{id});
 export const auditExport = (id: string) => invoke<{markdown: string; run: AuditRun}>("security_export",{id});
 
-export const auditModels = (agent: string) => invoke<ChatModel[]>("security_models", {agent});
+export const auditModels = (agent: string) => invoke<LaunchModel[]>("security_models", {agent});

@@ -27,6 +27,9 @@ pub struct Request {
     pub target: Option<String>,
     #[serde(default)]
     pub report: bool,
+    /// Join the recipient's running turn instead of waiting for it to end.
+    #[serde(default)]
+    pub steer: bool,
     #[serde(default)]
     pub round: Option<u32>,
     pub message_id: String,
@@ -71,6 +74,10 @@ pub fn send(app: &AppCtx, req: &Request) -> Result<Value, String> {
         .as_deref()
         .map(|value| resolve(app, value))
         .transpose()?;
+    if req.report && req.steer {
+        // Reports are read after the planner's current turn, never inside it.
+        return Err("--steer cannot be combined with --report".into());
+    }
     if req.report {
         return super::plan_execute::report(app, req, target.as_deref());
     }
@@ -130,8 +137,14 @@ pub fn send(app: &AppCtx, req: &Request) -> Result<Value, String> {
             wire
         }
     };
-    let delivery = deliver(app, &target, &wire, &req.message_id)?;
+    let delivery = deliver(app, &target, &wire, &req.message_id, behavior(req.steer))?;
     Ok(json!({"delivery":delivery,"messageId":req.message_id,"targetSessionId":target}))
+}
+
+/// The submission behavior a request asks for. Steering joins the turn already running; queuing waits
+/// for it to end. A steer with no turn to join is sent as an ordinary message rather than refused.
+pub(super) fn behavior(steer: bool) -> &'static str {
+    if steer { "steer" } else { "queue" }
 }
 
 /// Both workflow and ordinary messages use native chat submission receipts and busy-session queues.
@@ -140,19 +153,20 @@ pub(super) fn deliver(
     target: &str,
     wire: &str,
     id: &str,
+    behavior: &str,
 ) -> Result<&'static str, String> {
-    deliver_with_images(app, target, wire, id, vec![])
+    deliver_with_images(app, target, wire, id, vec![], behavior)
 }
 
 pub(super) fn deliver_with_images(
     app: &AppCtx, target: &str, wire: &str, id: &str,
-    images: Vec<super::chat::protocol::ChatImage>,
+    images: Vec<super::chat::protocol::ChatImage>, behavior: &str,
 ) -> Result<&'static str, String> {
     let result = (|| {
         if !app.chat().is_alive(target) {
             core::chat_start(app, target, None, None, false)?;
         }
-        core::chat_send(app, target, wire, images, Some("queue"), Some(id))
+        core::chat_send(app, target, wire, images, Some(behavior), Some(id))
     })();
     result.map_err(|error| format!("Delivery to {target} failed: {error}. Message {id} is retained; retry the same command with this message ID and unchanged text."))
 }
@@ -240,10 +254,12 @@ pub fn handle(app: AppCtx, mut request: crate::diagnostics::HttpRequest, token: 
     );
 }
 
-const USAGE: &str = "usage: vtell <session> [--message-id msg-UUID] [message...]
+const USAGE: &str = "usage: vtell <session> [--steer] [--message-id msg-UUID] [message...]
        vtell [planner-session] --report --round N [--message-id msg-UUID] [message...]
 Read UTF-8 text from stdin when no message arguments are provided.
 Targets accept a session ID, an ID prefix of at least 8 characters, or an unambiguous name.
+--steer joins the turn the recipient is running instead of waiting for it to end. The delivery
+receipt reads \"steered\" only when the message actually joined a running turn.
 --report submits the executor's result for review; its planner is the default target.
 Keep the printed message ID and exact text when retrying an uncertain delivery.";
 
@@ -261,6 +277,7 @@ fn parse_args(args: &[String]) -> Result<Option<Request>, String> {
             "--help" | "-h" if options => return Ok(None),
             "--" if options => options = false,
             "--report" if options => req.report = true,
+            "--steer" if options => req.steer = true,
             _ if options
                 && (arg == "--round"
                     || arg == "--message-id"
@@ -297,6 +314,9 @@ fn parse_args(args: &[String]) -> Result<Option<Request>, String> {
     }
     if !req.report && req.round.is_some() {
         return Err("--round requires --report".into());
+    }
+    if req.report && req.steer {
+        return Err("--steer cannot be combined with --report".into());
     }
     if !req.report && req.target.is_none() {
         return Err("Specify a target session".into());
@@ -413,6 +433,26 @@ mod tests {
     }
 
     #[test]
+    fn parse_reads_the_steer_flag_and_maps_it_to_a_submission_behavior() {
+        let req = parse_args(&args(&["executor", "A remark on the work in progress"]))
+            .unwrap()
+            .unwrap();
+        assert!(!req.steer);
+        assert_eq!(behavior(req.steer), "queue");
+        let req = parse_args(&args(&["executor", "--steer", "A remark on the work in progress"]))
+            .unwrap()
+            .unwrap();
+        assert!(req.steer);
+        assert_eq!(behavior(req.steer), "steer");
+        assert_eq!(req.text, "A remark on the work in progress");
+        let req = parse_args(&args(&["executor", "--", "--steer", "is literal here"]))
+            .unwrap()
+            .unwrap();
+        assert!(!req.steer);
+        assert_eq!(req.text, "--steer is literal here");
+    }
+
+    #[test]
     fn parse_rejects_missing_or_misplaced_round_and_keeps_retry_id() {
         for values in [
             vec![],
@@ -420,6 +460,7 @@ mod tests {
             vec!["planner", "--round", "1"],
             vec!["--report", "--round", "invalid"],
             vec!["planner", "--unknown"],
+            vec!["--report", "--round", "1", "--steer"],
         ] {
             assert!(parse_args(&args(&values)).is_err(), "{values:?}");
         }

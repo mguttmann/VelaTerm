@@ -7,7 +7,14 @@ import type { MemoryJob } from "../../ipc/memory";
 const api = vi.hoisted(() => ({ jobs: vi.fn(), cancel: vi.fn(), start: vi.fn() }));
 vi.mock("../../ipc/memory", () => ({
   memoryJobs: api.jobs, memoryCancel: api.cancel, memoryStart: api.start, memoryRetry: vi.fn(),
-  memoryOptions: async () => ({ agents: [{ id: "codex", label: "Codex", available: true }], defaultAgent: "codex" }),
+  memoryOptions: async () => ({
+    agents: [
+      { id: "claude", label: "Claude", available: false },
+      { id: "codex", label: "Codex", available: true },
+      { id: "pi", label: "Pi", available: true },
+    ],
+    defaultAgent: "codex",
+  }),
   memoryModels: async () => [],
 }));
 vi.mock("../../store/termStore", () => ({
@@ -17,7 +24,7 @@ vi.mock("../../store/termStore", () => ({
   ),
 }));
 const job = (id: string, status: string): MemoryJob => ({
-  id, status, sessionName: `Session ${id}`, sourceId: `source-${id}`, agent: "codex", model: "", effort: "",
+  id, status, sessionName: `Session ${id}`, sourceId: `source-${id}`, agent: "codex", agentLabel: "Codex", model: "", effort: "",
   stage: "extract", progress: 0, total: 1, error: "", entries: [], createdAt: 0, updatedAt: 0,
 });
 beforeEach(() => {
@@ -55,4 +62,26 @@ it("shows parallel sessions and lets the user cancel a replacement waiting for i
   await waitFor(() => expect(api.cancel).toHaveBeenCalledWith("latest"));
   await screen.findByText("Cancelled");
   expect(screen.getAllByText("In progress")).toHaveLength(2);
+});
+
+it("offers every organizer agent and starts the job with the one that was picked", async () => {
+  api.start.mockResolvedValue({ id: "picked", reused: false });
+  render(<MemoryCompile sessionId="session" />);
+  const agents = await screen.findByRole("combobox", { name: "Agent" });
+  fireEvent.click(agents);
+  // An agent whose CLI is missing stays listed and stays unselectable, so its absence is visible.
+  const unavailable = screen.getByRole("option", { name: /Claude/ });
+  expect(unavailable.getAttribute("aria-disabled")).toBe("true");
+  fireEvent.click(screen.getByRole("option", { name: "Pi" }));
+  await waitFor(() => expect(agents.textContent).toContain("Pi"));
+  fireEvent.click(screen.getByRole("button", { name: "Organize and save" }));
+  await waitFor(() => expect(api.start).toHaveBeenCalledWith("session", "pi", "", ""));
+});
+
+it("names the agent of a past job from the backend label", async () => {
+  const past = { ...job("A", "completed"), agent: "omp", agentLabel: "OMP" };
+  api.jobs.mockResolvedValue({ jobs: [past], total: 1, pageSize: 40 });
+  render(<MemoryJobs />);
+  const article = (await screen.findByRole("link", { name: "Session A" })).closest("article")!;
+  expect(within(article).getByText(/OMP/)).toBeTruthy();
 });

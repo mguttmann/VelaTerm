@@ -45,10 +45,7 @@ pub struct StatusWatch {
 /// The process's status watch.
 fn watch() -> &'static StatusWatch {
     static WATCH: OnceLock<StatusWatch> = OnceLock::new();
-    WATCH.get_or_init(|| StatusWatch {
-        inner: Mutex::new(Inner::default()),
-        cv: Condvar::new(),
-    })
+    WATCH.get_or_init(StatusWatch::new)
 }
 
 fn now_secs() -> i64 {
@@ -60,33 +57,13 @@ fn now_secs() -> i64 {
 
 /// Record a session's state and wake anything waiting.
 ///
-/// Called from the hook service's request loop, so it must stay a fast in-memory operation: that loop
-/// also carries agent status callbacks and cannot be delayed.
+/// Called from the hook service's request loop and from the chat engine's state reports, so it must stay
+/// a fast in-memory operation: that loop also carries agent status callbacks and cannot be delayed.
 ///
 /// An unchanged state still refreshes the timestamp but does **not** bump the version, so a session
 /// re-reporting `working` on every tool call cannot wake every waiter each time.
 pub fn record(session_id: &str, state: AgentState) {
-    let Ok(mut inner) = watch().inner.lock() else {
-        return;
-    };
-    let changed = inner
-        .states
-        .get(session_id)
-        .map(|prev| prev.state != state)
-        .unwrap_or(true);
-    inner.states.insert(
-        session_id.to_string(),
-        StatusRow {
-            session_id: session_id.to_string(),
-            state,
-            updated_at: now_secs(),
-        },
-    );
-    if changed {
-        inner.version += 1;
-        drop(inner);
-        watch().cv.notify_all();
-    }
+    watch().record(session_id, state)
 }
 
 /// Mark a session that has already reported as no longer busy, for when its process ends.
@@ -95,36 +72,17 @@ pub fn record(session_id: &str, state: AgentState) {
 /// listings just because it closed. An agent whose process exits mid-turn sends no Stop, and without
 /// this a watcher would wait on it forever.
 pub fn settle(session_id: &str) {
-    let known = watch()
-        .inner
-        .lock()
-        .map(|inner| inner.states.contains_key(session_id))
-        .unwrap_or(false);
-    if known {
-        record(session_id, AgentState::Waiting);
-    }
+    watch().settle(session_id)
 }
 
 /// Forget a session, so a deleted one stops appearing in listings.
 pub fn forget(session_id: &str) {
-    let Ok(mut inner) = watch().inner.lock() else {
-        return;
-    };
-    if inner.states.remove(session_id).is_some() {
-        inner.version += 1;
-        drop(inner);
-        watch().cv.notify_all();
-    }
+    watch().forget(session_id)
 }
 
 /// Current version and every known session's state, ordered by id for a stable listing.
 pub fn snapshot() -> (u64, Vec<StatusRow>) {
-    let Ok(inner) = watch().inner.lock() else {
-        return (0, Vec::new());
-    };
-    let mut rows: Vec<StatusRow> = inner.states.values().cloned().collect();
-    rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
-    (inner.version, rows)
+    watch().snapshot()
 }
 
 /// Block until the version moves past `since`, or `timeout` elapses.
@@ -134,69 +92,124 @@ pub fn snapshot() -> (u64, Vec<StatusRow>) {
 ///
 /// Callers run this off the hook service's accept loop — it parks for as long as the caller asked.
 pub fn wait_for_change(since: u64, timeout: Duration) -> (u64, Vec<StatusRow>) {
-    let Ok(inner) = watch().inner.lock() else {
-        return (0, Vec::new());
-    };
-    let (inner, _) = watch()
-        .cv
-        .wait_timeout_while(inner, timeout, |i| i.version <= since)
-        .unwrap_or_else(|e| e.into_inner());
-    let mut rows: Vec<StatusRow> = inner.states.values().cloned().collect();
-    rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
-    (inner.version, rows)
+    watch().wait_for_change(since, timeout)
+}
+
+/// The functions above, on one watch. The process uses a single one; tests build their own so that
+/// sessions recorded elsewhere in the test binary cannot move the version they assert on.
+impl StatusWatch {
+    fn new() -> Self {
+        StatusWatch {
+            inner: Mutex::new(Inner::default()),
+            cv: Condvar::new(),
+        }
+    }
+
+    fn record(&self, session_id: &str, state: AgentState) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        let changed = inner
+            .states
+            .get(session_id)
+            .map(|prev| prev.state != state)
+            .unwrap_or(true);
+        inner.states.insert(
+            session_id.to_string(),
+            StatusRow {
+                session_id: session_id.to_string(),
+                state,
+                updated_at: now_secs(),
+            },
+        );
+        if changed {
+            inner.version += 1;
+            drop(inner);
+            self.cv.notify_all();
+        }
+    }
+
+    fn settle(&self, session_id: &str) {
+        let known = self
+            .inner
+            .lock()
+            .map(|inner| inner.states.contains_key(session_id))
+            .unwrap_or(false);
+        if known {
+            self.record(session_id, AgentState::Waiting);
+        }
+    }
+
+    fn forget(&self, session_id: &str) {
+        let Ok(mut inner) = self.inner.lock() else {
+            return;
+        };
+        if inner.states.remove(session_id).is_some() {
+            inner.version += 1;
+            drop(inner);
+            self.cv.notify_all();
+        }
+    }
+
+    fn snapshot(&self) -> (u64, Vec<StatusRow>) {
+        let Ok(inner) = self.inner.lock() else {
+            return (0, Vec::new());
+        };
+        let mut rows: Vec<StatusRow> = inner.states.values().cloned().collect();
+        rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        (inner.version, rows)
+    }
+
+    fn wait_for_change(&self, since: u64, timeout: Duration) -> (u64, Vec<StatusRow>) {
+        let Ok(inner) = self.inner.lock() else {
+            return (0, Vec::new());
+        };
+        let (inner, _) = self
+            .cv
+            .wait_timeout_while(inner, timeout, |i| i.version <= since)
+            .unwrap_or_else(|e| e.into_inner());
+        let mut rows: Vec<StatusRow> = inner.states.values().cloned().collect();
+        rows.sort_by(|a, b| a.session_id.cmp(&b.session_id));
+        (inner.version, rows)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Tests share one process-wide watch and assert on its version counter, so they must not overlap:
-    /// another test recording a state would bump the version between two snapshots here.
-    fn exclusive() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn ids(tag: &str) -> (String, String) {
-        (format!("{tag}-a"), format!("{tag}-b"))
-    }
-
     #[test]
     fn record_bumps_the_version_only_on_a_real_change() {
-        let _guard = exclusive();
-        let (a, _) = ids("bump");
-        let (before, _) = snapshot();
-        record(&a, AgentState::Working);
-        let (after_first, rows) = snapshot();
+        let watch = StatusWatch::new();
+        let (before, _) = watch.snapshot();
+        watch.record("a", AgentState::Working);
+        let (after_first, rows) = watch.snapshot();
         assert!(after_first > before, "a new session is a change");
         assert_eq!(
-            rows.iter().find(|r| r.session_id == a).map(|r| r.state),
+            rows.iter().find(|r| r.session_id == "a").map(|r| r.state),
             Some(AgentState::Working)
         );
 
         // Re-reporting the same state must not wake waiters: an agent posts `working` on every tool
         // call, and each one would otherwise be an event.
-        record(&a, AgentState::Working);
-        let (after_same, _) = snapshot();
+        watch.record("a", AgentState::Working);
+        let (after_same, _) = watch.snapshot();
         assert_eq!(after_same, after_first);
 
-        record(&a, AgentState::Waiting);
-        let (after_change, _) = snapshot();
+        watch.record("a", AgentState::Waiting);
+        let (after_change, _) = watch.snapshot();
         assert!(after_change > after_first);
     }
 
     #[test]
     fn wait_returns_at_once_when_the_caller_is_behind() {
-        let _guard = exclusive();
-        let (a, _) = ids("behind");
-        record(&a, AgentState::Working);
-        let (version, _) = snapshot();
+        let watch = StatusWatch::new();
+        watch.record("a", AgentState::Working);
+        let (version, _) = watch.snapshot();
         // The change already happened, so waiting on an older version must not park at all — this is
         // exactly the lost-wakeup case the version counter exists for.
         let started = std::time::Instant::now();
-        let (got, _) = wait_for_change(version - 1, Duration::from_secs(30));
+        let (got, _) = watch.wait_for_change(version - 1, Duration::from_secs(30));
         assert!(got >= version);
         assert!(
             started.elapsed() < Duration::from_secs(1),
@@ -207,62 +220,59 @@ mod tests {
 
     #[test]
     fn wait_wakes_on_a_change_and_otherwise_times_out() {
-        let _guard = exclusive();
-        let (_, b) = ids("wake");
-        let (version, _) = snapshot();
-        let sid = b.clone();
+        let watch = std::sync::Arc::new(StatusWatch::new());
+        let (version, _) = watch.snapshot();
+        let recorder = watch.clone();
         std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(120));
-            record(&sid, AgentState::Asking);
+            recorder.record("b", AgentState::Asking);
         });
         let started = std::time::Instant::now();
-        let (got, rows) = wait_for_change(version, Duration::from_secs(10));
+        let (got, rows) = watch.wait_for_change(version, Duration::from_secs(10));
         assert!(got > version, "the waiter should have been woken");
         assert!(started.elapsed() < Duration::from_secs(5));
         assert_eq!(
-            rows.iter().find(|r| r.session_id == b).map(|r| r.state),
+            rows.iter().find(|r| r.session_id == "b").map(|r| r.state),
             Some(AgentState::Asking)
         );
 
         // With nothing happening it returns on the deadline rather than hanging.
-        let (current, _) = snapshot();
+        let (current, _) = watch.snapshot();
         let started = std::time::Instant::now();
-        let (after, _) = wait_for_change(current, Duration::from_millis(200));
+        let (after, _) = watch.wait_for_change(current, Duration::from_millis(200));
         assert_eq!(after, current, "a timeout reports no change");
         assert!(started.elapsed() >= Duration::from_millis(150));
     }
 
     #[test]
     fn settle_only_touches_sessions_that_have_reported() {
-        let _guard = exclusive();
-        let (a, b) = ids("settle");
-        record(&a, AgentState::Working);
-        let (version, _) = snapshot();
-        settle(&a);
-        let (after, rows) = snapshot();
+        let watch = StatusWatch::new();
+        watch.record("a", AgentState::Working);
+        let (version, _) = watch.snapshot();
+        watch.settle("a");
+        let (after, rows) = watch.snapshot();
         assert!(after > version, "an exiting worker is a change");
         assert_eq!(
-            rows.iter().find(|r| r.session_id == a).map(|r| r.state),
+            rows.iter().find(|r| r.session_id == "a").map(|r| r.state),
             Some(AgentState::Waiting)
         );
         // A session nobody has heard from stays absent: closing a terminal is not a report.
-        settle(&b);
-        let (unchanged, rows) = snapshot();
+        watch.settle("b");
+        let (unchanged, rows) = watch.snapshot();
         assert_eq!(unchanged, after);
-        assert!(!rows.iter().any(|r| r.session_id == b));
+        assert!(!rows.iter().any(|r| r.session_id == "b"));
     }
 
     #[test]
     fn forget_drops_a_session_from_listings() {
-        let _guard = exclusive();
-        let (a, _) = ids("forget");
-        record(&a, AgentState::Working);
-        assert!(snapshot().1.iter().any(|r| r.session_id == a));
-        forget(&a);
-        assert!(!snapshot().1.iter().any(|r| r.session_id == a));
+        let watch = StatusWatch::new();
+        watch.record("a", AgentState::Working);
+        assert!(watch.snapshot().1.iter().any(|r| r.session_id == "a"));
+        watch.forget("a");
+        assert!(!watch.snapshot().1.iter().any(|r| r.session_id == "a"));
         // Forgetting something unknown is a no-op, not a spurious wakeup.
-        let (version, _) = snapshot();
-        forget("never-existed");
-        assert_eq!(snapshot().0, version);
+        let (version, _) = watch.snapshot();
+        watch.forget("never-existed");
+        assert_eq!(watch.snapshot().0, version);
     }
 }

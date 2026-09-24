@@ -31,6 +31,18 @@ pub struct LaunchOption {
     pub effort_levels: Vec<&'static str>,
 }
 
+/// Display name for one agent kind.
+///
+/// The catalogue is the single source of these names, so a feature that lists agents outside the spawn
+/// dialog spells them the same way rather than keeping its own copy.
+pub fn label(kind: SessionKind) -> String {
+    catalog()
+        .into_iter()
+        .find(|option| option.id == kind)
+        .map(|option| option.label.to_string())
+        .unwrap_or_else(|| kind.as_str().to_string())
+}
+
 pub fn catalog() -> Vec<LaunchOption> {
     use SessionKind::*;
     let entries: &[(SessionKind, &str, Option<&str>, &[&str])] = &[

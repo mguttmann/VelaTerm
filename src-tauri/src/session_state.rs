@@ -57,7 +57,9 @@ pub struct SessionState {
     pub agent: Option<String>,
     /// What that agent is doing: `working`, `asking`, or `waiting`. Meaningless without an agent.
     pub agent_state: Option<String>,
-    /// Codex's activity source, `hooks` or `legacy`, chosen at launch. Other agents leave it unset.
+    /// Where the activity state comes from, declared at launch: `chat` for a conversation-view session
+    /// driven over the agent's own protocol, `hooks` or `legacy` for a Codex terminal session. Other
+    /// terminal sessions leave it unset.
     pub state_source: Option<String>,
     /// Whether modern Codex has completed its SessionStart handshake, proving its hooks actually run.
     pub hook_ready: bool,
@@ -73,6 +75,8 @@ pub struct SessionState {
     /// starts a process. That is how a browser connecting to a desktop that had merely *restored* a
     /// workspace launched every one of those sessions for real.
     pub alive: bool,
+    /// Commands this session started with `vrun` that are still running, oldest first.
+    pub runs: Vec<crate::agent::runs::RunBrief>,
     /// Milliseconds since the epoch of the last change, for clients that need to order records.
     pub updated_at: u64,
 }
@@ -82,6 +86,11 @@ pub struct SessionState {
 /// Agents commonly emit "started" and "finished" within the same instant — a tool call that returns
 /// immediately, a turn that produces no output. Showing both would flash green and go straight back, so a
 /// finish arriving this soon after a start waits out the remainder before it is applied.
+///
+/// Conversation-view sessions are exempt. Their states are the protocol's own turn boundaries rather
+/// than hook callbacks racing each other, and the pane that shows them already ends the turn at once:
+/// holding the dot on `working` would keep its stop button up after the turn is over, and hide a
+/// permission question that follows an answered one.
 const WORKING_HOLD: Duration = Duration::from_millis(1200);
 
 struct Hub {
@@ -169,7 +178,7 @@ fn update_with(
 
         let left_working =
             before.agent_state.as_deref() == Some("working") && candidate.agent_state.as_deref() != Some("working");
-        if left_working && hold {
+        if left_working && hold && candidate.state_source.as_deref() != Some("chat") {
             if let Some(remaining) = guard
                 .working_since
                 .get(session_id)
@@ -267,6 +276,11 @@ pub fn set_alive(ctx: &AppCtx, session_id: &str, alive: bool) -> bool {
     update(ctx, session_id, |s| s.alive = alive)
 }
 
+/// Record the session's live `vrun` commands, as the runs registry last found them.
+pub fn set_runs(ctx: &AppCtx, session_id: &str, runs: Vec<crate::agent::runs::RunBrief>) -> bool {
+    update(ctx, session_id, |s| s.runs = runs)
+}
+
 /// A deliberately stopped chat process has no active turn. Apply this immediately, without the
 /// display hold, so a delayed Waiting transition cannot overwrite a replacement's Working state.
 pub fn set_stopped(ctx: &AppCtx, session_id: &str) -> bool {
@@ -289,6 +303,10 @@ const NOTIFY_STATES: [&str; 2] = ["asking", "waiting"];
 /// - a **notify** signal (OSC 9 / OSC 777) on a session with no authoritative hook source, which is the
 ///   same fallback rule the frontend applied to avoid duplicating a hook-driven notification.
 ///
+/// The same kind of transition into `working` clears the marker. The session has moved past the result
+/// or question the marker pointed at, and keeping it would hide the working state behind it until
+/// someone opened the session. The marker comes back when this turn ends, with the new result.
+///
 /// What deliberately does *not* appear here is the visibility test. A client used to skip the marker
 /// when its own window was focused and showing the session; that made "unread" mean "unread on this
 /// device". The marker is now raised unconditionally, and the client watching the session clears it
@@ -300,7 +318,8 @@ pub fn observe_status(
     previous: Option<&serde_json::Value>,
 ) {
     let kind = payload.get("kind").and_then(serde_json::Value::as_str);
-    let notable = match kind {
+    // The state a non-silent state signal moves the session into, when it differs from the one displayed.
+    let entered = match kind {
         Some("state") => {
             let silent = payload
                 .get("silent")
@@ -310,21 +329,27 @@ pub fn observe_status(
             let prev_state = previous
                 .and_then(|p| p.get("state"))
                 .and_then(serde_json::Value::as_str);
-            !silent
-                && state.is_some_and(|s| NOTIFY_STATES.contains(&s))
-                && state != prev_state
+            state.filter(|_| !silent && state != prev_state)
         }
+        _ => None,
+    };
+    let notable = match kind {
+        Some("state") => entered.is_some_and(|s| NOTIFY_STATES.contains(&s)),
         Some("notify") => !previous
             .and_then(|p| p.get("authoritative"))
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false),
         _ => false,
     };
+    let resumed = entered == Some("working");
     // One update for both, so a signal that changes state and raises the marker produces one broadcast.
     update(ctx, session_id, |record| {
         apply_signal(record, payload);
         if notable {
             record.unread = true;
+        }
+        if resumed {
+            record.unread = false;
         }
     });
     if notable {
@@ -581,6 +606,32 @@ mod tests {
         let app = ctx("working");
         observe_status(&app, "s1", &state("working", false), None);
         assert!(!unread_of("s1"));
+    }
+
+    /// Work starting again clears the marker. The session has moved past the result it pointed at, and
+    /// the working state must show instead of a marker nobody has looked at yet.
+    #[test]
+    fn resuming_work_clears_the_marker() {
+        let _lock = test_lock();
+        let app = ctx("resume");
+        observe_status(&app, "s1", &state("waiting", false), Some(&state("working", false)));
+        assert!(unread_of("s1"));
+        observe_status(&app, "s1", &state("working", false), Some(&state("waiting", false)));
+        assert!(!unread_of("s1"));
+        assert_eq!(snapshot()["s1"].agent_state.as_deref(), Some("working"));
+    }
+
+    /// Only a real transition clears it. A silent replay on attach, or a repeat of the working state
+    /// already shown, says nothing new about the session.
+    #[test]
+    fn a_silent_or_repeated_working_keeps_the_marker() {
+        let _lock = test_lock();
+        let app = ctx("resume-silent");
+        set_unread(&app, "s1", true);
+        observe_status(&app, "s1", &state("working", true), Some(&state("waiting", false)));
+        assert!(unread_of("s1"));
+        observe_status(&app, "s1", &state("working", false), Some(&state("working", false)));
+        assert!(unread_of("s1"));
     }
 
     /// A silent signal is a correction or a snapshot replayed on attach, not a new result. Marking on
@@ -946,6 +997,49 @@ mod tests {
         feed(&app, "s1", &[json!({ "kind": "state", "state": "waiting", "authoritative": true })]);
 
         assert_eq!(snapshot()["s1"].agent_state.as_deref(), Some("waiting"));
+    }
+
+    /// A conversation-view session reports real turn boundaries, so its finish lands at once, and so does
+    /// a permission question that follows straight after an answered one.
+    #[test]
+    fn a_chat_session_is_never_held() {
+        let _lock = test_lock();
+        let app = ctx("chat-no-hold");
+        feed(
+            &app,
+            "chat-a",
+            &[
+                json!({ "kind": "agent", "agent": "claude", "state_source": "chat" }),
+                json!({ "kind": "state", "state": "working", "authoritative": true }),
+                json!({ "kind": "state", "state": "waiting", "authoritative": true }),
+            ],
+        );
+        assert_eq!(snapshot()["chat-a"].agent_state.as_deref(), Some("waiting"));
+
+        feed(
+            &app,
+            "chat-b",
+            &[
+                json!({ "kind": "agent", "agent": "codex", "state_source": "chat" }),
+                json!({ "kind": "state", "state": "working", "authoritative": true }),
+                json!({ "kind": "state", "state": "asking", "authoritative": true }),
+            ],
+        );
+        let record = snapshot()["chat-b"].clone();
+        assert_eq!(record.agent_state.as_deref(), Some("asking"));
+        assert!(record.authoritative);
+
+        // The same session back in a terminal declares its own source, and the hold applies again.
+        feed(
+            &app,
+            "chat-a",
+            &[
+                json!({ "kind": "agent", "agent": "claude" }),
+                json!({ "kind": "state", "state": "working", "authoritative": true }),
+                json!({ "kind": "state", "state": "waiting", "authoritative": true }),
+            ],
+        );
+        assert_eq!(snapshot()["chat-a"].agent_state.as_deref(), Some("working"), "held");
     }
 
     /// Changes accumulate into one broadcast instead of one frame per signal, and the payload carries

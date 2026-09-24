@@ -4,7 +4,7 @@ import { Backdrop } from "../../components/Backdrop";
 import Select from "../../components/Select";
 import { useT } from "../../i18n";
 import { auditCancel, auditExport, auditGet, auditList, auditModels, auditOptions, auditStart, type AuditOptions, type AuditRun, type AuditSummary } from "../../ipc/security";
-import type { ChatModel } from "../../ipc/chat";
+import type { LaunchModel } from "../../ipc/launch";
 import { writeTextFile } from "../../ipc/info";
 import { env, platform } from "../../platform";
 import { useTermStore } from "../../store/termStore";
@@ -85,7 +85,7 @@ function SecuritySurface({ projectId, params }: { projectId: string; params: URL
           {!history && !error && <p role="status" className="security-muted">{t("common.loading")}</p>}
           {history?.length === 0 && <p className="security-history-empty">{s("empty")}</p>}
           <div className="security-history-list">{history?.map((run) => <AuditLink key={run.id} projectId={projectId} values={{ securityRun: run.id, securityNew: null, securityTab: null, securityFinding: null }} aria-current={runId === run.id && !isNew ? "page" : undefined} className={`security-history-item${runId === run.id && !isNew ? " active" : ""}`}>
-            <div><strong>{run.agent === "claude" ? "Claude Code" : "Codex"}</strong><Status value={run.status}/></div>
+            <div><strong>{run.agentLabel}</strong><Status value={run.status}/></div>
             <Configuration run={run}/>
             <small>{s(run.scope === "path" ? "pathScope" : run.scope)}{run.path && ` · ${run.path}`}</small>
             <time dateTime={new Date(run.createdAt).toISOString()}>{new Date(run.createdAt).toLocaleString()}</time>
@@ -168,7 +168,7 @@ function NewAudit({ projectId }: { projectId: string }) {
   const [path, setPath] = useState("");
   const [model, setModel] = useState("");
   const [effort, setEffort] = useState("");
-  const [models, setModels] = useState<ChatModel[] | null>(null);
+  const [models, setModels] = useState<LaunchModel[] | null>(null);
   const [modelError, setModelError] = useState("");
   const [modelRevision, setModelRevision] = useState(0);
   const [busy, setBusy] = useState(false);
@@ -260,7 +260,7 @@ function AuditDetail({ id, projectId, params }: { id: string; projectId: string;
     {error && <div className="security-error" role="alert">{auditError(error)}<button className="btn" onClick={() => setRevision((v) => v + 1)}>{t("common.retry")}</button></div>}
     {!run && !error && <p className="security-loading" role="status">{t("common.loading")}</p>}
     {run && <>
-      <div className="security-toolbar"><div className="security-run-heading"><div><h2>{run.agent === "claude" ? "Claude Code" : "Codex"}</h2><Status value={run.status}/></div><p>{run.model || t("chat.modelDefault")} · {run.effort ? effortLabel(run.effort, t) : t("chat.effort.auto")}</p><small>{s(run.scope === "path" ? "pathScope" : run.scope)}{run.path && ` · ${run.path}`} · {new Date(run.createdAt).toLocaleString()}</small></div>
+      <div className="security-toolbar"><div className="security-run-heading"><div><h2>{run.agentLabel}</h2><Status value={run.status}/></div><p>{run.model || t("chat.modelDefault")} · {run.effort ? effortLabel(run.effort, t) : t("chat.effort.auto")}</p><small>{s(run.scope === "path" ? "pathScope" : run.scope)}{run.path && ` · ${run.path}`} · {new Date(run.createdAt).toLocaleString()}</small></div>
         <div className="security-actions">{active ? <button className="btn" disabled={busy || !!error} onClick={() => void perform(() => auditCancel(id))}>{t("common.cancel")}</button> : <button className="btn" disabled={busy || !!error} onClick={() => void perform(async () => { const next = await auditStart({ projectId, agent: run.agent, scope: run.scope, path: run.path, model: run.model ?? "", effort: run.effort ?? "" }); memoryNavigate(securityUrl(projectId, { securityRun: next.id, securityTab: null, securityFinding: null })); })}>{s("start")}</button>}
           <details className="security-export"><summary className="btn">↓ {s("export")}</summary><div><button disabled={busy} onClick={(e) => { e.currentTarget.closest("details")?.removeAttribute("open"); void perform(() => download("md")); }}>Markdown</button><button disabled={busy} onClick={(e) => { e.currentTarget.closest("details")?.removeAttribute("open"); void perform(() => download("json")); }}>JSON</button></div></details>
         </div>

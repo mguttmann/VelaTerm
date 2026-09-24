@@ -6,6 +6,7 @@
 
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
+import { taskUrl } from "./taskNavigation";
 import Icons from "../../../components/Icons";
 import { SELECT_PANEL } from "../../../components/Select";
 import { dateLocale, useT } from "../../../i18n";
@@ -338,6 +339,7 @@ function taskStatusLabel(t: ReturnType<typeof useT>, status: string | undefined)
  * time no agent process is alive: the chip stays put but opens nothing.
  */
 export function TasksChip({
+  sessionId,
   tasks,
   busy,
   disabled = false,
@@ -345,6 +347,7 @@ export function TasksChip({
   onOpen,
   onBackgroundAll,
 }: {
+  sessionId: string;
   tasks: ChatBackgroundTask[];
   busy: boolean;
   disabled?: boolean;
@@ -378,7 +381,11 @@ export function TasksChip({
           // and a nested Stop could not be reached by keyboard.
           return (
             <div className="sv-popover-row" key={task.task_id}>
-              <button className="sv-popover-open" title={t("chat.tasks.open")} onClick={() => onOpen(task)}>
+              <a className="sv-popover-open" title={t("chat.tasks.open")} href={taskUrl(sessionId, task.task_id)} onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                event.preventDefault();
+                onOpen(task);
+              }}>
                 <span className="sv-popover-main">
                   <span className="sv-popover-title">{task.description || task.summary || task.task_id}</span>
                   <span className="sv-popover-sub">
@@ -386,8 +393,8 @@ export function TasksChip({
                     {finished ? ` · ${taskStatusLabel(t, task.status)}` : ""}
                   </span>
                 </span>
-              </button>
-              {finished ? null : (
+              </a>
+              {finished || !task.can_stop ? null : (
                 <button className="sv-popover-action" onClick={() => onStop(task.task_id)}>
                   {t("chat.tasks.stop")}
                 </button>

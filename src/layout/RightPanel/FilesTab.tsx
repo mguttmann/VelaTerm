@@ -582,7 +582,10 @@ export function FilesTab({ rootPath, rootName }: { rootPath: string | null; root
                   {
                     label: t("transfer.download"),
                     icon: <Icons.download size={14} />,
-                    onClick: () => void startDownload(node.path),
+                    onClick: () => {
+                      setErr(null);
+                      startDownload(node.path).catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+                    },
                   },
                 ]),
             {
@@ -945,7 +948,7 @@ function TransferQueue({ items }: { items: Transfer[] }) {
   return (
     <div className="transfer-queue">
       <div className="transfer-head">
-        <span>{t("transfer.uploadsTitle")}</span>
+        <span>{t("transfer.title")}</span>
         {anyFinished && (
           <button className="transfer-clear" onClick={clearFinishedTransfers}>
             {t("transfer.clear")}
@@ -958,6 +961,11 @@ function TransferQueue({ items }: { items: Transfer[] }) {
         // Rate and time left only appear once they are measured, so the line never shows a placeholder value.
         const rate = x.bytesPerSec ? ` · ${formatBytes(x.bytesPerSec)}/s` : "";
         const eta = x.etaSec != null && x.etaSec > 0 ? ` · ${formatDuration(x.etaSec)}` : "";
+        const download = x.direction === "download";
+        // Only a download the webview saved itself (account remote windows) has no progress and cannot be
+        // stopped; the desktop host's downloads report both, like uploads.
+        const measured = !download || x.localId != null;
+        const running = measured && (x.state === "active" || x.state === "stalled");
         const detail =
           x.state === "failed"
             ? x.error || t("transfer.failed")
@@ -965,15 +973,17 @@ function TransferQueue({ items }: { items: Transfer[] }) {
               ? t("transfer.cancelled")
               : x.state === "stalled"
                 ? `${t("transfer.stalled")} · ${size}`
-                : size + rate + eta;
+                : !measured
+                  ? t(x.state === "done" ? "transfer.savedToDownloads" : "transfer.downloading")
+                  : size + rate + eta;
         return (
-          <div key={x.id} className={"transfer-row " + x.state} title={x.path}>
+          <div key={x.id} className={"transfer-row " + x.state} title={x.savedPath ?? x.path}>
             <span className="transfer-dir">
-              <Icons.upload size={12} />
+              {download ? <Icons.download size={12} /> : <Icons.upload size={12} />}
             </span>
             <span className="transfer-name">{x.name}</span>
             <span className="transfer-detail">{detail}</span>
-            {x.state === "active" || x.state === "stalled" ? (
+            {running ? (
               <button
                 className="transfer-cancel"
                 title={t("common.cancel")}
@@ -985,7 +995,7 @@ function TransferQueue({ items }: { items: Transfer[] }) {
             ) : (
               <span className="transfer-cancel" />
             )}
-            {(x.state === "active" || x.state === "stalled") && (
+            {running && (
               <span className="transfer-bar">
                 <span style={{ width: `${pct}%` }} />
               </span>

@@ -9,6 +9,9 @@ import type { ComposerChipId } from "../../../store/settings";
 /** Widths by chip id, plus the toolbar row and the More toggle; jsdom itself reports 0 for everything. */
 let widths: Record<string, number> = {};
 const observers = new Set<() => void>();
+const observed = new Set<Element>();
+const unobserve = vi.fn((el: Element) => observed.delete(el));
+const disconnect = vi.fn(() => observed.clear());
 
 beforeEach(() => {
   widths = {};
@@ -23,14 +26,17 @@ beforeEach(() => {
   });
   vi.stubGlobal("ResizeObserver", class {
     constructor(callback: () => void) { observers.add(callback); }
-    observe() {}
-    unobserve() {}
-    disconnect() {}
+    observe(el: Element) { observed.add(el); }
+    unobserve = unobserve;
+    disconnect = disconnect;
   });
 });
 afterEach(() => {
   cleanup();
   observers.clear();
+  observed.clear();
+  unobserve.mockClear();
+  disconnect.mockClear();
   vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
@@ -55,7 +61,7 @@ function Harness({ mobile = false, inline }: { mobile?: boolean; inline: Compose
 }
 
 describe("composer toolbar", () => {
-  it("shows every enabled chip without a More toggle when the row is wide enough", () => {
+  it("keeps hidden available chips reachable even when the enabled chips fit", () => {
     widths = { row: 400, more: 70, model: 80, effort: 60, permission: 90 };
     render(<Harness inline={["model", "effort", "permission"]} />);
     expect(screen.getByRole("button", { name: "Model" })).toBeTruthy();
@@ -63,10 +69,9 @@ describe("composer toolbar", () => {
     expect(screen.getByRole("button", { name: "Permission" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "Send" })).toBeTruthy();
     expect(screen.getByText("Pending permission")).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "More" })).toBeNull();
-    // The disabled chip is neither inline nor in a folded row.
-    expect(screen.queryByTitle("Speed")).toBeNull();
-    expect(document.querySelector(".sv-controls-secondary")).toBeNull();
+    expect(screen.queryByRole("button", { name: "standard" })).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    expect(screen.getByRole("button", { name: "standard" })).toBeTruthy();
   });
 
   it("orders inline chips by the preference, not by the pane", () => {
@@ -120,7 +125,7 @@ describe("composer toolbar", () => {
     expect(more.getAttribute("aria-expanded")).toBe("false");
   });
 
-  it("brings a folded chip back and drops the toggle when the row grows", () => {
+  it("brings a folded chip back without removing access to hidden chips", () => {
     // 80 + 60 + 6 = 146 does not fit in 130; the model chip plus the 30 wide toggle (116) does.
     widths = { row: 130, more: 30, model: 80, effort: 60 };
     render(<Harness inline={["model", "effort"]} />);
@@ -131,12 +136,55 @@ describe("composer toolbar", () => {
     widths.row = 300;
     act(() => observers.forEach((callback) => callback()));
     expect(screen.getByRole("button", { name: "Effort" })).toBeTruthy();
-    expect(screen.queryByRole("button", { name: "More" })).toBeNull();
-    expect(document.querySelector(".sv-controls-secondary")).toBeNull();
+    expect(screen.getByRole("button", { name: "More" })).toBe(more);
+    fireEvent.click(more);
     widths.row = 130;
     act(() => observers.forEach((callback) => callback()));
     expect(screen.queryByRole("button", { name: "Effort" })).toBeNull();
     expect(screen.getByRole("button", { name: "More" }).getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("keeps an explicitly empty inline configuration accessible and omits an empty More", () => {
+    widths = { row: 400, more: 70, model: 80 };
+    const { rerender } = render(<Harness inline={[]} />);
+    expect(document.querySelectorAll(".sv-controls-primary .sv-chip-slot")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    expect(screen.getByRole("button", { name: "Model" })).toBeTruthy();
+    rerender(<ComposerToolbar chips={[]} inline={[]} mobile={false} actions={<button>Send</button>} status={null} />);
+    expect(screen.queryByRole("button", { name: "More" })).toBeNull();
+    expect(document.querySelector(".sv-controls-secondary")).toBeNull();
+  });
+
+  it("remeasures folded chips after their labels or fonts change, without opening the row", () => {
+    widths = { row: 120, more: 30, model: 80, effort: 120, permission: 150, serviceTier: 80 };
+    render(<Harness inline={["model", "effort", "permission", "serviceTier"]} />);
+    expect(screen.queryByRole("button", { name: "Effort" })).toBeNull();
+    widths.effort = 12;
+    widths.row = 134;
+    act(() => observers.forEach(callback => callback()));
+    expect(screen.getByRole("button", { name: "Effort" })).toBeTruthy();
+    widths.effort = 100;
+    act(() => observers.forEach(callback => callback()));
+    expect(screen.queryByRole("button", { name: "Effort" })).toBeNull();
+    expect(document.querySelector(".sv-controls-secondary")?.hasAttribute("inert")).toBe(true);
+  });
+
+  it("drops More only when all available chips fit inline and releases observer targets", () => {
+    widths = { row: 120, more: 30, model: 80, effort: 60, permission: 90, serviceTier: 70 };
+    const { rerender, unmount } = render(<Harness inline={["model", "effort", "permission", "serviceTier"]} />);
+    fireEvent.click(screen.getByRole("button", { name: "More" }));
+    widths.row = 500;
+    act(() => observers.forEach(callback => callback()));
+    expect(screen.queryByRole("button", { name: "More" })).toBeNull();
+    expect(screen.getByRole("button", { name: "Effort" })).toBeTruthy();
+    expect(document.querySelector(".sv-controls-secondary")).toBeNull();
+    expect(unobserve).toHaveBeenCalled();
+    const before = observed.size;
+    rerender(<Harness inline={["model", "effort", "permission", "serviceTier"]} />);
+    expect(observed.size).toBe(before);
+    unmount();
+    expect(disconnect).toHaveBeenCalledOnce();
+    expect(observed.size).toBe(0);
   });
 
   it("keeps both rows visible on mobile without measuring or a toggle", () => {

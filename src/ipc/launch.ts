@@ -80,3 +80,25 @@ export interface LaunchModel { id: string; label: string; effortLevels: string[]
 export interface LaunchModelCatalog { models: LaunchModel[]; effortLevels: string[] }
 export const launchModels = (kind: string, context: LaunchModelContext) =>
   invoke<LaunchModelCatalog>("launch_models", { kind, context });
+
+export interface AgentSessionSelection { kind?: AgentKind; presetId?: string }
+export interface AgentSessionContext {
+  projectId: string | null;
+  groupId: string | null;
+  activeSessionId: string | null;
+  placement: "sibling" | "child";
+}
+export interface NewAgentSessionRequest extends AgentSessionSelection {
+  requestId: string;
+  context: AgentSessionContext;
+}
+export interface AgentSessionPreparation {
+  context: AgentSessionContext;
+  options: LaunchOption[];
+  presets: import("../types").AgentPreset[];
+  locationNames: string[];
+}
+export const prepareAgentSession = (context: AgentSessionContext) =>
+  invoke<AgentSessionPreparation>("agent_session_prepare", { context });
+export const createAgentSession = (request: NewAgentSessionRequest) =>
+  invoke<import("../types").Session>("agent_session_create", { request });

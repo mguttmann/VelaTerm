@@ -8,11 +8,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("./transport", () => ({
   invoke: vi.fn(),
+  invokeNative: vi.fn(),
   copyText: vi.fn(),
   openPath: vi.fn(),
 }));
 
-import { invoke } from "./transport";
+import { invoke, invokeNative } from "./transport";
 import {
   cancelTransfer,
   clearFinishedTransfers,
@@ -95,7 +96,8 @@ function mockBackend(): void {
         return Promise.resolve(null) as Promise<never>;
       case "create_download_ticket": {
         if (!disk.has(path)) return Promise.reject(new Error("Failed to read file metadata"));
-        return Promise.resolve("/api/download?token=faketoken") as Promise<never>;
+        // One token per file, like the real backend's fresh ticket per request.
+        return Promise.resolve(`/api/download?token=${encodeURIComponent(path)}`) as Promise<never>;
       }
       case "read_file_base64": {
         const bytes = disk.get(path);
@@ -309,6 +311,115 @@ describe("startDownload", () => {
     // A download is not a queue entry, because its progress lives in the browser's own download UI.
     expect(getTransfers()).toHaveLength(0);
     vi.mocked(document.createElement).mockRestore();
+  });
+
+  it("tracks a remote-window download in the queue until the host reports the outcome", async () => {
+    disk.set("/srv/proj/a.mp4", makeBytes(10));
+    disk.set("/srv/proj/b.mp4", makeBytes(10));
+    const w = window as unknown as Record<string, unknown>;
+    w.__TAURI_INTERNALS__ = {};
+    w.__VLX_FORCE_BROWSER__ = true;
+    const hrefs: string[] = [];
+    const realCreate = document.createElement.bind(document);
+    vi.spyOn(document, "createElement").mockImplementation((tag: string) => {
+      const el = realCreate(tag) as HTMLElement;
+      if (tag === "a") el.click = () => hrefs.push((el as HTMLAnchorElement).href);
+      return el;
+    });
+    const finish = (url: string, path: string | null, success: boolean) =>
+      window.dispatchEvent(new CustomEvent("vlx:download-finished", { detail: { url, path, success } }));
+    try {
+      await startDownload("/srv/proj/a.mp4");
+      await startDownload("/srv/proj/b.mp4");
+      expect(getTransfers().map((x) => [x.direction, x.name, x.state])).toEqual([
+        ["download", "a.mp4", "active"],
+        ["download", "b.mp4", "active"],
+      ]);
+
+      // The host reports the absolute URL; the ticket token is what ties it to the right row.
+      finish(hrefs[1], null, false);
+      finish(hrefs[0], "/Users/me/Downloads/a.mp4", true);
+      expect(getTransfers().map((x) => [x.name, x.state, x.savedPath])).toEqual([
+        ["a.mp4", "done", "/Users/me/Downloads/a.mp4"],
+        ["b.mp4", "failed", undefined],
+      ]);
+    } finally {
+      delete w.__TAURI_INTERNALS__;
+      delete w.__VLX_FORCE_BROWSER__;
+      vi.mocked(document.createElement).mockRestore();
+    }
+  });
+
+  it("has the desktop host save a URL or SSH window's download, with progress and cancel", async () => {
+    disk.set("/srv/proj/big.iso", makeBytes(10));
+    disk.set("/srv/proj/skip.iso", makeBytes(10));
+    const w = window as unknown as Record<string, unknown>;
+    w.__TAURI_INTERNALS__ = {};
+    w.__VLX_REMOTE__ = { address: "10.0.0.2:18732" };
+    const anchor = vi.spyOn(HTMLAnchorElement.prototype, "click");
+    const report = (detail: Record<string, unknown>) =>
+      window.dispatchEvent(new CustomEvent("vlx:local-download", { detail }));
+    const native: { cmd: string; args: Record<string, unknown> }[] = [];
+    let hostId = "";
+    vi.mocked(invokeNative).mockImplementation(async (cmd, args) => {
+      native.push({ cmd, args: args ?? {} });
+      if (cmd !== "plugin:local-download|start") return undefined as never;
+      if (args?.name === "skip.iso") return false as never; // The user dismissed the save dialog.
+      hostId = args!.id as string;
+      // The first report overtakes the reply to the start call.
+      report({ id: hostId, state: "active", received: 0, total: 1000 });
+      return true as never;
+    });
+    try {
+      await startDownload("/srv/proj/skip.iso");
+      expect(getTransfers()).toHaveLength(0);
+
+      await startDownload("/srv/proj/big.iso");
+      const start = native.find((c) => c.args.name === "big.iso")!;
+      // The host gets an absolute link to the window's own server and only a bare file name.
+      expect(start.args.url).toBe(new URL("/api/download?token=%2Fsrv%2Fproj%2Fbig.iso", location.href).href);
+      expect(getTransfers().map((x) => [x.direction, x.name, x.state, x.total])).toEqual([
+        ["download", "big.iso", "active", 1000],
+      ]);
+
+      report({ id: hostId, state: "active", received: 400, total: 1000 });
+      expect(getTransfers()[0].transferred).toBe(400);
+
+      cancelTransfer(getTransfers()[0].id);
+      expect(native.at(-1)).toEqual({ cmd: "plugin:local-download|cancel", args: { id: hostId } });
+      report({ id: hostId, state: "cancelled", received: 400, total: 1000 });
+      expect(getTransfers()[0].state).toBe("cancelled");
+      // Nothing went through the webview's own downloader.
+      expect(anchor).not.toHaveBeenCalled();
+    } finally {
+      delete w.__TAURI_INTERNALS__;
+      delete w.__VLX_REMOTE__;
+      anchor.mockRestore();
+    }
+  });
+
+  it("marks a host download done with the path the user chose", async () => {
+    disk.set("/srv/proj/a.txt", makeBytes(10));
+    const w = window as unknown as Record<string, unknown>;
+    w.__TAURI_INTERNALS__ = {};
+    w.__VLX_REMOTE__ = { address: "10.0.0.2:18732" };
+    let hostId = "";
+    vi.mocked(invokeNative).mockImplementation(async (_cmd, args) => {
+      hostId = args!.id as string;
+      return true as never;
+    });
+    try {
+      await startDownload("/srv/proj/a.txt");
+      window.dispatchEvent(new CustomEvent("vlx:local-download", {
+        detail: { id: hostId, state: "done", received: 10, total: 10, path: "/Users/me/Desktop/a.txt" },
+      }));
+      expect(getTransfers().map((x) => [x.state, x.transferred, x.savedPath])).toEqual([
+        ["done", 10, "/Users/me/Desktop/a.txt"],
+      ]);
+    } finally {
+      delete w.__TAURI_INTERNALS__;
+      delete w.__VLX_REMOTE__;
+    }
   });
 
   it("surfaces the backend error instead of opening a dead link", async () => {

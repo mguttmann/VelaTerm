@@ -19,19 +19,27 @@
 //!
 //! Uploads outlive the panel that started them: the queue is a module-level store rather than component state,
 //! so switching right-panel tabs or collapsing the panel does not abort one in flight.
+//!
+//! Remote windows of the desktop app are the one place a download joins the queue. They are native webviews with
+//! no download manager of their own, so the desktop host saves the file and reports back to the page, and the
+//! queue is the only place the user can see it happen.
 
 import { deletePath, listDir, renamePath, statFile, writeFileChunk } from "./info";
-import { invoke } from "./transport";
+import { invoke, invokeNative } from "./transport";
 
-/** One queued upload. */
+/** One queued transfer. */
 export interface Transfer {
   id: string;
-  /** Kept for the queue's icon, and because a future direction would land in the same list. */
-  direction: "upload";
+  /** Uploads always queue; downloads only in remote windows, where no browser download manager exists. */
+  direction: "upload" | "download";
   /** File name shown in the queue. */
   name: string;
-  /** Absolute destination path on the server. */
+  /** Absolute path on the server: the upload destination, or the download source. */
   path: string;
+  /** Where a finished download was saved on this machine. */
+  savedPath?: string;
+  /** Id of a download the desktop host is performing, which is what makes it measurable and cancellable. */
+  localId?: string;
   transferred: number;
   /** Total bytes. */
   total: number;
@@ -90,6 +98,12 @@ function update(id: string, patch: Partial<Transfer>): void {
 
 /** Mark a transfer for cancellation; its loop stops before the next chunk and cleans up after itself. */
 export function cancelTransfer(id: string): void {
+  const localId = queue.find((t) => t.id === id)?.localId;
+  if (localId) {
+    // The host reports "cancelled" once its transfer thread stops and removes the part file.
+    void invokeNative("plugin:local-download|cancel", { id: localId }).catch(() => {});
+    return;
+  }
   cancelled.add(id);
 }
 
@@ -101,8 +115,8 @@ export function clearFinishedTransfers(): void {
 
 let seq = 0;
 
-function add(name: string, path: string, total: number): Transfer {
-  const t: Transfer = { id: `tr${++seq}`, direction: "upload", name, path, transferred: 0, total, state: "active" };
+function add(name: string, path: string, total: number, direction: Transfer["direction"] = "upload"): Transfer {
+  const t: Transfer = { id: `tr${++seq}`, direction, name, path, transferred: 0, total, state: "active" };
   queue = [...queue, t];
   emit();
   return t;
@@ -119,22 +133,162 @@ function bytesToBase64(bytes: Uint8Array): string {
 }
 
 /**
- * Hand a server file to the browser's download manager.
+ * Download a server file to this machine.
  *
  * The ticket is requested over the authenticated socket, where the remote data-directory ACL applies and a
- * missing file is reported as an error rather than as a dead link. Everything after that — streaming to disk,
- * progress, speed, pause and resume — belongs to the browser, which is the point of doing it this way.
+ * missing file is reported as an error rather than as a dead link.
  *
- * The anchor never navigates the page away: the response carries `Content-Disposition: attachment`, which is
- * defined to start a download instead of a navigation.
+ * In a browser everything after that — streaming to disk, progress, speed, pause and resume — belongs to the
+ * browser's download manager, which is the point of doing it this way. The anchor never navigates the page away:
+ * the response carries `Content-Disposition: attachment`, which is defined to start a download instead of a
+ * navigation. URL and SSH remote windows have no download manager, so the desktop host does the work instead; see
+ * `downloadLocally`.
  */
 export async function startDownload(path: string): Promise<void> {
   const url = await invoke<string>("create_download_ticket", { path });
+  if (hasLocalDownloader()) return downloadLocally(url, path);
+  if (inRemoteWindow()) watchWebviewDownload(url, path);
   const a = document.createElement("a");
   a.href = url;
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+function baseName(path: string): string {
+  return path.split(/[\\/]/).pop() || path;
+}
+
+/** Remote windows are the desktop app's native webviews running the browser transport; plain browsers are not. */
+function inRemoteWindow(): boolean {
+  return "__TAURI_INTERNALS__" in window && !!(window as { __VLX_FORCE_BROWSER__?: boolean }).__VLX_FORCE_BROWSER__;
+}
+
+/** URL and SSH remote windows may call the desktop host's downloader; account remote windows may not. */
+function hasLocalDownloader(): boolean {
+  return "__TAURI_INTERNALS__" in window && !!(window as { __VLX_REMOTE__?: unknown }).__VLX_REMOTE__;
+}
+
+// ── Downloads through the desktop host ──────────────────────────────────────────────────────────────
+
+/** Progress report for a download the desktop host is performing, dispatched on `window`. */
+interface LocalDownloadEvent {
+  id: string;
+  state: "active" | "done" | "failed" | "cancelled";
+  received: number;
+  /** Size announced by the server, null when it sent none. */
+  total: number | null;
+  error?: string | null;
+  /** Where the file was saved, present once it is done. */
+  path?: string | null;
+}
+
+/** Queue ids of host downloads, keyed by the id this page gave the host. */
+const localDownloads = new Map<string, string>();
+/** Host ids whose start call has not returned yet, with the latest report that arrived in the meantime. */
+const startingDownloads = new Map<string, LocalDownloadEvent | null>();
+let localListening = false;
+let localSeq = 0;
+
+/**
+ * Have the desktop host save a server file where the user chooses, and follow its progress in the queue.
+ *
+ * The host shows the save dialog itself, so this page never names a local path. The queue entry appears only once
+ * a destination is chosen; dismissing the dialog does nothing.
+ */
+async function downloadLocally(url: string, path: string): Promise<void> {
+  if (!localListening) {
+    localListening = true;
+    window.addEventListener("vlx:local-download", (e) => onLocalDownload((e as CustomEvent<LocalDownloadEvent>).detail));
+  }
+  const id = `dl${Date.now().toString(36)}${++localSeq}`;
+  const name = baseName(path);
+  startingDownloads.set(id, null);
+  let started: boolean;
+  try {
+    started = await invokeNative<boolean>("plugin:local-download|start", {
+      id,
+      url: new URL(url, window.location.href).href,
+      name,
+    });
+  } catch (e) {
+    startingDownloads.delete(id);
+    throw e;
+  }
+  // Reports can overtake the reply to the start call; replay the latest one once the entry exists.
+  const early = startingDownloads.get(id) ?? null;
+  startingDownloads.delete(id);
+  if (!started) return;
+  const t = add(name, path, 0, "download");
+  update(t.id, { localId: id });
+  localDownloads.set(id, t.id);
+  if (early) onLocalDownload(early);
+}
+
+function onLocalDownload(d: LocalDownloadEvent): void {
+  if (startingDownloads.has(d.id)) {
+    startingDownloads.set(d.id, d);
+    return;
+  }
+  const qid = localDownloads.get(d.id);
+  const t = qid ? queue.find((x) => x.id === qid) : undefined;
+  if (!qid || !t) return;
+  const total = d.total ?? 0;
+  if (d.state === "active") {
+    update(qid, { transferred: d.received, total, ...trackRate({ ...t, total }, d.received) });
+    return;
+  }
+  localDownloads.delete(d.id);
+  samples.delete(qid);
+  update(qid, {
+    state: d.state,
+    transferred: d.received,
+    total,
+    savedPath: d.path ?? undefined,
+    error: d.error ?? undefined,
+    bytesPerSec: undefined,
+    etaSec: undefined,
+  });
+}
+
+// ── Downloads the webview saves itself ──────────────────────────────────────────────────────────────
+
+/** Outcome of a download the webview saved itself, dispatched on `window` by the desktop host. */
+interface DownloadFinished {
+  url: string;
+  /** Local path of the saved file, absent when the platform did not report one. */
+  path: string | null;
+  success: boolean;
+}
+
+/** Queue ids of downloads waiting for their outcome, keyed by ticket token. */
+const pendingDownloads = new Map<string, string>();
+let listening = false;
+
+/** The ticket token identifies a download, because the host reports the absolute URL the page resolved. */
+function ticketToken(url: string): string | null {
+  return new URL(url, window.location.href).searchParams.get("token");
+}
+
+/**
+ * Show an account remote window's download in the queue until the host reports how it ended. The webview saves
+ * it straight to the Downloads folder and reports no progress in between.
+ */
+function watchWebviewDownload(url: string, path: string): void {
+  const token = ticketToken(url);
+  if (!token) return;
+  pendingDownloads.set(token, add(baseName(path), path, 0, "download").id);
+  if (!listening) {
+    listening = true;
+    window.addEventListener("vlx:download-finished", (e) => {
+      const d = (e as CustomEvent<DownloadFinished>).detail;
+      const token = ticketToken(d.url);
+      const id = token ? pendingDownloads.get(token) : undefined;
+      if (!id) return;
+      pendingDownloads.delete(token!);
+      update(id, d.success ? { state: "done", savedPath: d.path ?? undefined } : { state: "failed" });
+    });
+  }
 }
 
 /** Remove an abandoned part file, best-effort: a stray `.vlxpart` is worse than a failed cleanup. */

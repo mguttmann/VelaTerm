@@ -15,7 +15,7 @@
 //! Sidebar search text and status/marker filters travel with the rest. Mirror mode means the two windows hold
 //! the same state, not that they replay each other's keystrokes: a filter that is on here is on there.
 
-import { firstLeaf, type PaneNode } from "../layout/CenterPane/paneTree";
+import { findLeaf, firstLeaf, type PaneNode } from "../layout/CenterPane/paneTree";
 import {
   collectSidebarViewIds,
   firstSidebarViewId,
@@ -214,7 +214,9 @@ type PublishedActive = Pick<MirrorCenter, "activeTabId" | "activeSessionId" | "f
 function publishedActive(s: MirrorLayoutSource, openTabs: string[]): PublishedActive {
   const own = { activeTabId: s.activeTabId, activeSessionId: s.activeSessionId, focusedPaneId: s.focusedPaneId };
   if (!s.activeTabId || !s.taskTabs[s.activeTabId]) return own;
-  const activeTabId =
+  const task = s.taskTabs[s.activeTabId];
+  const activeTabId = task.returnTabId && openTabs.includes(task.returnTabId)
+    ? task.returnTabId :
     s.lastActiveSessionTabId && openTabs.includes(s.lastActiveSessionTabId)
       ? s.lastActiveSessionTabId
       : openTabs.length
@@ -222,7 +224,7 @@ function publishedActive(s: MirrorLayoutSource, openTabs: string[]): PublishedAc
         : null;
   // A document or browser tab has no session or pane, on the peer as well; a session tab shows its first leaf.
   const tree = activeTabId && !s.docTabs[activeTabId] && !s.browserTabs[activeTabId] ? s.paneTrees[activeTabId] : undefined;
-  const leaf = tree ? firstLeaf(tree) : null;
+  const leaf = tree ? (task.returnPaneId ? findLeaf(tree, task.returnPaneId) : null) ?? firstLeaf(tree) : null;
   return { activeTabId, activeSessionId: leaf?.sessionId ?? null, focusedPaneId: leaf?.paneId ?? null };
 }
 

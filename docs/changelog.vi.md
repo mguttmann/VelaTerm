@@ -1,3 +1,51 @@
+## v0.2.3 — 2026-09-24
+
+- 🪟 Các phiên hiện có đã có thể đưa vào khung chia. Menu chuột phải ở thanh bên mở một phiên trong khung chia bên phải, khung chia bên dưới hoặc khung đang chọn; kéo một phiên từ thanh bên tới mép một khung thì chia theo hướng đó, còn thả vào giữa thì thay thế phiên đang hiển thị ở đó. Chọn từ hai đến bốn phiên để xếp chúng cạnh nhau trong một thẻ được chia đều, và những phiên nằm ở các khung khác của thẻ hiện tại được đánh dấu trên thanh bên.
+
+- 🗂️ Tác vụ nền do agent khởi chạy mở trong thẻ riêng bên cạnh cuộc hội thoại, kèm trạng thái, thời gian đã trôi qua, token, số lần gọi công cụ, công cụ được báo cáo gần nhất và các giai đoạn của từng agent. Mỗi tác vụ có địa chỉ riêng, và khi rời khỏi tác vụ, màn hình quay lại khung đã mở nó.
+
+- 💬 Trong chế độ hội thoại, tin nhắn bắt đầu bằng `!` sẽ chạy trong shell của phiên. Kết quả hiện dần theo luồng, mã thoát được hiển thị, có thể hủy lệnh khi đang chạy, và lệnh vẫn nằm trong lịch sử đọc của các phiên Claude, Codex, OpenCode, Pi và OMP.
+
+- ⏱️ Lệnh mới `vrun` khởi chạy một lệnh chạy lâu và chờ nó trong cùng một lần gọi, nhờ vậy agent biết được khi nào công việc thực sự kết thúc. Các lệnh chạy theo cách này được liệt kê phía trên terminal cùng thời gian chạy, cửa sổ nhật ký và nút dừng có xác nhận lại.
+
+- ⌨️ Việc tạo phiên agent mới đã có trang riêng và phím tắt riêng: tìm kiếm agent cùng cấu hình sẵn, dùng lại lựa chọn gần nhất, và chọn tạo phiên ngang hàng với phiên hiện tại hay nằm dưới nó.
+
+- 🧰 Thanh công cụ soạn tin có thể tùy chỉnh trong phần cài đặt: chọn những mục hiển thị cạnh tin nhắn và thứ tự của chúng. Những mục đã tắt, cũng như những mục không đủ chỗ theo chiều ngang, vẫn dùng được từ menu Thêm.
+
+- 📥 Khi tải một tệp trong cửa sổ kết nối URL hoặc SSH, trước tiên bạn chọn nơi lưu trên máy này, sau đó tiến độ tải được hiển thị kèm nút hủy.
+
+- 🗃️ Có thể nhập phiên Kiro vào một dự án để xem lại: quá trình nhập đối chiếu phiên theo thư mục làm việc, và mỗi phiên mở ở chế độ lịch sử chỉ đọc có tìm kiếm. Hiện tại hỗ trợ các bản ghi thuần văn bản.
+
+- 🧠 Việc sắp xếp kho kiến thức hỗ trợ Grok, OpenCode, Pi và OMP bên cạnh Claude và Codex, và agent được chọn từ cùng loại danh sách thả xuống dùng ở những nơi khác trong ứng dụng.
+
+- 📱 iOS và Android: trang khởi đầu lưu các kết nối SSH và URL, cho phép đăng nhập tài khoản VelaTerm và liệt kê những thiết bị đang chia sẻ trong tài khoản đó. Dấu vân tay của máy chủ chỉ cần xác nhận một lần và được ghi nhớ, mã QR điền sẵn địa chỉ dịch vụ, và toàn bộ màn hình gốc cùng thông báo hệ thống đều đã được dịch sang cả 11 ngôn ngữ giao diện.
+
+- 🔐 Phiên Claude khởi chạy đúng chế độ quyền bạn đã chọn: các tham số khởi chạy bổ sung giữ đúng thứ tự ưu tiên, chế độ được đối chiếu với những gì CLI báo cáo lúc khởi động, và phiên khởi chạy với chế độ bỏ qua xác nhận vẫn giữ dấu hiệu tương ứng.
+
+- 🧩 Menu mô hình có Opus 5.5 và bổ sung những mô hình mà CLI đang chọn báo cáo, vẫn giữ nguyên thứ tự sẵn có; mô hình xuất hiện cùng một bản cập nhật CLI sẽ hiển thị mà không cần khởi động lại ứng dụng.
+
+- 🌱 Yêu cầu tạo phiên con trụ được qua gián đoạn: yêu cầu bị mất phản hồi có thể khôi phục sau khi kết nối lại, lần khởi chạy đã xác nhận sẽ dùng lại đúng phiên và cấu hình khi thử lại, còn cây làm việc không tạo được sẽ được hoàn tác mà không đụng đến những thứ đã có từ trước.
+
+- ⚡ Ứng dụng khởi động nhanh hơn: phần mã tải lúc khởi động chỉ còn khoảng một nửa so với trước, và các trang kho kiến thức, kiểm định bảo mật, nhập phiên và dự án chia sẻ được tải khi bạn mở chúng.
+
+- 🖼️ Ảnh dán hoặc kéo vào tin nhắn được thu nhỏ về tối đa 1568 pixel ở cạnh dài trước khi gửi.
+
+- 🐚 Phiên Bash nạp phần tự động hoàn thành của shell từ tệp khởi động, nên phiên Bash mới không còn mở ra với một dòng lệnh đã được gõ sẵn. Các tệp hồ sơ đăng nhập vẫn được đọc theo đúng thứ tự của Bash.
+
+- ✍️ Markdown: một dấu ngã đơn không còn gạch ngang phần còn lại của dòng, nhờ vậy dấu nhắc shell dán vào vẫn đọc được; chữ in đậm hoặc in nghiêng kết thúc ngay sau ký tự tiếng Trung, tiếng Nhật hay tiếng Hàn được đóng đúng cách thay vì để lại dấu sao trên màn hình.
+
+- 📨 `vtell --steer` chuyển tin nhắn vào ngay lượt mà bên nhận đang chạy, không chờ lượt đó kết thúc. Nếu bên nhận đang dừng ở một câu hỏi, phản hồi trả về là blocked, vì tin nhắn chỉ được đọc sau khi câu hỏi đó được trả lời.
+
+- 🔁 Trong chế độ hội thoại, trạng thái của phiên kết thúc ngay khi lượt kết thúc, dấu chưa đọc được xóa khi công việc thực sự bắt đầu, và phiên còn công việc nền đang chạy vẫn giữ dấu đang chạy.
+
+- 🪟 Windows: hook của Cursor khởi động đúng, và lớp cửa sổ đã được cập nhật cho các vấn đề nhập liệu bàn phím được báo cáo sau khi kết nối lại RDP hoặc chuyển màn hình nền ảo.
+
+- 🛡️ Kiểm định bảo mật: danh sách mô hình và tên agent lấy từ cùng danh mục khởi chạy như phần còn lại của ứng dụng, nên các lần chạy trước hiển thị tên hiện tại của từng agent.
+
+- 🩹 Các sửa lỗi khác: thông báo lỗi trong hội thoại thẳng hàng với cột giữa; cả hai hộp thoại khởi chạy luôn có thể đóng và lần khởi chạy đã xác nhận nhưng thất bại có thể hủy; tin nhắn và tin nhắn trong hàng đợi hiển thị người gửi; hàng đợi dài cuộn trong một chiều cao cố định; neo HTML rỗng không còn hiện dấu khi soạn tài liệu; và bộ lọc trạng thái trên điện thoại nhận thêm những phiên về sau mới khớp điều kiện.
+
+---
+
 ## v0.2.2 — 2026-09-15
 
 - ⏳ Tự động tiếp tục sau giới hạn sử dụng, mặc định tắt trong cài đặt: khi Claude hoặc Codex dừng vì giới hạn 5 giờ hoặc hằng tuần, phiên sẽ tự tiếp tục sau khi giới hạn được đặt lại. Phía trên ô nhập hiện một dải thông báo kèm thời gian đặt lại và nút "Hủy"; trạng thái chờ được giữ qua lần khởi động lại ứng dụng và kết thúc khi bạn gửi tin nhắn, hoàn tác, xóa nội dung phiên hoặc tắt cài đặt.

@@ -17,4 +17,9 @@ for source,target in [('client_key','fixture_key'),('encrypted_key','fixture_enc
         run('shell','run-as','com.velaterm.mobile','sh','-c','"cat > files/'+target+'"',stdin=key)
 result=run('shell','am','instrument','-w','-r','-e','class','com.velaterm.mobile.SshIntegrationTest','-e','sshPort',str(ports['ssh']),'-e','httpPort',str(ports['http']),'-e','fingerprint',(fixture/'fingerprint').read_text().strip(),'com.velaterm.mobile.test/androidx.test.runner.AndroidJUnitRunner',capture_output=True,text=True)
 print(result.stdout)
-if 'OK (1 test)' not in result.stdout:raise SystemExit('Native SSH integration failed')
+if 'OK (5 tests)' not in result.stdout:raise SystemExit('Native SSH integration failed')
+trust_url=os.environ.get('VELA_E2E_URL')
+if trust_url:
+    result=run('shell','am','instrument','-w','-r','-e','class','com.velaterm.mobile.TrustPromptIntegrationTest','-e','trustUrl',trust_url,'com.velaterm.mobile.test/androidx.test.runner.AndroidJUnitRunner',capture_output=True,text=True)
+    print(result.stdout)
+    if 'OK (5 tests)' not in result.stdout:raise SystemExit('Native TLS integration failed')

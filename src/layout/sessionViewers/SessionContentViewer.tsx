@@ -12,8 +12,8 @@
 //!
 //! Optional `preloadedMessages` bypasses internal readAgentTranscript and uses the search console's
 //! cache. Moving between matches in one session then only scrolls; it neither remounts nor reloads
-//! the transcript. An empty array confirms there is no transcript and selects recording playback;
-//! omitting the prop retains internal loading for archive browsing.
+//! the transcript. An empty array selects recording playback, except for Kiro, where it is re-read to
+//! distinguish an empty record from a cached failure. Omitting the prop retains internal loading.
 
 import { useEffect, useState } from "react";
 
@@ -28,56 +28,69 @@ function hasNoTranscript(kind: Session["kind"]): boolean {
   return kind === "terminal" || kind === "browser";
 }
 
-export function SessionContentViewer({
-  session,
-  source,
-  initialQuery,
-  highlightTerms,
-  scrollToMessageIndex,
-  scrollToOrdinal,
-  preloadedMessages,
-}: {
+interface SessionContentProps {
   session: Session;
   /** Known global-search match source; "recording" skips transcript detection. */
   source?: "transcript" | "recording";
-  /** Browsing-mode prefill for the transcript filter field. */
   initialQuery?: string;
-  /** Literals matched by the search index for the active hit; enables locate highlighting. */
   highlightTerms?: string[];
   scrollToMessageIndex?: number;
   scrollToOrdinal?: number;
-  /** Externally cached transcript from the search console; providing it skips internal loading. */
+  /** Search caches failures as empty arrays; Kiro rechecks them to retain the backend reason. */
   preloadedMessages?: TranscriptMessage[];
-}) {
-  // Use recording directly for recording matches or session types that have no transcript.
-  const recordingOnly = source === "recording" || hasNoTranscript(session.kind);
-  const hasPreload = preloadedMessages !== undefined;
+}
 
-  // Use nonempty preloaded messages directly; an empty list confirms fallback to recording.
-  const [messages, setMessages] = useState<TranscriptMessage[] | null>(
-    hasPreload && preloadedMessages.length > 0 ? preloadedMessages : null,
-  );
-  const [fallback, setFallback] = useState(
-    recordingOnly || (hasPreload && preloadedMessages.length === 0),
-  );
+export function SessionContentViewer(props: SessionContentProps) {
+  const { session, source, preloadedMessages } = props;
+  if (source === "recording" || hasNoTranscript(session.kind)) return <RecordingContent {...props} />;
+  if (preloadedMessages !== undefined) {
+    if (preloadedMessages.length > 0) return <TranscriptViewer {...props} messages={preloadedMessages} />;
+    if (session.kind !== "kiro") return <RecordingContent {...props} />;
+  }
+  // Only the transcript reader owns asynchronous state. Source changes unmount it, while moving
+  // between hits in the same source keeps the reader and viewer mounted without another read.
+  return <LoadedTranscript key={`${session.id}:${session.kind}`} {...props} />;
+}
+
+function RecordingContent({ session, highlightTerms, initialQuery, scrollToOrdinal }: SessionContentProps) {
+  return <RecordingViewer sessionId={session.id} initialQuery={highlightTerms?.[0] ?? initialQuery} scrollToOrdinal={scrollToOrdinal} />;
+}
+
+function LoadedTranscript(props: SessionContentProps) {
+  const { session, initialQuery, highlightTerms, scrollToMessageIndex } = props;
+  const isKiro = session.kind === "kiro";
+  const [messages, setMessages] = useState<TranscriptMessage[] | null>(null);
+  const [fallback, setFallback] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    // Do not load internally when recording is selected or messages were preloaded.
-    if (recordingOnly || hasPreload) return;
     let cancelled = false;
     readAgentTranscript(session.id)
       .then((msgs) => {
         if (cancelled) return;
-        if (msgs.length > 0) setMessages(msgs);
+        if (msgs.length > 0 || isKiro) setMessages(msgs);
         else setFallback(true);
       })
-      .catch(() => {
-        if (!cancelled) setFallback(true);
+      .catch((reason) => {
+        if (!cancelled) {
+          if (isKiro) setError(String(reason));
+          setFallback(true);
+        }
       });
-    return () => {
-      cancelled = true;
-    };
-  }, [session.id, recordingOnly, hasPreload]);
+    return () => { cancelled = true; };
+  }, [session.id, isKiro]);
+
+  if (isKiro && error)
+    return (
+      <div className="sv" style={{ gap: "var(--sv-pad)" }}>
+        <div role="alert" style={{ padding: "var(--sv-pad)", overflowWrap: "anywhere", overflow: "auto", maxHeight: "40%", flexShrink: 0 }}>
+          {error}
+        </div>
+        <div style={{ position: "relative", flex: 1, minHeight: 0 }}>
+          <RecordingContent {...props} />
+        </div>
+      </div>
+    );
 
   if (messages)
     return (
@@ -89,14 +102,7 @@ export function SessionContentViewer({
         scrollToMessageIndex={scrollToMessageIndex}
       />
     );
-  if (fallback)
-    return (
-      <RecordingViewer
-        sessionId={session.id}
-        initialQuery={highlightTerms?.[0] ?? initialQuery}
-        scrollToOrdinal={scrollToOrdinal}
-      />
-    );
+  if (fallback) return <RecordingContent {...props} />;
   return (
     <div
       style={{

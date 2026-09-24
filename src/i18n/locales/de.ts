@@ -3,7 +3,7 @@
 import type en from "./en";
 
 const de: typeof en = {
-  "tree.newPlanExecuteSession": "Neue Sitzung für Planung und Umsetzung…",
+  "tree.newPlanExecuteSession": "Neue Planungs-/Ausführungssitzung…",
   "launch.splitTasks": "Automatisch in mehrere Aufgaben aufteilen",
   "launch.splitTasksHint": "Die Planung schlägt unabhängige Aufgaben vor. Prüfen Sie vor dem Start die Anweisungen, Agenten, Modelle und den Denkaufwand.",
   "launch.splitReview": "Ausführungsaufgaben prüfen",
@@ -471,6 +471,9 @@ const de: typeof en = {
   "spawn.launch": "Sitzung starten",
   "spawn.remaining": (n: number) => `${n} weitere Anfragen prüfen`,
   "spawn.notifyTitle": "Untersitzung wartet auf Bestätigung",
+  "spawn.requestUnavailable": "Dieser Anfrage fehlt die Kennung. Stellen Sie die Verbindung erneut her, um die Anfrage wiederherzustellen, bevor Sie antworten.",
+  "spawn.deliveryUncertain": "Die erste Aufgabe wurde möglicherweise bereits gesendet. Öffnen Sie die bestehende Sitzung und prüfen Sie den Stand, bevor Sie fortfahren. Die Aufgabe wird nicht automatisch erneut gesendet.",
+  "spawn.confirmedChoices": "Dieser Start wurde bereits bestätigt. Beim erneuten Versuch werden dieselbe Sitzung und dieselben Starteinstellungen verwendet.",
   "orch.title": "Mehrere Sitzungen starten",
   "orch.notifyTitle": "Sitzungsstart wartet auf Bestätigung",
   "orch.coordinatorName": "Sitzungsstatus",
@@ -626,13 +629,13 @@ const de: typeof en = {
   "settings.chatFont": "Schriftart der Unterhaltung",
   "settings.chatFontSize": "Schriftgröße der Unterhaltung",
   "settings.chatLineHeight": "Zeilenhöhe der Unterhaltung",
-  "settings.composerChips": "Composer-Leiste",
-  "settings.composerChipsHint": "Eingeschaltete Chips erscheinen immer in dieser Reihenfolge neben der Nachricht, auch wenn sie gerade nichts anzuzeigen haben: Ein Chip, dessen Funktion vorübergehend nicht verfügbar ist (kein laufender Agentenprozess, keine Hintergrundaufgaben, eine offene Anmeldung), wird leer oder deaktiviert gezeigt, nicht ausgeblendet. Nur ein Chip, den der aktuelle Agent gar nicht besitzt, entfällt. Passen die Chips nicht mehr hinein, wandern die überzähligen zusammen mit den ausgeschalteten Chips in ein Mehr-Menü. Ausgeschaltete Chips erscheinen nie in der Zeile und bleiben hier und in diesem Menü erreichbar.",
+  "settings.composerChips": "Symbolleiste im Eingabebereich",
+  "settings.composerChipsHint": "Aktivierte Elemente erscheinen in dieser Reihenfolge neben der Nachricht. Ist eine Funktion vorübergehend nicht verfügbar (der Agent läuft nicht, es gibt keine Hintergrundaufgaben oder die Anmeldung steht noch aus), bleibt ihr Element sichtbar, aber leer oder deaktiviert. Funktionen, die der aktuelle Agent nicht unterstützt, werden ausgelassen. Elemente, für die der Platz nicht reicht, erscheinen im Menü „Mehr“. Hier ausgeschaltete Elemente erscheinen nur in diesem Menü und können weiterhin hier konfiguriert werden.",
   "settings.composerChipUp": (chip: string) => `${chip} nach oben verschieben`,
   "settings.composerChipDown": (chip: string) => `${chip} nach unten verschieben`,
   "settings.composerChip.model": "Modell",
   "settings.composerChip.effort": "Denkaufwand",
-  "settings.composerChip.collaboration": "Kollaborationsmodus",
+  "settings.composerChip.collaboration": "Zusammenarbeitsmodus",
   "settings.composerChip.permission": "Berechtigungsmodus",
   "settings.composerChip.fastMode": "Schnellmodus",
   "settings.composerChip.serviceTier": "Geschwindigkeit",
@@ -680,6 +683,7 @@ const de: typeof en = {
   "settings.scOpenProject": "Projekt öffnen", // Open project
   "settings.scNewTab": "Neues Terminal", // New terminal
   "settings.scNewBrowserTab": "Neuer Browser-Tab", // New browser tab
+  "settings.scNewAgentSession": "Neue Agentensitzung",
   "settings.scClosePane": "Bereich / Tab schließen", // Close pane / tab
   "settings.scSplitRight": "Rechts teilen", // Split right
   "settings.scSplitDown": "Unten teilen", // Split down
@@ -800,8 +804,8 @@ const de: typeof en = {
   "tree.moveToSession": "Unter eine Sitzung verschieben (als Kind)", // Move under a session (as child)
   "tree.moveTo": "Verschieben nach…", // Move to…
   "tree.openNewTab": "In neuem Tab öffnen", // Open in New Tab
-  "tree.openSplitRight": "In Teilung rechts öffnen", // Open in Split Right
-  "tree.openSplitDown": "In Teilung unten öffnen", // Open in Split Down
+  "tree.openSplitRight": "In rechter Teilung öffnen", // Open in Split Right
+  "tree.openSplitDown": "In unterer Teilung öffnen", // Open in Split Down
   "tree.openInFocusedPane": "Im aktiven Bereich öffnen", // Open in Focused Pane
   "tree.tileSelected": "Ausgewählte Sitzungen nebeneinander anordnen", // Tile Selected Sessions
   "tree.tileSelectedTooMany": "Nebeneinander anordnen (bis zu 4 Sitzungen)", // Tile Selected Sessions (up to 4)
@@ -1009,7 +1013,7 @@ const de: typeof en = {
   "importSessions.clearSearch": "Suche zurücksetzen",
   "importSessions.noHistory": "Für dieses Projektverzeichnis wurden keine bisherigen Sitzungen gefunden.",
   "importSessions.title": "Sitzungen importieren",
-  "importSessions.description": "Suchen Sie bestehende Codex-, Claude- und OpenCode-Sitzungen mit dem Arbeitsverzeichnis dieses Projekts. Wählen Sie Sitzungen aus, um sie dem Projekt hinzuzufügen, und öffnen Sie anschließend eine Sitzung, um das Gespräch fortzusetzen.",
+  "importSessions.description": "Suchen Sie bestehende Codex-, Claude-, OpenCode- und Kiro-Sitzungen mit dem Arbeitsverzeichnis dieses Projekts. Wählen Sie Sitzungen aus, um sie dem Projekt hinzuzufügen, und öffnen Sie anschließend eine Sitzung, um das Gespräch fortzusetzen. Für Kiro können derzeit nur reine Textverläufe angezeigt werden.",
   "importSessions.search": "Nach Titel, Agent oder Sitzungs-ID suchen",
   "importSessions.empty": "Keine passenden Sitzungen gefunden.",
   "importSessions.imported": "Bereits importiert",
@@ -1273,7 +1277,7 @@ const de: typeof en = {
     `„${name}" löschen? Dies kann nicht rückgängig gemacht werden.`, // Delete "{name}"? This can't be undone.
 
   // ── File transfer (remote access) ──
-  "transfer.uploadsTitle": "Uploads", // Uploads
+  "transfer.title": "Übertragungen", // Transfers
   "transfer.download": "Herunterladen", // Download
   "transfer.upload": "Dateien hochladen…", // Upload Files…
   "transfer.uploadTooltip": "Dateien in diesen Ordner hochladen", // Upload files to this folder
@@ -1281,6 +1285,8 @@ const de: typeof en = {
   "transfer.cancelled": "Abgebrochen", // Cancelled
   "transfer.failed": "Fehlgeschlagen", // Failed
   "transfer.stalled": "Verbindung wird wiederhergestellt…", // Reconnecting…
+  "transfer.downloading": "Wird heruntergeladen…", // Downloading…
+  "transfer.savedToDownloads": "Im Ordner „Downloads“ gespeichert", // Saved to Downloads
   "transfer.foldersUnsupported": "Ordner können nicht hochgeladen werden.", // Folders can't be uploaded.
 
   // ── Status bar ──
@@ -1385,6 +1391,21 @@ const de: typeof en = {
   "errlog.close": "Schließen", // Close
 
   // ── Mobile ──
+  "agentPicker.title": "Neue Agentensitzung",
+  "agentPicker.search": "Agenten und Vorlagen suchen",
+  "agentPicker.sibling": "Gleiche Ebene",
+  "agentPicker.child": "Untergeordnete Sitzung",
+  "agentPicker.targetSibling": (session: string, location: string) => `Auf derselben Ebene wie „${session}“ in ${location} erstellen.`,
+  "agentPicker.targetChild": (session: string, location: string) => `Unter „${session}“ in ${location} erstellen.`,
+  "agentPicker.targetProject": (project: string) => `In ${project} erstellen.`,
+  "agentPicker.noProject": "Wählen oder öffnen Sie ein Projekt, um eine Agentensitzung zu erstellen.",
+  "agentPicker.selectProject": "Projekt auswählen",
+  "agentPicker.recent": "Zuletzt verwendet",
+  "agentPicker.noResults": (query: string) => `Keine Agenten oder Vorlagen für „${query}“ gefunden.`,
+  "agentPicker.loadFailed": "Agenten und Vorlagen konnten nicht geladen werden. Bitte versuchen Sie es erneut.",
+  "agentPicker.placementHint": "Im Suchfeld: Tab wechselt die Ebene; ↑/↓ wählt aus; Enter erstellt. Esc schließt.",
+  "agentPicker.invalidTarget": "Die ausgewählte Gruppe oder übergeordnete Sitzung ist nicht mehr verfügbar. Wählen Sie das Projekt erneut aus.",
+  "agentPicker.creating": "Wird erstellt…",
   "mobile.backConnections": "Zurück zu den Verbindungen",
   "mobile.loadSlow": "Das Laden dauert länger als erwartet. Sie können es erneut versuchen oder zu Ihren Verbindungen zurückkehren.",
   "mobile.connectionUnavailable": "Verbindung nicht verfügbar",
@@ -1399,11 +1420,11 @@ const de: typeof en = {
   "mobile.pushNotConfigured": "Für diesen Build ist kein Push-Dienst konfiguriert.",
   "mobile.pushDenied": "Erlauben Sie Benachrichtigungen in den Systemeinstellungen.",
   "mobile.pushRegistrationFailed": "Die Geräteregistrierung ist fehlgeschlagen. Bitte versuchen Sie es erneut.",
-  "mobile.pushRelayUnavailable": "Der Benachrichtigungsdienst ist nicht verfügbar. Bitte versuchen Sie es erneut.",
-  "mobile.pushHostUnavailable": "Der entfernte Host unterstützt noch keine Hintergrundbenachrichtigungen. Aktualisieren Sie ihn und stellen Sie die Verbindung erneut her.",
+  "mobile.pushRelayUnavailable": "Der Weiterleitungsdienst für Benachrichtigungen ist nicht verfügbar. Bitte versuchen Sie es erneut.",
+  "mobile.pushHostUnavailable": "Auf dem entfernten Host sind Hintergrundbenachrichtigungen noch nicht aktiviert. Aktualisieren Sie den Host und stellen Sie die Verbindung erneut her.",
   "mobile.pushDisclosure": "Für Hintergrundbenachrichtigungen werden Getui und der Push-Dienst des Geräteherstellers verwendet. Zur Zustellung verarbeiten sie Gerätekennungen, Netzwerkinformationen, Sitzungsnamen und kurze Antwortvorschauen. Verbindungspasswörter und private SSH-Schlüssel werden nicht gesendet.",
   "mobile.pushConnectHint": "Öffnen Sie nach der Aktivierung jede gewünschte Verbindung einmal, um Benachrichtigungen zu abonnieren.",
-  "mobile.pushTarget": "Verbindung testen",
+  "mobile.pushTarget": "Verbindung für den Test",
   "mobile.copyConnection": "Kopieren und bearbeiten",
   "mobile.copyConnectionHint": "Bearbeiten Sie die Einstellungen auf Grundlage dieser Verbindung. Gespeicherte Zugangsdaten werden sicher übernommen. Die ursprüngliche Verbindung bleibt unverändert; bei identischen Einstellungen wird die vorhandene Verbindung beibehalten.",
   "mobile.copyConnectionReused": "Diese Einstellungen sind bereits gespeichert. Die vorhandene Verbindung wurde beibehalten.",
@@ -1414,7 +1435,7 @@ const de: typeof en = {
   "mobile.empty1": "Keine Sitzungen.", // No sessions.
   "mobile.noMatch": "Keine passenden Sitzungen", // No matching sessions
   "mobile.empty2":
-    "Erstellen Sie eine in der Desktop-App oder im Computer-Browser, sie erscheint hier automatisch.", // Create one on the desktop app or a computer browser…
+    "Erstellen Sie eine Sitzung in der Desktop-App oder im Browser auf einem Computer. Sie erscheint hier automatisch.", // Create one on the desktop app or a computer browser…
   "mobile.back": "‹ Zurück", // ‹ Back
   "mobile.selCopy": "Kopieren", // Copy
   "mobile.selCancel": "Abbrechen", // Cancel
@@ -1434,19 +1455,19 @@ const de: typeof en = {
   "mobile.buildInfo": (version: string, time: string) => `App v${version} · Build vom ${time}`,
   "mobile.myDevices": "Meine Geräte", // My devices
   "mobile.account": "Konto", // Account
-  "mobile.signedInHint": "Angemeldet. Sie können die Arbeitsbereiche, Projekte und Sitzungen sehen, die Geräte dieses Kontos freigeben.", // Signed in. You can view the workspaces, projects, and sessions shared by devices on this account.
+  "mobile.signedInHint": "Angemeldet. Sie können die Arbeitsbereiche, Projekte und Sitzungen anzeigen, die Geräte dieses Kontos freigeben.", // Signed in. You can view the workspaces, projects, and sessions shared by devices on this account.
   "mobile.manageAccount": "Konto verwalten", // Manage account
   "mobile.signOut": "Abmelden", // Sign out
   "mobile.viewMyDevices": "Meine Geräte anzeigen", // View my devices
   "mobile.noDevices": "Mit diesem Konto ist noch kein Gerät angemeldet.", // No devices are signed in to this account yet.
   "mobile.online": "Online", // Online
   "mobile.offline": "Offline", // Offline
-  "mobile.deviceNotSharing": "Dieses Gerät gibt noch nichts frei.", // The device is not sharing anything yet.
+  "mobile.deviceNotSharing": "Dieses Gerät gibt noch keine Inhalte frei.", // The device is not sharing anything yet.
   "mobile.scopeMachine": "Gesamter Arbeitsbereich", // Entire workspace
   "mobile.scopeProject": "Projekt", // Project
   "mobile.scopeSession": "Sitzung", // Session
   "mobile.sharingNotReady": "Die freigegebenen Inhalte sind noch nicht bereit. Prüfen Sie die Freigabeeinstellungen auf dem betreffenden Gerät.", // Shared content is not ready yet. Check the sharing settings on that device.
-  "mobile.deviceOffline": "Das Gerät ist offline. Öffnen Sie VelaTerm auf dem betreffenden Gerät und halten Sie es mit dem Netzwerk verbunden.", // The device is offline. Open VelaTerm on that device and keep it connected to the network.
+  "mobile.deviceOffline": "Das Gerät ist offline. Öffnen Sie VelaTerm auf diesem Gerät und lassen Sie es mit dem Netzwerk verbunden.", // The device is offline. Open VelaTerm on that device and keep it connected to the network.
   "mobile.viewShared": "Freigegebene Inhalte anzeigen →", // View shared content →
   "mobile.devicesUnavailable": "Die Geräteliste konnte nicht geladen werden. Bitte versuchen Sie es erneut.", // Could not load the device list. Please try again.
   "mobile.accountUnavailable": "Der Kontostatus konnte nicht geladen werden. Prüfen Sie Ihre Netzwerkverbindung und versuchen Sie es erneut.", // Could not load the account status. Check your network and try again.
@@ -1456,16 +1477,15 @@ const de: typeof en = {
   "mobile.checkSignIn": "Anmeldestatus prüfen", // Check sign-in status
   "mobile.waitingSignIn": "Warten auf Anmeldebestätigung…", // Waiting for sign-in confirmation…
   "mobile.workspaceTitle": "Ihr Arbeitsbereich", // Your workspace
-  "mobile.workspaceHint": "Verbinden Sie sich mit einem Remote-Host und arbeiten Sie an Ihren Projekten weiter.", // Connect to a remote host and pick up where you left off.
+  "mobile.workspaceHint": "Verbinden Sie sich mit einem Remote-Host und setzen Sie Ihre Arbeit fort.", // Connect to a remote host and pick up where you left off.
   "mobile.newSsh": "+ SSH-Verbindung", // + SSH connection
   "mobile.newUrl": "+ URL-Verbindung", // + URL connection
-  "mobile.remote": "Meine Geräte", // My devices
-  "mobile.scanToConnect": "QR-Code scannen", // Scan QR code to connect
-  "mobile.noConnections": "Noch keine Verbindungen gespeichert. Fügen Sie eine SSH- oder URL-Verbindung hinzu oder öffnen Sie Remote, um Inhalte zu sehen, die Geräte Ihres Kontos freigeben.", // No saved connections yet. Add an SSH or URL connection, or open Remote to see content shared by devices on your account.
+  "mobile.scanToConnect": "QR-Code zum Verbinden scannen", // Scan QR code to connect
+  "mobile.noConnections": "Noch keine Verbindungen gespeichert. Fügen Sie eine SSH- oder URL-Verbindung hinzu oder öffnen Sie „Meine Geräte“, um Inhalte zu sehen, die Geräte Ihres Kontos freigeben.", // No saved connections yet. Add an SSH or URL connection, or open My devices to see content shared by devices on your account.
   "mobile.tapToConnect": "Zum Verbinden antippen →", // Tap to connect →
   "mobile.webPasswordSaved": "Zugangspasswort gespeichert", // Access password saved
   "mobile.deleteConnectionTitle": "Verbindung löschen", // Delete connection
-  "mobile.deleteConnectionConfirm": (name: string) => `„${name}“ und die gespeicherten Zugangsdaten löschen? Remote-Projekte werden nicht gelöscht.`,
+  "mobile.deleteConnectionConfirm": (name: string) => `„${name}“ und die zugehörigen gespeicherten Zugangsdaten löschen? Remote-Projekte werden nicht gelöscht.`,
   "mobile.connectionMissing": "Verbindung nicht gefunden", // Connection not found
   "mobile.editConnection": "Verbindung bearbeiten", // Edit connection
   "mobile.addSshHost": "SSH-Verbindung hinzufügen", // Add SSH connection
@@ -1475,13 +1495,13 @@ const de: typeof en = {
   "mobile.scanToFill": "Per QR-Code ausfüllen", // Fill in from QR code
   "mobile.openingCamera": "Kamera wird geöffnet…", // Opening the camera…
   "mobile.scanCancelled": "Scan abgebrochen", // Scan cancelled
-  "mobile.scanDone": "Dienstadresse erkannt. Prüfen Sie die Adresse, dann speichern und verbinden.", // Service address detected. Check it, then save and connect.
+  "mobile.scanDone": "Dienstadresse erkannt. Prüfen Sie die Adresse, speichern Sie die Verbindung und stellen Sie sie her.", // Service address detected. Check it, then save and connect.
   "mobile.scanNativeOnly": "Das Scannen von QR-Codes ist nur in der iOS- oder Android-App möglich.", // QR scanning is only available in the iOS or Android app.
   "mobile.webPasswordOptional": "Zugangspasswort (optional)", // Access password (optional)
-  "mobile.keepPassword": "Leer lassen, um das Passwort zu behalten", // Leave empty to keep the current password
-  "mobile.webPasswordLater": "Auch nach dem Verbinden möglich", // You can also enter it after connecting
-  "mobile.webPasswordSavedHint": "Das Zugangspasswort ist gespeichert und wird beim erneuten Verbinden automatisch verwendet. Ein leeres Feld behält das gespeicherte Passwort.", // The access password is saved and used automatically when you reconnect. Leaving the field empty keeps the saved password.
-  "mobile.webPasswordStorageHint": "Das Passwort wird im sicheren Speicher des Smartphones abgelegt. Sie können es auch bei der Anmeldung speichern lassen.", // The password is kept in the phone’s secure storage. You can also choose to remember it when you enter it after connecting.
+  "mobile.keepPassword": "Leer lassen, um das aktuelle Passwort beizubehalten", // Leave empty to keep the current password
+  "mobile.webPasswordLater": "Sie können es auch nach dem Verbinden eingeben", // You can also enter it after connecting
+  "mobile.webPasswordSavedHint": "Das Zugangspasswort ist gespeichert und wird beim erneuten Verbinden automatisch verwendet. Wenn Sie das Feld leer lassen, bleibt das gespeicherte Passwort erhalten.", // The access password is saved and used automatically when you reconnect. Leaving the field empty keeps the saved password.
+  "mobile.webPasswordStorageHint": "Das Passwort wird im sicheren Speicher des Smartphones abgelegt. Sie können es auch speichern lassen, wenn Sie es nach dem Verbinden eingeben.", // The password is kept in the phone’s secure storage. You can also choose to remember it when you enter it after connecting.
   "mobile.sshHost": "SSH-Host", // SSH host
   "mobile.sshHostPlaceholder": "Hostname oder IP-Adresse", // Hostname or IP address
   "mobile.sshPort": "SSH-Port", // SSH port
@@ -1492,27 +1512,27 @@ const de: typeof en = {
   "mobile.authKey": "Privater Schlüssel (OpenSSH Ed25519)", // Private key (OpenSSH Ed25519)
   "mobile.sshPassword": "SSH-Passwort", // SSH password
   "mobile.privateKey": "Privater Schlüssel", // Private key
-  "mobile.keepPrivateKey": "Leer lassen, um den gespeicherten Schlüssel zu behalten", // Leave empty to keep the saved private key
+  "mobile.keepPrivateKey": "Leer lassen, um den gespeicherten privaten Schlüssel beizubehalten", // Leave empty to keep the saved private key
   "mobile.pastePrivateKey": "Privaten OpenSSH-Schlüssel einfügen", // Paste an OpenSSH private key
   "mobile.passphraseOptional": "Schlüssel-Passphrase (optional)", // Key passphrase (optional)
-  "mobile.keepPassphrase": "Leer lassen, um die Passphrase zu behalten", // Leave empty to keep the current passphrase
-  "mobile.sshSecretSavedHint": "Die SSH-Zugangsdaten sind im sicheren Speicher des Smartphones abgelegt. Lassen Sie die Felder beim Bearbeiten leer, um sie zu behalten.", // SSH credentials are kept in the phone’s secure storage. Leave the fields empty while editing to keep them.
+  "mobile.keepPassphrase": "Leer lassen, um die aktuelle Passphrase beizubehalten", // Leave empty to keep the current passphrase
+  "mobile.sshSecretSavedHint": "Die SSH-Zugangsdaten sind im sicheren Speicher des Smartphones abgelegt. Lassen Sie die Felder beim Bearbeiten leer, um sie beizubehalten.", // SSH credentials are kept in the phone’s secure storage. Leave the fields empty while editing to keep them.
   "mobile.remoteService": "Remote-Dienst", // Remote service
   "mobile.serviceAuto": "VelaTerm-Dienst automatisch suchen", // Find the VelaTerm service automatically
-  "mobile.serviceManual": "Port eines vorhandenen Dienstes angeben", // Use an existing service port
+  "mobile.serviceManual": "Port eines vorhandenen Dienstes verwenden", // Use an existing service port
   "mobile.remotePort": "Loopback-HTTP-Port des Remote-Dienstes", // Remote loopback HTTP port
   "mobile.webPasswordAutoHint": "Das Zugangspasswort ist gespeichert und wird beim erneuten Verbinden automatisch verwendet.", // The access password is saved and used automatically when you reconnect.
   "mobile.prepareService": "VelaTerm-Dienst herunterladen und starten, wenn keiner verfügbar ist", // Download and start the VelaTerm service when none is available
-  "mobile.prepareServiceHint": "Die automatische Vorbereitung legt ein signaturgeprüftes Programm sowie Konfiguration und Protokolldateien unter ~/.velaterm/ auf dem Remote-Host ab und hält den Dienst am Laufen. Dafür sind Python 3 und ein OpenSSL mit Ed25519-Unterstützung nötig; bei einem vorhandenen Dienst oder einem festen Port entfällt das.", // Automatic preparation writes a signature-verified binary, configuration, and logs to ~/.velaterm/ on the remote host and keeps the service running. It needs Python 3 and an OpenSSL with Ed25519 support; reusing an existing service or specifying its port does not.
+  "mobile.prepareServiceHint": "Die automatische Vorbereitung legt ein signaturgeprüftes Programm sowie Konfiguration und Protokolldateien unter ~/.velaterm/ auf dem Remote-Host ab und lässt den Dienst weiterlaufen. Dafür sind Python 3 und OpenSSL mit Ed25519-Unterstützung erforderlich. Wenn Sie einen vorhandenen Dienst verwenden oder dessen Port angeben, benötigen Sie diese Werkzeuge nicht.", // Automatic preparation writes a signature-verified binary, configuration, and logs to ~/.velaterm/ on the remote host and keeps the service running. It needs Python 3 and an OpenSSL with Ed25519 support; reusing an existing service or specifying its port does not.
   "mobile.saveConnection": "Verbindung speichern", // Save connection
   "mobile.saveAndConnect": "Speichern und verbinden", // Save and connect
-  "mobile.loginOpening": "Anmeldefenster wird geöffnet…", // Opening the sign-in page in your browser…
+  "mobile.loginOpening": "Anmeldeseite wird im Browser geöffnet…", // Opening the sign-in page in your browser…
   "mobile.loginFinishInBrowser": "Schließen Sie die Anmeldung im Browserfenster ab und kehren Sie dann zur App zurück.", // Complete the sign-in in the browser window, then return to the app.
   "mobile.loginChecking": "Anmeldestatus wird geprüft…", // Checking sign-in status…
   "mobile.loginSuccess": "Angemeldet.", // Signed in.
-  "mobile.loginWaiting": "Warten auf die Anmeldebestätigung. Konto und Geräteliste werden danach automatisch aktualisiert.", // Waiting for sign-in confirmation. Your account and device list update automatically once sign-in completes.
+  "mobile.loginWaiting": "Warten auf die Anmeldebestätigung. Konto und Geräteliste werden nach erfolgreicher Anmeldung automatisch aktualisiert.", // Waiting for sign-in confirmation. Your account and device list update automatically once sign-in completes.
   "mobile.loginExpired": "Die Anmeldeanfrage ist abgelaufen. Bitte melden Sie sich erneut an.", // The sign-in request has expired. Please sign in again.
-  "mobile.loginRetrying": "Der Kontodienst ist vorübergehend nicht erreichbar. Es wird erneut versucht; eine neue Anmeldung ist nicht nötig.", // The account service is temporarily unreachable. Retrying. You do not need to sign in again.
+  "mobile.loginRetrying": "Der Kontodienst ist vorübergehend nicht erreichbar. Die Verbindung wird erneut versucht. Sie müssen sich nicht erneut anmelden.", // The account service is temporarily unreachable. Retrying. You do not need to sign in again.
 
   // ── Other shared components ──
   "splitter.dragToResize": "Zum Anpassen ziehen", // Drag to resize
@@ -1751,8 +1771,9 @@ const de: typeof en = {
   "chat.shell.cancelled": "Abgebrochen",
   "chat.shell.exitCode": (code: number) => `Exit-Code ${code}`,
   "chat.shell.stderr": "stderr",
-  "chat.shell.truncated": "Frühere Ausgabe wurde gekürzt; nur der letzte Teil bleibt erhalten",
-  "chat.shell.emptyCommand": "Geben Sie nach ! einen Befehl ein, um ihn in der Shell auszuführen",
+  "chat.shell.truncated": "Frühere Ausgaben wurden abgeschnitten. Nur die neuesten Ausgaben bleiben erhalten.",
+  "chat.shell.outputIncomplete": "Die Erfassung endete, bevor alle Ausgabeströme geschlossen waren. Die Ausgabe ist möglicherweise unvollständig.",
+  "chat.shell.emptyCommand": "Geben Sie nach ! einen Befehl ein, um ihn in der Shell auszuführen.",
   "chat.shell.noImages": "Shell-Befehle können keine Bilder enthalten. Entfernen Sie den Anhang oder senden Sie ihn als Nachricht.",
   "chat.shell.alreadyRunning": "In dieser Unterhaltung läuft noch ein Shell-Befehl. Brechen Sie ihn ab oder warten Sie, bis er beendet ist.",
   // Compacting the conversation… / Context compacted / Context compacted automatically
@@ -1910,18 +1931,19 @@ const de: typeof en = {
   "chat.tasks.elapsed": "Laufzeit",
   "chat.tasks.tokens": "Tokens",
   "chat.tasks.toolUses": "Tool-Aufrufe",
-  "chat.tasks.currentAgent": "Aktueller Agent",
-  "chat.tasks.started": "Gestartet",
+  "chat.tasks.lastTool": "Zuletzt gemeldetes Tool",
+  "chat.tasks.lastUpdatedAgent": "Zuletzt gemeldeter Agent",
+  "chat.tasks.started": "Gestartet um",
   "chat.tasks.finished": "Beendet um",
   "chat.tasks.summary": "Zusammenfassung",
   "chat.tasks.outputFile": "Ausgabedatei",
   "chat.tasks.phases": "Phasen",
-  "chat.tasks.noProgress": "Diese Aufgabe meldet keinen Fortschritt pro Agent.",
+  "chat.tasks.noProgress": "Für diese Aufgabe wird kein Fortschritt der einzelnen Agenten gemeldet.",
   "chat.tasks.attempt": (n: number) => `Versuch ${n}`,
   "chat.tasks.prompt": "Prompt",
   "chat.tasks.result": "Ergebnis",
-  "chat.tasks.agentState.start": "läuft",
-  "chat.tasks.agentState.done": "fertig",
+  "chat.tasks.agentState.start": "Läuft",
+  "chat.tasks.agentState.done": "Fertig",
   "chat.retry.line": (attempt: number, max: number, seconds: number, message: string) =>
     `Neuer Versuch (${attempt}/${max}) in ${seconds} s: ${message}`,
   "chat.notify.dismiss": "Schließen",
@@ -1935,50 +1957,50 @@ const de: typeof en = {
   // Native texts of the mobile remote plugin (iOS, Android, download bridge). They reach the apps through native-text.json; {name} placeholders are replaced natively.
   "mobile.native.trustTitle": "Remote-Fingerabdruck bestätigen",
   "mobile.native.trustChangedTitle": "Remote-Fingerabdruck hat sich geändert",
-  "mobile.native.trustBody": "{identity}\n\n{fingerprint}\n\nPrüfen Sie diesen Fingerabdruck mit dem Administrator des Hosts, bevor Sie fortfahren.",
-  "mobile.native.trustChangedBody": "{identity}\n\n{fingerprint}\n\nDieser Fingerabdruck unterscheidet sich von dem zuvor vertrauten. Prüfen Sie ihn mit dem Administrator des Hosts, bevor Sie fortfahren. Der bisher vertraute Fingerabdruck wird ersetzt.",
+  "mobile.native.trustBody": "{identity}\n\n{fingerprint}\n\nGleichen Sie diesen Fingerabdruck mit dem Administrator des Hosts ab, bevor Sie fortfahren.",
+  "mobile.native.trustChangedBody": "{identity}\n\n{fingerprint}\n\nDieser Fingerabdruck unterscheidet sich vom bisher als vertrauenswürdig gespeicherten Fingerabdruck. Gleichen Sie ihn mit dem Administrator des Hosts ab, bevor Sie fortfahren. Der bisher gespeicherte Fingerabdruck wird ersetzt.",
   "mobile.native.trustAccept": "Vertrauen und fortfahren",
   "mobile.native.tlsIdentity": "HTTPS-Zertifikat · {identity}",
   "mobile.native.ok": "OK",
   "mobile.native.reconnect": "Erneut verbinden",
   "mobile.native.switchConnection": "Verbindung wechseln",
   "mobile.native.currentServer": "Aktueller Server",
-  "mobile.native.navigationBlocked": "Die Navigation weg vom aktuellen Dienst wurde blockiert: {host}",
-  "mobile.native.pageUnavailable": "Die Remote-Seite ist vorübergehend nicht verfügbar (HTTP {code}). Versuchen Sie es erneut oder kehren Sie zu Ihren Verbindungen zurück.",
-  "mobile.native.pageLoadFailed": "Die Remote-Seite konnte nicht geladen werden. Prüfen Sie Ihre Netzwerkverbindung und versuchen Sie es erneut, oder kehren Sie zu Ihren Verbindungen zurück.",
-  "mobile.native.pageLoadFailedReason": "Die Remote-Seite konnte nicht geladen werden. Prüfen Sie Ihre Netzwerkverbindung und versuchen Sie es erneut, oder kehren Sie zu Ihren Verbindungen zurück.\n\n{reason}\n{domain} {code}",
-  "mobile.native.pageTerminated": "Die Seite wurde beendet. Verbinden Sie sich erneut oder kehren Sie zu Ihren Verbindungen zurück.",
-  "mobile.native.certificateRejected": "Das Remote-Zertifikat konnte nicht überprüft werden. Verbinden Sie sich erneut oder kehren Sie zu Ihren Verbindungen zurück.",
-  "mobile.native.webViewOutdated": "Aktualisieren Sie Android System WebView und versuchen Sie es erneut, oder kehren Sie zu Ihren Verbindungen zurück.",
+  "mobile.native.navigationBlocked": "Der Wechsel zu einer Seite außerhalb des aktuellen Dienstes wurde blockiert: {host}",
+  "mobile.native.pageUnavailable": "Die Remote-Seite ist vorübergehend nicht verfügbar (HTTP {code}). Versuchen Sie es erneut oder kehren Sie zur Verbindungsliste zurück.",
+  "mobile.native.pageLoadFailed": "Die Remote-Seite konnte nicht geladen werden. Prüfen Sie Ihre Netzwerkverbindung und versuchen Sie es erneut, oder kehren Sie zur Verbindungsliste zurück.",
+  "mobile.native.pageLoadFailedReason": "Die Remote-Seite konnte nicht geladen werden. Prüfen Sie Ihre Netzwerkverbindung und versuchen Sie es erneut, oder kehren Sie zur Verbindungsliste zurück.\n\n{reason}\n{domain} {code}",
+  "mobile.native.pageTerminated": "Die Seite wurde beendet. Verbinden Sie sich erneut oder kehren Sie zur Verbindungsliste zurück.",
+  "mobile.native.certificateRejected": "Das Remote-Zertifikat konnte nicht überprüft werden. Verbinden Sie sich erneut oder kehren Sie zur Verbindungsliste zurück.",
+  "mobile.native.webViewOutdated": "Aktualisieren Sie Android System WebView und versuchen Sie es erneut, oder kehren Sie zur Verbindungsliste zurück.",
   "mobile.native.downloadFailedTitle": "Download fehlgeschlagen",
   "mobile.native.downloadRetry": "Der Download ist fehlgeschlagen. Bitte versuchen Sie es erneut.",
-  "mobile.native.downloadTooLarge": "Der Dateiexport auf dem Smartphone unterstützt derzeit Dateien bis 64 MB.",
+  "mobile.native.downloadTooLarge": "Auf Mobilgeräten können derzeit Dateien bis 64 MB exportiert werden.",
   "mobile.native.downloadFileFailed": "Die Datei konnte nicht heruntergeladen werden. Bitte versuchen Sie es erneut.",
-  "mobile.native.downloadCreateFailed": "Die Download-Datei konnte nicht erstellt werden.",
+  "mobile.native.downloadCreateFailed": "Die Datei für den Download konnte nicht erstellt werden.",
   "mobile.native.saveLocationFailed": "Der Speicherort konnte nicht geöffnet werden.",
   "mobile.native.fileSaved": "Datei gespeichert",
   "mobile.native.fileSaveFailed": "Die Datei konnte nicht gespeichert werden. Bitte versuchen Sie es erneut.",
   "mobile.native.savePickerFailed": "Der Dialog zum Speichern der Datei konnte nicht geöffnet werden.",
-  "mobile.native.scanHint": "Richten Sie die Kamera auf den URL-QR-Code",
-  "mobile.native.scanPrompt": "Scannen Sie den QR-Code der Dienstadresse. Zum Abbrechen drücken Sie Zurück.",
+  "mobile.native.scanHint": "Richten Sie die Kamera auf den QR-Code der URL",
+  "mobile.native.scanPrompt": "Scannen Sie den QR-Code der Dienstadresse. Drücken Sie zum Abbrechen auf „Zurück“.",
   "mobile.native.scanBusy": "Ein Scan läuft bereits. Schließen Sie zuerst das aktuelle Scanfenster.",
-  "mobile.native.scanUnavailable": "Der Scanner konnte nicht geöffnet werden. Kehren Sie zur Verbindungsübersicht zurück und versuchen Sie es erneut.",
+  "mobile.native.scanUnavailable": "Der Scanner konnte nicht geöffnet werden. Kehren Sie zur Verbindungsliste zurück und versuchen Sie es erneut.",
   "mobile.native.scannerNotReady": "Der Scanner ist noch nicht bereit.",
   "mobile.native.scanCancelled": "Der Scan wurde abgebrochen.",
   "mobile.native.cameraPermissionDenied": "Der Kamerazugriff ist nicht erlaubt. Erlauben Sie VelaTerm in den Systemeinstellungen die Nutzung der Kamera.",
   "mobile.native.cameraUnavailable": "Die Kamera kann nicht verwendet werden. Prüfen Sie das Gerät und die Kameraberechtigung.",
   "mobile.native.cameraBusy": "Die Kamera ist nicht verfügbar. Schließen Sie andere Apps, die die Kamera verwenden, und versuchen Sie es erneut.",
   "mobile.native.qrOutputUnavailable": "Dieses Gerät kann keine QR-Codes lesen.",
-  "mobile.native.qrTypeUnavailable": "Dieses Gerät unterstützt kein Scannen von QR-Codes.",
+  "mobile.native.qrTypeUnavailable": "Dieses Gerät unterstützt das Scannen von QR-Codes nicht.",
   "mobile.native.qrTooLong": "Die URL im QR-Code ist zu lang.",
-  "mobile.native.qrInvalid": "Der QR-Code enthält keine gültige Dienstadresse. Scannen Sie eine HTTPS-URL ohne Benutzername und Passwort.",
+  "mobile.native.qrInvalid": "Der QR-Code enthält keine gültige Dienstadresse. Scannen Sie eine HTTPS-URL ohne Benutzernamen oder Passwort.",
   "mobile.native.urlConnectionName": "URL-Verbindung",
   "mobile.native.keychainReadFailed": "Der Systemschlüsselbund konnte nicht gelesen werden ({code}).",
-  "mobile.native.keychainWriteFailed": "Der Systemschlüsselbund konnte nicht gespeichert werden ({code}).",
-  "mobile.native.secureStorageWriteFailed": "Der sichere Speicher konnte nicht gespeichert werden.",
+  "mobile.native.keychainWriteFailed": "Die Daten konnten nicht im Systemschlüsselbund gespeichert werden ({code}).",
+  "mobile.native.secureStorageWriteFailed": "Die Daten konnten nicht im sicheren Speicher gespeichert werden.",
   "mobile.native.hostKeyUnreadable": "Der öffentliche Schlüssel des Hosts konnte nicht gelesen werden.",
   "mobile.native.portRange": "Der Port muss zwischen 1 und 65535 liegen.",
-  "mobile.native.addressInvalid": "Geben Sie eine HTTP- oder HTTPS-Adresse ohne Benutzername und Passwort ein.",
+  "mobile.native.addressInvalid": "Geben Sie eine HTTP- oder HTTPS-Adresse ohne Benutzernamen oder Passwort ein.",
   "mobile.native.httpsRequired": "Verwenden Sie HTTPS für URL-Verbindungen. HTTP ist nur für einen lokalen SSH-Tunnel erlaubt.",
   "mobile.native.nameRequired": "Geben Sie einen Verbindungsnamen ein.",
   "mobile.native.sshHostInvalid": "Geben Sie einen gültigen SSH-Host und Benutzernamen ein.",
@@ -1999,29 +2021,42 @@ const de: typeof en = {
   "mobile.native.loginResponseInvalid": "Ungültige Anmeldeantwort.",
   "mobile.native.loginRestart": "Bitte starten Sie die Anmeldung erneut.",
   "mobile.native.signInFirst": "Bitte melden Sie sich zuerst an.",
-  "mobile.native.deviceInvalid": "Ungültiges Gerät.",
+  "mobile.native.deviceInvalid": "Ungültige Geräte-ID.",
   "mobile.native.grantInvalid": "Ungültiger Freigabebereich.",
   "mobile.native.connectResponseInvalid": "Ungültige Verbindungsantwort.",
   "mobile.native.remoteWindowFailed": "Das Remote-Fenster konnte nicht geöffnet werden.",
   "mobile.native.accountActionInvalid": "Ungültige Kontoaktion.",
-  "mobile.native.accountAddressInvalid": "Ungültige Kontoadresse.",
+  "mobile.native.accountAddressInvalid": "Ungültige URL des Kontodienstes.",
   "mobile.native.loginRequestInvalid": "Ungültige Anmeldeanfrage.",
   "mobile.native.loginStateUpdateFailed": "Der Anmeldestatus konnte nicht aktualisiert werden.",
   "mobile.native.loginFailed": "Die Anmeldung ist fehlgeschlagen.",
   "mobile.native.connectionFailed": "Die Verbindung ist fehlgeschlagen.",
   "mobile.native.resourceMissing": "Eine Ressource für die Remote-Einrichtung fehlt.",
-  "mobile.native.hostKeyRejected": "Dem SSH-Host-Fingerabdruck wurde nicht vertraut.",
+  "mobile.native.hostKeyRejected": "Der SSH-Host-Fingerabdruck wurde nicht als vertrauenswürdig bestätigt.",
   "mobile.native.rsaUnsupported": "Die iOS-SSH-Bibliothek unterstützt keine RSA-SHA-2-Authentifizierung. Verwenden Sie einen privaten Ed25519-Schlüssel oder ein Passwort.",
-  "mobile.native.privateKeyUnreadable": "Der private Schlüssel konnte nicht gelesen werden. Prüfen Sie die Passphrase. Unterstützt werden OpenSSH-Ed25519-Schlüssel, verschlüsselt mit AES-CTR.",
+  "mobile.native.privateKeyUnreadable": "Der private Schlüssel konnte nicht gelesen werden. Prüfen Sie die Passphrase. Unterstützt werden OpenSSH-Ed25519-Schlüssel; verschlüsselte Schlüssel müssen AES-CTR verwenden.",
   "mobile.native.connectionCancelled": "Die Verbindung wurde abgebrochen.",
   "mobile.native.sourceConnectionMissing": "Die Quellverbindung ist nicht mehr verfügbar. Kehren Sie zur Verbindungsliste zurück und versuchen Sie es erneut.",
-  "mobile.native.pythonRequired": "Die Remote-Einrichtung benötigt Python 3. Alternativ geben Sie den Port eines bereits laufenden Dienstes an.",
+  "mobile.native.pythonRequired": "Die Remote-Einrichtung benötigt Python 3. Alternativ können Sie den Port eines bereits laufenden Dienstes angeben.",
   "mobile.native.localPortFailed": "Für SSH konnte kein lokaler Port zugewiesen werden.",
   "mobile.native.healthCheckFailed": "Der Remote-Dienst hat die Zustandsprüfung nicht bestanden.",
   "mobile.native.connectionClosed": "Die Verbindung wurde geschlossen.",
   "mobile.native.responseTooLarge": "Die Remote-Antwort ist zu groß.",
+  "mobile.native.cameraUsageDescription": "VelaTerm verwendet die Kamera, um QR-Codes mit Dienstadressen zu scannen.",
+  "mobile.native.localNetworkUsageDescription": "VelaTerm stellt Verbindungen zu VelaTerm-Diensten und SSH-Hosts in Ihrem lokalen Netzwerk her.",
 
 
+  "term.runs.label": "Hintergrundbefehle",
+  "term.runs.elapsed": (time) => `Läuft seit ${time}`,
+  "term.runs.viewLog": "Protokoll",
+  "term.runs.stop": "Stoppen",
+  "term.runs.confirmStop": "Stoppen bestätigen",
+  "term.runs.stopFailed": "Stoppen fehlgeschlagen",
+  "term.runs.logTitle": (label) => `Protokoll: ${label}`,
+  "term.runs.logRunning": "Läuft",
+  "term.runs.logFinished": (code) => `Beendet mit Exit-Code ${code}`,
+  "term.runs.logEnded": "Beendet",
+  "term.runs.logEmpty": "Noch keine Ausgabe",
 };
 
 export default de;

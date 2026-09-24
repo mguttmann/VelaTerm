@@ -25,6 +25,7 @@ import {
 import { copyText, openDir } from "../ipc/info";
 import { createAgentPreset } from "../ipc/presets";
 import { PresetIcon } from "./agentPresetIcon";
+import { agentPickerUrl, navigateAgentPicker, newAgentPickerRoute } from "./NewAgentSession/navigation";
 import { onGitbashDownloadDone } from "../ipc/events";
 import { env } from "../platform";
 import { DOC_SAVE_EVENT } from "../hooks/useKeyboardShortcuts";
@@ -658,6 +659,13 @@ export function useSessionMenu(): SessionMenu {
       label: t("tree.newAgentSessionGroup"),
       icon: <Icons.bot size={14} />,
       submenu: [
+        {
+          label: t("agentPicker.title"),
+          icon: <Icons.search size={14} />,
+          href: agentPickerUrl(newAgentPickerRoute({ projectId, groupId, anchorId: parentSessionId, placement: parentSessionId ? "child" : "sibling" })),
+          onClick: () => navigateAgentPicker(agentPickerUrl(newAgentPickerRoute({ projectId, groupId, anchorId: parentSessionId, placement: parentSessionId ? "child" : "sibling" }))),
+        },
+        { label: "", separator: true },
         // Local agents create immediately through the default fast path.
         {
           label: t("tree.newAgentSession", "Claude"),
@@ -771,11 +779,6 @@ export function useSessionMenu(): SessionMenu {
         },
       ],
     },
-    ...(() => {
-      const href = planExecuteUrl({ projectId, groupId, parentSessionId });
-      return [{ label: t("tree.newPlanExecuteSession"), icon: <Icons.planExecute size={14} />, href,
-        onClick: () => navigatePlanExecute(href) }];
-    })(),
     // New Worktree Session shares the custom dialog but opens in new-worktree mode; users can change to existing/none.
     // It needs a repository to branch from, so it is omitted inside a collection that has none.
     ...(worktreeRepoRoot(projectId, groupId, parentSessionId)
@@ -794,6 +797,11 @@ export function useSessionMenu(): SessionMenu {
           } as MenuItem,
         ]
       : []),
+    ...(() => {
+      const href = planExecuteUrl({ projectId, groupId, parentSessionId });
+      return [{ label: t("tree.newPlanExecuteSession"), icon: <Icons.planExecute size={14} />, href,
+        onClick: () => navigatePlanExecute(href) }];
+    })(),
     ...(!groupId && !parentSessionId && useTermStore.getState().projects.some((p) => p.id === projectId && p.rootPath)
       ? [{
           label: `${t("importSessions.title")}…`,

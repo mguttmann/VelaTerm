@@ -30,42 +30,66 @@ export function ComposerToolbar({ chips, inline, actions, status, mobile }: {
   const widths = useRef(new Map<ComposerChipId, number>());
   const moreWidth = useRef(0);
   const observer = useRef<ResizeObserver | null>(null);
+  const observed = useRef(new Set<Element>());
   const [, remeasure] = useReducer((n: number) => n + 1, 0);
 
   const { enabled, hidden } = arrangeComposerChips(chips, inline);
   const inlineChips = mobile || !layout.overflow ? enabled : enabled.slice(0, layout.inlineCount);
   const folded = mobile ? hidden : [...enabled.slice(inlineChips.length), ...hidden];
-  const showToggle = !mobile && layout.overflow;
+  const showToggle = !mobile && chips.length > 0 && (hidden.length > 0 || layout.overflow);
   const open = mobile || (showToggle && expanded);
 
-  useEffect(() => {
-    if (mobile || typeof ResizeObserver === "undefined") return;
-    const ro = new ResizeObserver(() => remeasure());
+  useLayoutEffect(() => {
+    if (mobile) return;
+    const ro = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(() => remeasure());
     observer.current = ro;
+    const measure = () => remeasure();
+    let active = true;
+    window.addEventListener("resize", measure);
+    document.fonts?.addEventListener("loadingdone", measure);
+    void document.fonts?.ready.then(() => { if (active) measure(); });
     return () => {
-      ro.disconnect();
+      active = false;
+      ro?.disconnect();
       observer.current = null;
+      observed.current.clear();
+      window.removeEventListener("resize", measure);
+      document.fonts?.removeEventListener("loadingdone", measure);
     };
   }, [mobile]);
 
-  // Runs after every commit: cache the width of each rendered chip, then decide how many fit. A chip that
-  // is not measured yet counts as fitting so it is rendered once, measured here, and moved before paint.
+  // Folded chips remain measurable, but inert and invisible. Observe their natural width too, so font,
+  // label and locale changes cannot leave stale cached widths behind the collapsed row.
   useLayoutEffect(() => {
     if (mobile || !primary.current || !box.current) return;
     const slots = box.current.querySelectorAll<HTMLElement>(".sv-chip-slot");
+    const targets = new Set<Element>([primary.current, ...slots]);
+    if (toggle.current) targets.add(toggle.current);
+    for (const target of observed.current) if (!targets.has(target)) observer.current?.unobserve(target);
+    for (const target of targets) if (!observed.current.has(target)) observer.current?.observe(target);
+    observed.current = targets;
+    const currentWidths = new Map<ComposerChipId, number>();
     for (const slot of slots) {
+      // A narrow expanded row may clamp the visible chip. Measure its intrinsic width before paint,
+      // then restore the clamp so it never overflows the composer or feeds a shrunken width back in.
+      const previousWidth = slot.style.width;
+      const previousMax = slot.style.maxWidth;
+      slot.style.width = "max-content";
+      slot.style.maxWidth = "none";
       const width = slot.getBoundingClientRect().width;
-      if (width > 0) widths.current.set(slot.dataset.chip as ComposerChipId, width);
-      observer.current?.observe(slot);
+      slot.style.width = previousWidth;
+      slot.style.maxWidth = previousMax;
+      currentWidths.set(slot.dataset.chip as ComposerChipId, width);
     }
-    observer.current?.observe(primary.current);
-    const probe = toggle.current?.getBoundingClientRect().width ?? 0;
+    widths.current = currentWidths;
+    const probe = Math.max(toggle.current?.getBoundingClientRect().width ?? 0, toggle.current?.scrollWidth ?? 0);
     if (probe > 0) moreWidth.current = probe;
     const next = partitionComposerChips(
       enabled.map((chip) => widths.current.get(chip.id) ?? 0),
       primary.current.getBoundingClientRect().width,
       moreWidth.current,
       CHIP_GAP,
+      hidden.length > 0,
     );
     if (next.inlineCount !== layout.inlineCount || next.overflow !== layout.overflow) setLayout(next);
     if (!next.overflow && expanded) setExpanded(false);
@@ -93,13 +117,18 @@ export function ComposerToolbar({ chips, inline, actions, status, mobile }: {
     };
   }, [expanded, mobile]);
 
-  const slot = (chip: ComposerChip) => <div className="sv-chip-slot" data-chip={chip.id} key={chip.id}>{chip.node}</div>;
+  const slot = (chip: ComposerChip) => <div className="sv-chip-slot" style={{ maxWidth: "100%" }} data-chip={chip.id} key={chip.id}>{chip.node}</div>;
 
-  return <div className="sv-controls sv-toolbar" ref={box}>
+  return <div className="sv-controls sv-toolbar" ref={box} style={{ position: "relative" }}>
     <div className="sv-controls-main">
-      <div className={mobile ? "sv-controls-primary sv-controls-primary-wrap" : "sv-controls-primary"} ref={primary}>
+      <div className={mobile ? "sv-controls-primary sv-controls-primary-wrap" : "sv-controls-primary"} ref={primary}
+        style={!mobile && showToggle ? { minWidth: `min(100%, ${moreWidth.current}px)` } : undefined}>
         {inlineChips.map(slot)}
-        {showToggle && <button type="button" className="sv-chip sv-more-toggle" ref={toggle}
+        {!mobile && chips.length > 0 && <button type="button" className="sv-chip sv-more-toggle" ref={toggle}
+          aria-hidden={!showToggle || undefined} inert={!showToggle} tabIndex={showToggle ? undefined : -1}
+          style={showToggle ? { maxWidth: "100%", overflow: "hidden" } : {
+            position: "absolute", visibility: "hidden", pointerEvents: "none", width: "max-content",
+          }}
           title={t("chat.moreOptions")} aria-label={t("chat.moreOptions")}
           aria-expanded={expanded} aria-controls={id} onClick={() => setExpanded(value => !value)}>
           <Icons.sliders size={14} />
@@ -109,7 +138,8 @@ export function ComposerToolbar({ chips, inline, actions, status, mobile }: {
       </div>
       <div className="sv-controls-actions">{actions}</div>
     </div>
-    {(mobile || showToggle) && <div className="sv-controls-secondary" id={id} hidden={!open}>
+    {folded.length > 0 && <div className="sv-controls-secondary" id={id} aria-hidden={!open || undefined} inert={!open}
+      style={open ? undefined : { position: "absolute", visibility: "hidden", pointerEvents: "none", width: "100%", height: 0, padding: 0, overflow: "clip" }}>
       {folded.map(slot)}
     </div>}
     <div className="sv-controls-status">{status}</div>

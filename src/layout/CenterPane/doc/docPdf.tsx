@@ -16,7 +16,8 @@
 //! DocView imports this module only during export, keeping fonts and react-pdf off the document-open path.
 
 import { Document, Font, Link, Page, StyleSheet, Text, View, pdf } from "@react-pdf/renderer";
-import { marked, type Token, type Tokens } from "marked";
+import { type Token, type Tokens } from "marked";
+import { md } from "../../../markdownEngine";
 import type { ReactNode } from "react";
 import notoRegular from "../../../assets/fonts/NotoSansSC-Regular.ttf?url";
 import notoBold from "../../../assets/fonts/NotoSansSC-Bold.ttf?url";
@@ -269,7 +270,7 @@ function blocks(tokens: Token[] | undefined, s: S, kp: string): ReactNode[] {
 export async function buildDocPdfBlob(markdown: string, theme: DocPdfTheme): Promise<Blob> {
   ensureFont();
   const s = makeStyles(theme);
-  const tokens = marked.lexer(markdown);
+  const tokens = md.lexer(markdown);
 
   const docNode = (
     <Document>

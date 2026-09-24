@@ -1,7 +1,4 @@
 import { useEffect, useRef, useState } from "react";
-import { LanguageDescription } from "@codemirror/language";
-import { languages } from "@codemirror/language-data";
-import { classHighlighter, highlightTree } from "@lezer/highlight";
 import { useT } from "../../i18n";
 import { KnowledgeLink } from "./navigation";
 
@@ -10,12 +7,22 @@ export function KnowledgeSource({ source, file, start, projectId, line, callLine
   const t = useT(); const ref = useRef<HTMLPreElement>(null); const [tokens, setTokens] = useState<Token[]>([]);
   useEffect(() => {
     let active = true; setTokens([]);
-    const language = LanguageDescription.matchFilename(languages, file);
-    void language?.load().then(support => {
+    // The grammar catalogue loads on demand so the symbol viewer keeps CodeMirror out of the entry chunk;
+    // until it arrives the source renders unhighlighted, which is also the initial state.
+    void (async () => {
+      const [{ LanguageDescription }, { languages }, { classHighlighter, highlightTree }] = await Promise.all([
+        import("@codemirror/language"),
+        import("@codemirror/language-data"),
+        import("@lezer/highlight"),
+      ]);
+      const language = LanguageDescription.matchFilename(languages, file);
+      if (!active || !language) return;
+      const support = await language.load();
+      if (!active) return;
       const result: Token[] = [];
       highlightTree(support.language.parser.parse(source), classHighlighter, (from, to, classes) => result.push({ from, to, classes }));
       if (active) setTokens(result);
-    }).catch(() => {});
+    })().catch(() => {});
     return () => { active = false; };
   }, [source, file]);
   useEffect(() => {

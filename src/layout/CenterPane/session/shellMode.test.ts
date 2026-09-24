@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { parseShellContext, parseShellSubmission, shellErrorKey } from "./shellMode";
+import { parseShellSubmission, shellErrorKey, shellSubmissionFor, acknowledgeShellSubmission } from "./shellMode";
 
 describe("parseShellSubmission", () => {
   it("takes everything after a leading ! as the command, trimmed", () => {
@@ -21,35 +21,37 @@ describe("parseShellSubmission", () => {
   });
 });
 
-describe("parseShellContext", () => {
-  const tagged = (stderr: string) =>
-    `<bash-input>git status</bash-input>\n<bash-stdout>clean\n</bash-stdout><bash-stderr>${stderr}</bash-stderr>`;
-
-  it("reads the backend's context message back", () => {
-    expect(parseShellContext(tagged(""))).toEqual({
-      command: "git status", stdout: "clean\n", stderr: "", exitCode: 0, cancelled: false,
-    });
-  });
-
-  it("takes the exit code and the cancel line off the end of stderr", () => {
-    expect(parseShellContext(tagged("warn\nExit code 3"))).toMatchObject({ stderr: "warn", exitCode: 3 });
-    expect(parseShellContext(tagged("Command cancelled by the user"))).toMatchObject({
-      stderr: "", exitCode: undefined, cancelled: true,
-    });
-  });
-
-  it("drops the truncation note and tolerates a missing stderr block", () => {
-    const text = "<bash-input>yes</bash-input>\n<bash-stdout>[VelaTerm: earlier output truncated]\ntail</bash-stdout>";
-    expect(parseShellContext(text)).toMatchObject({ command: "yes", stdout: "tail", stderr: "", exitCode: 0 });
-    expect(parseShellContext("plain prose")).toBeNull();
-    expect(parseShellContext("<bash-input>x</bash-input>")).toBeNull();
-  });
-});
-
 describe("shellErrorKey", () => {
   it("maps the stable backend refusals and nothing else", () => {
     expect(shellErrorKey(new Error("chat_shell_running"))).toBe("chat.shell.alreadyRunning");
     expect(shellErrorKey("chat_shell_empty")).toBe("chat.shell.emptyCommand");
     expect(shellErrorKey("Failed to start the shell")).toBeNull();
+  });
+});
+
+
+describe("shell submission identity", () => {
+  it("retains unacknowledged commands independently and admits one pending send across panes", () => {
+    const session = crypto.randomUUID();
+    const first = shellSubmissionFor(session, "echo first");
+    first.pending = true;
+    expect(shellSubmissionFor(session, "echo first")).toBe(first);
+    expect(shellSubmissionFor(session, "echo first").pending).toBe(true);
+    const other = shellSubmissionFor(session, "echo second");
+    expect(other.id).not.toBe(first.id);
+    expect(shellSubmissionFor(session, "echo first").id).toBe(first.id);
+    acknowledgeShellSubmission(first);
+    expect(shellSubmissionFor(session, "echo first").id).not.toBe(first.id);
+    acknowledgeShellSubmission(other);
+  });
+
+  it("uses the retained session-storage id after a page reload", () => {
+    const session = crypto.randomUUID();
+    const id = `sh-${crypto.randomUUID()}`;
+    sessionStorage.setItem(`vlx-shell-submission:${JSON.stringify([session, "echo reload"])}`, id);
+    const restored = shellSubmissionFor(session, "echo reload");
+    expect(restored.id).toBe(id);
+    expect(restored.pending).toBe(false);
+    acknowledgeShellSubmission(restored);
   });
 });

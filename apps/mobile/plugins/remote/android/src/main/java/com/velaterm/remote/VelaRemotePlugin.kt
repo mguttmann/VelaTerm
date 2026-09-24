@@ -51,6 +51,32 @@ class VelaRemotePlugin : Plugin() {
     @Volatile private var client: SSHClient? = null
     @Volatile private var listener: ServerSocket? = null
     private val generation = java.util.concurrent.atomic.AtomicInteger(0)
+    private val trustLock = Any()
+    @Volatile private var cancelPageTrust: (() -> Unit)? = null
+    private val trustPrompts by lazy {
+        TrustPromptCoordinator(schedule = { delay, action ->
+            val runnable = Runnable { action() }; main.postDelayed(runnable, delay)
+            val cancel: () -> Unit = { main.removeCallbacks(runnable) }; cancel
+        }, presenter = { request, complete ->
+            check(!activity.isFinishing && !activity.isDestroyed)
+            val identity = if (request.identity.startsWith("tls:")) texts.get("mobile.native.tlsIdentity", mapOf("identity" to request.identity)) else request.identity
+            val dialog = AlertDialog.Builder(activity)
+                .setTitle(texts.get(if (request.changed) "mobile.native.trustChangedTitle" else "mobile.native.trustTitle"))
+                .setMessage(texts.get(if (request.changed) "mobile.native.trustChangedBody" else "mobile.native.trustBody", mapOf("identity" to identity, "fingerprint" to request.fingerprint)))
+                .setPositiveButton(texts.get("mobile.native.trustAccept")) { _, _ -> complete(true) }
+                .setNegativeButton(texts.get("common.cancel")) { _, _ -> complete(false) }
+                .setOnCancelListener { complete(false) }.create()
+            dialog.setOnDismissListener { complete(false) }
+            dialog.show()
+            val dismiss: () -> Unit = { dialog.setOnDismissListener(null); dialog.dismiss() }; dismiss
+        })
+    }
+    private fun advanceGeneration(): Int {
+        val epoch = synchronized(trustLock) { generation.incrementAndGet() }
+        val cancel = cancelPageTrust
+        main.post { cancel?.invoke(); trustPrompts.invalidate() }
+        return epoch
+    }
     private var browser: Dialog? = null
     private var web: WebView? = null
     private var activeId: String? = null
@@ -264,17 +290,20 @@ class VelaRemotePlugin : Plugin() {
         }
         notifyListeners("state",JSObject().put("phase",phase))
     }
-    private fun approve(host: String, fingerprint: String, changed: Boolean): Boolean {
-        val epoch = generation.get()
-        val latch=CountDownLatch(1); var accepted=false
+    private fun approve(host: String, fingerprint: String, changed: Boolean, epoch: Int): Boolean {
+        val latch = CountDownLatch(1)
+        val accepted = java.util.concurrent.atomic.AtomicBoolean(false)
+        val cancelled = java.util.concurrent.atomic.AtomicBoolean(false)
+        val id = UUID.randomUUID()
         main.post {
-            if (generation.get() != epoch) { latch.countDown(); return@post }
-            AlertDialog.Builder(activity).setTitle(texts.get(if(changed) "mobile.native.trustChangedTitle" else "mobile.native.trustTitle"))
-                .setMessage(texts.get(if(changed) "mobile.native.trustChangedBody" else "mobile.native.trustBody", mapOf("identity" to host, "fingerprint" to fingerprint)))
-                .setPositiveButton(texts.get("mobile.native.trustAccept")) { _,_ -> accepted=true; latch.countDown() }
-                .setNegativeButton(texts.get("common.cancel")) { _,_ -> latch.countDown() }.setOnCancelListener { latch.countDown() }.show()
+            trustPrompts.decide(TrustPromptCoordinator.Request(host, fingerprint, changed),
+                { !cancelled.get() && generation.get() == epoch }, id) { result ->
+                accepted.set(result); latch.countDown()
+            }
         }
-        return latch.await(90,TimeUnit.SECONDS) && accepted
+        return try { latch.await(95, TimeUnit.SECONDS) && accepted.get() && generation.get() == epoch }
+        catch (_: InterruptedException) { Thread.currentThread().interrupt(); false }
+        finally { cancelled.set(true); main.post { trustPrompts.cancel(id) } }
     }
     private fun exec(command: String, ssh: SSHClient): String {
         ssh.startSession().use { session ->
@@ -333,8 +362,10 @@ class VelaRemotePlugin : Plugin() {
             val store=readStore();val keys=store.getJSONObject("keys");val prior=keys.optString(identity)
             return if(prior==fingerprint) true else {
                 state("confirming")
-                if(generation.get() !=epoch || !approve(identity,fingerprint,prior.isNotEmpty()) || generation.get() !=epoch) false
-                else { keys.put(identity,fingerprint);writeStore(store);true }
+                if(generation.get() !=epoch || !approve(identity,fingerprint,prior.isNotEmpty(),epoch) || generation.get() !=epoch) false
+                else synchronized(trustLock) {
+                    if (generation.get() != epoch) false else { keys.put(identity,fingerprint);writeStore(store);true }
+                }
             }
             }
         })
@@ -443,7 +474,7 @@ class VelaRemotePlugin : Plugin() {
     }
     @PluginMethod fun connect(call: PluginCall) {
         val id = call.getString("id") ?: run { call.reject(texts.get("mobile.native.connectionIdMissing")); return }
-        val epoch = generation.incrementAndGet(); activeId = id
+        val epoch = advanceGeneration(); activeId = id
         closeTransportInBackground()
         run(call) {
         try {
@@ -474,17 +505,30 @@ class VelaRemotePlugin : Plugin() {
     private fun closeTransport() { detachTransport().invoke() }
     private fun closeTransportInBackground(epoch: Int? = null) { val cleanup = detachTransport(epoch); cleanupWorker.execute { cleanup() } }
     @PluginMethod fun disconnect(call: PluginCall) {
-        generation.incrementAndGet(); activeId = null; closeTransportInBackground()
+        advanceGeneration(); activeId = null; closeTransportInBackground()
         main.post { browser?.dismiss(); state("disconnected"); call.resolve() }
     }
     @PluginMethod fun status(call: PluginCall) { call.resolve(JSObject().put("connected",client?.isConnected ?: (web!=null)).put("id",activeId)) }
     private fun showBrowser(address: String,password: String,title: String) {
         val previous=try {web?.url?.let {URI(it)}} catch(_:Exception){null}
+        cancelPageTrust?.invoke(); cancelPageTrust = null
         val oldWeb=web;web=null;browser?.setOnDismissListener(null);browser?.dismiss();oldWeb?.stopLoading();oldWeb?.destroy()
         val uri=safeUrl(address); val origin="${uri.scheme}://${uri.rawAuthority}"
         val pageAddress=if(previous?.host==uri.host && previous.scheme==uri.scheme) URI(uri.scheme,null,uri.host,uri.port,previous.path,previous.query,previous.fragment).toString() else address
         val view=WebView(activity);web=view
+        // WebView's process-wide SSL decisions must not bypass the app's current stored pin.
+        view.clearSslPreferences()
         val connectionId = activeId
+        val connectionEpoch = generation.get()
+        val trustLoad = TrustLoadState(); trustLoad.begin()
+        val challenges = mutableMapOf<UUID, () -> Unit>()
+        fun currentTrust(epoch: Int): Boolean = generation.get() == connectionEpoch && trustLoad.isCurrent(epoch)
+        fun cancelChallenges() {
+            val pending = challenges.values.toList(); challenges.clear()
+            pending.forEach { it() }; trustPrompts.invalidate()
+        }
+        fun resetTrustLoad() { synchronized(trustLock) { trustLoad.begin() }; cancelChallenges() }
+        cancelPageTrust = { synchronized(trustLock) { trustLoad.close() }; cancelChallenges() }
         view.settings.javaScriptEnabled=true;view.settings.domStorageEnabled=true
         view.addJavascriptInterface(object {
             @android.webkit.JavascriptInterface fun save(name:String,encoded:String) {
@@ -534,10 +578,10 @@ class VelaRemotePlugin : Plugin() {
         }
         val reload=Button(activity).apply {text=strings.get("common.retry");setOnClickListener {
             val id = activeId ?: return@setOnClickListener
-            if (id == "account") { beginLoading(); view.reload(); return@setOnClickListener }
+            if (id == "account") { resetTrustLoad(); view.clearSslPreferences(); beginLoading(); view.reload(); return@setOnClickListener }
             if (reconnecting || recovery !== recoveryView) return@setOnClickListener
             reconnecting = true; view.stopLoading(); beginLoading()
-            val epoch = generation.incrementAndGet()
+            val epoch = advanceGeneration()
             closeTransportInBackground()
             worker.execute {
                 try {
@@ -582,14 +626,52 @@ class VelaRemotePlugin : Plugin() {
                 val bytes=android.net.http.SslCertificate.saveState(error.certificate).getByteArray("x509-certificate") ?: run{handler.cancel();return}
                 val fingerprint="SHA256:"+Base64.encodeToString(MessageDigest.getInstance("SHA-256").digest(bytes),Base64.NO_WRAP or Base64.NO_PADDING)
                 val identity="tls:$origin"
-                worker.execute {try {
-                    val store=readStore();val keys=store.getJSONObject("keys");val previous=keys.optString(identity)
-                    val trusted=previous==fingerprint || approve(strings.get("mobile.native.tlsIdentity", mapOf("identity" to origin)),fingerprint,previous.isNotEmpty())
-                    if(trusted){keys.put(identity,fingerprint);writeStore(store)}
-                    main.post {if(trusted && web===v)handler.proceed() else {handler.cancel();if(web===v)showPageError(strings.get("mobile.native.certificateRejected"))}}
-                } catch(_:Exception){main.post{handler.cancel();if(web===v)showPageError(strings.get("mobile.native.certificateRejected"))}}}
+                val load = trustLoad.epoch()
+                if (web !== v || !currentTrust(load)) { handler.cancel(); return }
+                val id = UUID.randomUUID()
+                fun finish(accepted: Boolean) {
+                    if (challenges.remove(id) == null) return
+                    if (accepted && currentTrust(load) && web === v) handler.proceed() else handler.cancel()
+                }
+                challenges[id] = { handler.cancel(); trustPrompts.cancel(id) }
+                fun resolve(accepted: Boolean) {
+                    if (!currentTrust(load) || web !== v) { finish(false); return }
+                    trustLoad.record(load, identity, fingerprint, accepted)
+                    if (!accepted) { finish(false); showPageError(strings.get("mobile.native.certificateRejected")); return }
+                    try { worker.execute {
+                        val persisted = try { synchronized(trustLock) {
+                            if (!currentTrust(load)) false else {
+                                val store = readStore(); val keys = store.getJSONObject("keys")
+                                if (keys.optString(identity) != fingerprint) { keys.put(identity, fingerprint); writeStore(store) }
+                                currentTrust(load)
+                            }
+                        } } catch (_: Exception) { false }
+                        main.post {
+                            if (!persisted && currentTrust(load)) {
+                                trustLoad.record(load, identity, fingerprint, false)
+                                showPageError(strings.get("mobile.native.certificateRejected"))
+                            }
+                            finish(persisted)
+                        }
+                    } } catch (_: java.util.concurrent.RejectedExecutionException) { finish(false) }
+                }
+                trustLoad.decision(identity, fingerprint)?.let { resolve(it); return }
+                try { worker.execute {
+                    val previous = try { if (currentTrust(load)) readStore().getJSONObject("keys").optString(identity) else null }
+                        catch (_: Exception) { null }
+                    main.post {
+                        if (!currentTrust(load) || web !== v || previous == null) { finish(false); return@post }
+                        val cached = trustLoad.decision(identity, fingerprint)
+                        if (cached != null) resolve(cached)
+                        else if (previous == fingerprint) finish(true)
+                        else trustPrompts.decide(TrustPromptCoordinator.Request(identity, fingerprint, previous.isNotEmpty()),
+                            { currentTrust(load) && web === v }, id) { resolve(it) }
+                    }
+                } } catch (_: java.util.concurrent.RejectedExecutionException) { finish(false) }
             }
+
             override fun shouldOverrideUrlLoading(v:WebView,request:WebResourceRequest):Boolean {
+                if (web !== v) return true
                 val next=request.url
                 if(next.scheme=="velaterm-ui" && next.host=="close" && request.isForMainFrame) {browser?.dismiss();return true}
                 if(next.scheme=="velaterm-ui" && next.host=="connections" && request.isForMainFrame) {showConnectionPanel();return true}
@@ -604,12 +686,15 @@ class VelaRemotePlugin : Plugin() {
                 if (request.isForMainFrame) showPageError(strings.get("mobile.native.pageUnavailable", mapOf("code" to response.statusCode.toString())))
             }
             override fun onRenderProcessGone(v: WebView, detail: android.webkit.RenderProcessGoneDetail): Boolean {
+                if (web !== v) return true
+                cancelPageTrust?.invoke()
                 showPageError(strings.get("mobile.native.pageTerminated"))
                 layout.removeView(v); v.destroy(); if (web === v) web = null
                 return true
             }
             override fun onPageStarted(v: WebView, url: String, favicon: android.graphics.Bitmap?) {
-                if (web !== v) return
+                if (web !== v || navigationFailed) return
+                if (recoveryView.visibility == android.view.View.GONE) resetTrustLoad()
                 beginLoading()
                 val current = android.net.Uri.parse(url)
                 val pending = requestedAccountSession
@@ -684,7 +769,7 @@ class VelaRemotePlugin : Plugin() {
             view.loadUrl(pageAddress)
         }
         val dialog=Dialog(activity,android.R.style.Theme_Material_Light_NoActionBar)
-        dialog.setContentView(layout);dialog.setOnDismissListener {if(browser===dialog){timeout?.let { main.removeCallbacks(it) };if(web===view){view.stopLoading();view.destroy();web=null};recovery=null;browser=null;reconnectPage=null;activeId=null;generation.incrementAndGet();closeTransportInBackground();state("disconnected")}}
+        dialog.setContentView(layout);dialog.setOnDismissListener {if(browser===dialog){cancelPageTrust?.invoke();cancelPageTrust=null;timeout?.let { main.removeCallbacks(it) };if(web===view){view.stopLoading();view.destroy();web=null};recovery=null;browser=null;reconnectPage=null;activeId=null;advanceGeneration();closeTransportInBackground();state("disconnected")}}
         browser=dialog;dialog.show();dialog.window?.setSoftInputMode(android.view.WindowManager.LayoutParams.SOFT_INPUT_ADJUST_RESIZE)
         androidx.core.view.ViewCompat.setOnApplyWindowInsetsListener(layout) { v,insets ->
             val bars=insets.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
@@ -720,5 +805,5 @@ class VelaRemotePlugin : Plugin() {
         if(pickingFile){pickingFile=false;return}
         if (activeId != null) reconnectPage?.invoke()
     }
-    override fun handleOnDestroy() { notifications.close(); scanner?.unregister();scanCall?.reject(texts.get("mobile.native.scanCancelled"), "SCAN_UNAVAILABLE");scanCall=null; generation.incrementAndGet();closeTransportInBackground();cleanupWorker.shutdown();fileResult?.onReceiveValue(null);chooser?.unregister();downloadChooser?.unregister();downloadBytes=null;worker.shutdownNow();super.handleOnDestroy() }
+    override fun handleOnDestroy() { cancelPageTrust?.invoke();cancelPageTrust=null;trustPrompts.close();notifications.close(); scanner?.unregister();scanCall?.reject(texts.get("mobile.native.scanCancelled"), "SCAN_UNAVAILABLE");scanCall=null; advanceGeneration();closeTransportInBackground();cleanupWorker.shutdown();fileResult?.onReceiveValue(null);chooser?.unregister();downloadChooser?.unregister();downloadBytes=null;worker.shutdownNow();super.handleOnDestroy() }
 }

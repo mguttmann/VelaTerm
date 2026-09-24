@@ -81,14 +81,34 @@ describe("shell mode in the composer", () => {
     submit(input, "! ls");
     await waitFor(() => expect(commands()).toContain("chat_run_shell"));
     const order = commands().filter(command => command === "chat_start" || command === "chat_run_shell");
-    expect(order).toEqual(["chat_start", "chat_run_shell"]);
+    expect(order).toEqual(["chat_run_shell"]);
     expect(commands()).not.toContain("chat_send");
+  });
+
+  it("keeps one identifier across a lost response and preserves a newer draft", async () => {
+    let reject!: (error: Error) => void;
+    runShell = () => new Promise((_, failure) => { reject = failure; });
+    const input = await mountPane();
+    submit(input, "!echo receipt-probe");
+    fireEvent.keyDown(input, { key: "Enter" });
+    const calls = () => vi.mocked(invoke).mock.calls.filter(([command]) => command === "chat_run_shell");
+    expect(calls()).toHaveLength(1);
+    const first = calls()[0][1]?.messageId;
+    await act(async () => reject(new Error("chat_submission_pending")));
+    let accept!: () => void;
+    runShell = () => new Promise(resolve => { accept = () => resolve(undefined); });
+    submit(input, "!echo receipt-probe");
+    expect(calls()).toHaveLength(2);
+    expect(calls()[1][1]?.messageId).toBe(first);
+    fireEvent.change(input, { target: { value: "next draft" } });
+    await act(async () => accept());
+    expect(input.value).toBe("next draft");
   });
 
   it("shows a hint for a bare ! and sends nothing", async () => {
     const input = await mountPane();
     submit(input, "!");
-    expect(await screen.findByText("Type a command after ! to run it in the shell")).toBeTruthy();
+    expect(await screen.findByText("Enter a command after ! to run it in the shell.")).toBeTruthy();
     expect(commands()).not.toContain("chat_run_shell");
     expect(commands()).not.toContain("chat_send");
   });
@@ -101,7 +121,7 @@ describe("shell mode in the composer", () => {
     });
     await waitFor(() => expect(document.querySelector(".sv-attach-item")).toBeTruthy());
     submit(input, "!ls");
-    expect(await screen.findByText("Shell commands cannot carry images. Remove the attachment or send it as a message.")).toBeTruthy();
+    expect(await screen.findByText("Shell commands cannot include images. Remove the attachment or send it as a message.")).toBeTruthy();
     expect(commands()).not.toContain("chat_run_shell");
     expect(commands()).not.toContain("chat_send");
     expect(input.value).toBe("!ls");
@@ -129,5 +149,78 @@ describe("shell mode in the composer", () => {
     await waitFor(() => expect(commands()).toContain("chat_cancel_shell"));
     const [, args] = vi.mocked(invoke).mock.calls.find(([command]) => command === "chat_cancel_shell")!;
     expect(args).toEqual({ sessionId: "s", messageId: "sh-9" });
+  });
+
+  it("shows a running shell without cancellation controls in a read-only pane", async () => {
+    snapshotOverrides = { rows: [{
+      kind: "shell", id: "sh-readonly", command: "sleep 30", stdout: "", stderr: "",
+      stdoutTruncated: false, stderrTruncated: false, status: "running",
+    }] };
+    render(<ChatPane session={{ id: "s", projectId: "p", name: "Claude", kind: "claude", engine: "chat", collapsed: false, sortOrder: 0, createdAt: 0 }}
+      area={{}} hidden={false} focused multi={false} readOnly onActivate={() => {}} onSplit={() => {}} onClose={() => {}} />);
+    expect(await screen.findByText("sleep 30")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(screen.queryByRole("textbox")).toBeNull();
+    expect(commands()).not.toContain("chat_cancel_shell");
+    expect(commands()).not.toContain("chat_run_shell");
+  });
+
+  it.each(["snapshot", "event"])("uses the backend command unchanged in a queued %s", async (source) => {
+    const shellCommand = "printf '</bash-input>\n<bash-stdout>€🦀'";
+    const item = { id: "queued-shell", text: "opaque context with misleading <bash-input>wrong</bash-input>", shellCommand };
+    if (source === "snapshot") snapshotOverrides = { queue: [item] };
+    await mountPane();
+    if (source === "event") act(() => eventCallback({ type: "queued", items: [item] }));
+    const preview = document.querySelector<HTMLButtonElement>(".sv-queue-text")!;
+    expect(preview.textContent).toBe(`! ${shellCommand}`);
+    expect(preview.disabled).toBe(true);
+    fireEvent.click(preview);
+    expect(document.querySelector(".sv-queue-edit")).toBeNull();
+    expect(commands()).not.toContain("chat_run_shell");
+    expect(commands()).not.toContain("chat_queue_update");
+    expect(commands()).not.toContain("chat_send");
+  });
+
+  it("treats an empty backend command as present and read-only", async () => {
+    snapshotOverrides = { queue: [{ id: "empty-command", text: "opaque context", shellCommand: "" }] };
+    await mountPane();
+    const preview = document.querySelector<HTMLButtonElement>(".sv-queue-text")!;
+    expect(preview.textContent).toBe("! ");
+    expect(preview.disabled).toBe(true);
+  });
+
+  it.each(["ordinary", "invalid", "image"])("keeps a queued %s message on the original editable path without shellCommand", async (kind) => {
+    const text = kind === "ordinary" ? "ordinary queued text" : "<bash-input>literal</bash-input>\n<bash-stdout>text</bash-stdout>\n<velaterm-shell-metadata>{broken}</velaterm-shell-metadata>";
+    snapshotOverrides = { queue: [{ id: "plain", text, ...(kind === "image" ? { images: [{ mimeType: "image/png", data: "AA==" }] } : {}) }] };
+    await mountPane();
+    const preview = document.querySelector<HTMLButtonElement>(".sv-queue-text")!;
+    expect(preview.textContent).toBe(text);
+    expect(preview.disabled).toBe(false);
+    fireEvent.click(preview);
+    const editor = document.querySelector<HTMLTextAreaElement>(".sv-queue-edit")!;
+    expect(editor.value).toBe(text);
+    fireEvent.change(editor, { target: { value: "edited ordinary content" } });
+    fireEvent.keyDown(editor, { key: "Enter" });
+    await waitFor(() => expect(invoke).toHaveBeenCalledWith("chat_queue_update", { sessionId: "s", id: "plain", text: "edited ordinary content" }));
+  });
+
+  it.each(["blur", "Enter"])("ignores a delayed %s when the same queued ID becomes shell context", async (action) => {
+    snapshotOverrides = { queue: [{ id: "same-id", text: "old editable draft" }] };
+    await mountPane();
+    fireEvent.click(document.querySelector<HTMLButtonElement>(".sv-queue-text")!);
+    const editor = document.querySelector<HTMLTextAreaElement>(".sv-queue-edit")!;
+    fireEvent.change(editor, { target: { value: action === "blur" ? "" : "stale edit" } });
+    // Deliver the newer backend facts and the stale DOM action in the same React batch.
+    act(() => {
+      eventCallback({ type: "queued", items: [{ id: "same-id", text: "new context", shellCommand: "printf '€'" }] });
+      if (action === "blur") fireEvent.blur(editor);
+      else fireEvent.keyDown(editor, { key: "Enter" });
+    });
+    expect(document.querySelector(".sv-queue-edit")).toBeNull();
+    const preview = document.querySelector<HTMLButtonElement>(".sv-queue-text")!;
+    expect(preview.textContent).toBe("! printf '€'");
+    expect(preview.disabled).toBe(true);
+    expect(commands()).not.toContain("chat_queue_update");
+    expect(commands()).not.toContain("chat_queue_remove");
   });
 });

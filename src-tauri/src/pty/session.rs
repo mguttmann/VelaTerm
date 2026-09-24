@@ -305,7 +305,20 @@ impl OutputStream {
     pub fn ingest(&mut self, chunk: &[u8]) {
         self.ring.push(chunk);
         self.modes.feed(chunk);
+        // Time the fan-out. A sink hands the chunk to a transport rather than to a screen, and on the desktop
+        // that transport is the WebView: every chunk becomes a script the platform event loop has to run.
+        // When this starts to cost real time the PTY is no longer being drained at the rate it produces, which
+        // is the first link in a chain that ends with an unresponsive window.
+        let started = Instant::now();
         self.subscribers.retain(|s| (s.sink)(chunk));
+        let elapsed = started.elapsed();
+        if elapsed >= FANOUT_REPORT_THRESHOLD {
+            crate::diagnostics::record(
+                "WARN",
+                "pty_fanout_slow",
+                serde_json::json!({"bytes":chunk.len(),"subscribers":self.subscribers.len(),"durationMs":elapsed.as_millis() as u64}),
+            );
+        }
     }
 
     /// Attaches a subscriber by replaying mode prelude plus snapshot before registration.
@@ -335,6 +348,10 @@ impl OutputStream {
         self.subscribers.len()
     }
 }
+
+/// Report output fan-out taking at least this long. The coalescer aims to flush every 12 ms, so a fan-out of
+/// this scale means delivery can no longer keep up with what the terminal produces.
+pub const FANOUT_REPORT_THRESHOLD: Duration = Duration::from_millis(50);
 
 // Output coalescer between the reader and ingest.
 

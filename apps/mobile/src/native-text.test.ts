@@ -91,6 +91,24 @@ test('placeholders of mobile.native.* keys match the English source in every loc
   }
 });
 
+test('all iOS privacy descriptions are generated from the current locale dictionaries and included in the app', () => {
+  const app = new URL('../ios/App/App/', import.meta.url);
+  const project = readFileSync(new URL('../ios/App/App.xcodeproj/project.pbxproj', import.meta.url), 'utf8');
+  const plist = readFileSync(new URL('Info.plist', app), 'utf8');
+  const keys = {NSCameraUsageDescription: 'mobile.native.cameraUsageDescription', NSLocalNetworkUsageDescription: 'mobile.native.localNetworkUsageDescription'};
+  for (const locale of locales) {
+    const iosLocale = ({'zh-CN': 'zh-Hans', 'zh-TW': 'zh-Hant'} as Record<string, string>)[locale] ?? locale;
+    const text = readFileSync(new URL(`${iosLocale}.lproj/InfoPlist.strings`, app), 'utf8');
+    assert.ok(project.includes(`${iosLocale}.lproj/InfoPlist.strings`), `${locale}: Xcode resource missing`);
+    const actual = Object.fromEntries([...text.matchAll(/"(\w+)" = ("(?:[^"\\]|\\.)*");/g)].map(match => [match[1], JSON.parse(match[2])]));
+    for (const [name, key] of Object.entries(keys)) assert.equal(actual[name], dictionaries[locale][key], `${locale}: ${name}`);
+  }
+  for (const [name, key] of Object.entries(keys)) assert.ok(plist.includes(`<key>${name}</key>\n\t<string>${dictionary[key]}</string>`), `${name}: English fallback`);
+  assert.ok(project.includes('InfoPlist.strings in Resources'));
+  assert.ok(plist.includes('<key>NSAllowsArbitraryLoadsInWebContent</key>'));
+  assert.ok(!plist.includes('<key>NSAllowsArbitraryLoads</key>'), 'native account requests retain their ATS boundary');
+});
+
 test('every native call site supplies exactly the placeholders its key declares', () => {
   let parameterized = 0;
   for (const file of files) {

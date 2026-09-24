@@ -32,6 +32,16 @@ pub(crate) enum Event {
         text: String,
         ts: Option<String>,
     },
+    /// A native Pi/OMP shell execution has one combined output stream, not separate stdout/stderr.
+    Shell {
+        id: Option<String>,
+        command: String,
+        output: String,
+        exit_code: Option<i32>,
+        cancelled: bool,
+        truncated: bool,
+        ts: Option<String>,
+    },
     AssistantText {
         text: String,
         ts: Option<String>,
@@ -156,6 +166,19 @@ fn render(
                 users += 1;
                 blocks.push(text.clone());
             }
+            Event::Shell { command, output, exit_code, cancelled, truncated, ts, .. } => {
+                if sec != Sec::User {
+                    blocks.push(section_header("👤 User", ts.as_deref()));
+                    sec = Sec::User;
+                }
+                users += 1;
+                blocks.push(fenced("sh", command));
+                blocks.push(fenced("", output));
+                let exit = exit_code.map(|code| code.to_string()).unwrap_or_else(|| "unknown".into());
+                blocks.push(format!("Exit code: {exit}"));
+                if *cancelled { blocks.push("Command cancelled.".into()); }
+                if *truncated { blocks.push("Output truncated.".into()); }
+            }
             _ => {
                 if sec != Sec::Assistant {
                     let ts = match ev {
@@ -196,7 +219,7 @@ fn render(
                         title.push_str("**");
                         blocks.push(format!("{title}\n\n{}", fenced("", text)));
                     }
-                    Event::User { .. } | Event::Command { .. } => unreachable!(),
+                    Event::User { .. } | Event::Shell { .. } | Event::Command { .. } => unreachable!(),
                 }
             }
         }
@@ -686,8 +709,13 @@ pub(crate) fn pi_events(content: &str) -> Vec<Event> {
                     .and_then(Value::as_str)
                     .unwrap_or("");
                 if !command.is_empty() {
-                    out.push(Event::User {
-                        text: format!("!{command}"),
+                    out.push(Event::Shell {
+                        id: entry.get("id").and_then(Value::as_str).map(str::to_string),
+                        command: command.into(),
+                        output: message.get("output").and_then(Value::as_str).unwrap_or("").into(),
+                        exit_code: message.get("exitCode").and_then(Value::as_i64).and_then(|code| i32::try_from(code).ok()),
+                        cancelled: message.get("cancelled").and_then(Value::as_bool).unwrap_or(false),
+                        truncated: message.get("truncated").and_then(Value::as_bool).unwrap_or(false),
                         ts,
                     });
                 }
@@ -783,6 +811,16 @@ pub(crate) fn codex_user_message_is_injected(payload: &Value, text: &str) -> boo
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn native_pi_shell_export_preserves_output_and_execution_metadata() {
+        for content in [include_str!("chat/fixtures/pi-native-shell.jsonl"), include_str!("chat/fixtures/omp-native-shell.jsonl")] {
+            let markdown = render(&pi_events(content), "Native shell", "pi", "synthetic", "fixture", None);
+            assert!(markdown.contains("VLX_NATIVE_STDOUT_中文\nVLX_NATIVE_STDERR_Ω\n"));
+            assert!(markdown.contains("Exit code: 7"));
+            assert_eq!(markdown.matches("## 🤖 Assistant").count(), 1);
+        }
+    }
 
     /// A Pi/OMP recording is a tree; only the chain from the last entry back to the root is the live
     /// conversation, and each content block becomes its own event.

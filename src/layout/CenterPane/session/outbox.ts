@@ -43,7 +43,10 @@ export async function deliverSubmission(session: string, item: Submission, start
   change(session, items => items.map(value => value.id === item.id ? { ...value, status: "sending", error: undefined } : value));
   try {
     if (start) await start();
-    const status = await chatSend(session, item.text, item.behavior, item.images.length ? item.images : undefined, item.id);
+    const receipt = await chatSend(session, item.text, item.behavior, item.images.length ? item.images : undefined, item.id);
+    // A steered message is one that went out, whether or not the recipient is free to read it yet; the
+    // composer draws it like any other sent message.
+    const status = receipt === "steered" || receipt === "blocked" ? "sent" : receipt;
     change(session, items => items.flatMap(value => value.id !== item.id ? [value]
       : status === "command" || value.observed ? [] : [{ ...value, status }]));
   } catch (error) {

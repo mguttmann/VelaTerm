@@ -6,7 +6,7 @@ import Capacitor
 
 /// Opt-in end-to-end check of the fingerprint prompt against a real VelaTerm desktop with a self-signed
 /// certificate, driven inside the running app on a simulator. Set `VELA_E2E_URL` (for example
-/// `https://127.0.0.1:8799/`) in the test runner environment; the tests are skipped otherwise.
+/// `https://127.0.0.1:31287/`) in the test runner environment; the tests are skipped otherwise.
 final class TrustPromptE2ETests: XCTestCase {
     private var target: String { ProcessInfo.processInfo.environment["VELA_E2E_URL"] ?? "" }
 
@@ -78,19 +78,26 @@ final class TrustPromptE2ETests: XCTestCase {
 
     /// Runs an alert action the way UIKit does after a tap: dismiss, then the handler. The handler is
     /// private API, acceptable in a test that cannot tap.
-    @MainActor private func tap(_ action: UIAlertAction, on alert: UIAlertController) throws {
+    @MainActor private func tap(_ action: UIAlertAction, on alert: UIAlertController) async throws {
         typealias Handler = @convention(block) (UIAlertAction) -> Void
         let raw = try XCTUnwrap(action.value(forKey: "handler"), "action has no handler")
-        alert.dismiss(animated: false)
+        if alert.presentingViewController != nil {
+            _ = try await waitFor("alert presentation to settle", seconds: 5) {
+                !alert.isBeingPresented && !alert.isBeingDismissed && alert.transitionCoordinator == nil ? true : nil
+            }
+            await withCheckedContinuation { continuation in alert.dismiss(animated: false) { continuation.resume() } }
+        }
         unsafeBitCast(raw as AnyObject, to: Handler.self)(action)
     }
 
-    @MainActor private func start(_ plugin: VelaRemotePlugin) async throws -> String {
+    @MainActor private func start(_ plugin: VelaRemotePlugin, previous: String? = nil) async throws -> String {
         // Start from a clean screen: no browser or alert left over from a previous test.
         _ = try? await invoke(plugin, "disconnect", [:])
         _ = try await waitFor("previous presentations to go away", seconds: 5) { self.chain().count == 1 ? true : nil }
         // Forget stored fingerprints so the prompt must appear.
-        try plugin.vault.update { store in store["keys"] = [String: String]() }
+        let url = try XCTUnwrap(URL(string: target))
+        let identity = "tls:https://\(url.host!):\(url.port ?? 443)"
+        try plugin.vault.update { store in store["keys"] = previous.map { [identity: $0] } ?? [String: String]() }
         var connection = JSObject(); connection["name"] = "E2E trust prompt"; connection["mode"] = "url"; connection["url"] = target
         var options = JSObject(); options["connection"] = connection
         let saved = try await invoke(plugin, "save", options)
@@ -129,7 +136,7 @@ final class TrustPromptE2ETests: XCTestCase {
         try await Task.sleep(for: .seconds(3))
         XCTAssertEqual(alerts().count, 1, "exactly one alert while challenges are pending")
 
-        try tap(confirm, on: alert)
+        try await tap(confirm, on: alert)
         _ = try await waitFor("the page to report ready", seconds: 40) {
             guard let browser = self.browserView(), let recovery = self.findNamed("ConnectionRecoveryView", in: browser) else { return nil as Bool? }
             return recovery.isHidden ? true : nil
@@ -154,7 +161,7 @@ final class TrustPromptE2ETests: XCTestCase {
         let alert = try await waitFor("the fingerprint alert", seconds: 15) { self.alerts().first }
         describe(alert)
         let cancel = try XCTUnwrap(alert.actions.first { $0.style == .cancel })
-        try tap(cancel, on: alert)
+        try await tap(cancel, on: alert)
 
         let texts = try await waitFor("the failure page", seconds: 20) { () -> [String]? in
             guard let browser = self.browserView(), let recovery = self.findNamed("ConnectionRecoveryView", in: browser), !recovery.isHidden else { return nil }
@@ -168,5 +175,66 @@ final class TrustPromptE2ETests: XCTestCase {
         XCTAssertNil(try plugin.vault.read()["keys"].flatMap { ($0 as? [String: String])?.first }, "a cancelled prompt is never persisted")
 
         _ = try await invoke(plugin, "disconnect", [:])
+    }
+
+    @MainActor func testRetryAfterRefusalStartsAnotherLoad() async throws {
+        guard !target.isEmpty else { throw XCTSkip("Requires VELA_E2E_URL") }
+        let plugin = try XCTUnwrap(bridgeController().bridge?.plugin(withName: "VelaRemote") as? VelaRemotePlugin)
+        let original = try plugin.vault.read()
+        defer { try? plugin.vault.write(original) }
+        _ = try await start(plugin)
+        let declined = try await waitFor("initial prompt", seconds: 15) { self.alerts().first }
+        try await tap(XCTUnwrap(declined.actions.first { $0.style == .cancel }), on: declined)
+        let recovery = try await waitFor("recovery", seconds: 10) { self.browserView().flatMap { self.find(ConnectionRecoveryView.self, in: $0) } }
+        recovery.retryButton.sendActions(for: .touchUpInside)
+        let retried = try await waitFor("retry prompt", seconds: 15) { self.alerts().first }
+        XCTAssertFalse(declined === retried)
+        try await tap(XCTUnwrap(retried.actions.first { $0.style == .default }), on: retried)
+        _ = try await waitFor("ready", seconds: 40) { recovery.isHidden ? true : nil }
+        XCTAssertEqual((try plugin.vault.read()["keys"] as? [String: String])?.count, 1)
+        _ = try await invoke(plugin, "disconnect", [:])
+    }
+
+    @MainActor func testCloseCancelsPendingPromptAndLateAcceptanceCannotWrite() async throws {
+        guard !target.isEmpty else { throw XCTSkip("Requires VELA_E2E_URL") }
+        let plugin = try XCTUnwrap(bridgeController().bridge?.plugin(withName: "VelaRemote") as? VelaRemotePlugin)
+        let original = try plugin.vault.read()
+        defer { try? plugin.vault.write(original) }
+        _ = try await start(plugin)
+        let pending = try await waitFor("pending prompt", seconds: 15) { self.alerts().first }
+        let accept = try XCTUnwrap(pending.actions.first { $0.style == .default })
+        _ = try await invoke(plugin, "disconnect", [:])
+        try await tap(accept, on: pending)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertTrue(alerts().isEmpty)
+        XCTAssertEqual((try plugin.vault.read()["keys"] as? [String: String])?.count, 0)
+    }
+
+    @MainActor func testChangedFingerprintIsNotOverwrittenAfterRefusal() async throws {
+        guard !target.isEmpty else { throw XCTSkip("Requires VELA_E2E_URL") }
+        let plugin = try XCTUnwrap(bridgeController().bridge?.plugin(withName: "VelaRemote") as? VelaRemotePlugin)
+        let original = try plugin.vault.read()
+        defer { try? plugin.vault.write(original) }
+        _ = try await start(plugin, previous: "SHA256:previous")
+        let changed = try await waitFor("changed prompt", seconds: 15) { self.alerts().first }
+        XCTAssertEqual(changed.title, MobileText.get("mobile.native.trustChangedTitle"))
+        try await tap(XCTUnwrap(changed.actions.first { $0.style == .cancel }), on: changed)
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual((try plugin.vault.read()["keys"] as? [String: String])?.values.first, "SHA256:previous")
+        _ = try await invoke(plugin, "disconnect", [:])
+    }
+
+    func testNativeURLSessionStillRejectsTheSelfSignedCertificate() async throws {
+        guard !target.isEmpty else { throw XCTSkip("Requires VELA_E2E_URL") }
+        var request = URLRequest(url: try XCTUnwrap(URL(string: target)))
+        request.timeoutInterval = 10
+        do {
+            _ = try await URLSession.shared.data(for: request)
+            XCTFail("WebView trust must never disable native URLSession certificate validation")
+        } catch {
+            let failure = error as NSError
+            XCTAssertEqual(failure.domain, NSURLErrorDomain)
+            XCTAssertTrue([NSURLErrorServerCertificateUntrusted, NSURLErrorSecureConnectionFailed, NSURLErrorServerCertificateHasBadDate].contains(failure.code))
+        }
     }
 }

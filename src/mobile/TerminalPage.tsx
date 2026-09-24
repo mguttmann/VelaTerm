@@ -16,17 +16,22 @@ import { useTermStore } from "../store/termStore";
 import { injectImageFiles } from "../terminal/imageInput";
 import { effectiveStatus, supportsChatEngine, type Session } from "../types";
 import { MobileSessionBody } from "./MobileSessionBody";
+import { MobileSessionLink, type MobileSessionView } from "./sessionNavigation";
+import "./sessionNavigation.css";
 
 export function TerminalPage({
   session,
   cwd,
   onBack,
+  view = "terminal",
 }: {
   session: Session;
   cwd?: string;
   onBack: () => void;
+  view?: MobileSessionView;
 }) {
   const tr = useT();
+  const historyView = session.kind === "kiro" && view === "history";
   const status = effectiveStatus(useTermStore((s) => s.runtimes[session.id]));
   const [vvh, setVvh] = useState<number | null>(
     () => window.visualViewport?.height ?? null,
@@ -52,7 +57,7 @@ export function TerminalPage({
   // Return to the session list when the process exits or another client terminates it. usePtySession
   // also invokes closeSession, but mobile has no tab or split state to close, so navigation is handled here.
   useEffect(() => {
-    if (session.engine === "chat" || supportsChatEngine(session.kind)) return;
+    if (session.engine === "chat" || supportsChatEngine(session.kind) || historyView) return;
     let disposed = false;
     const u1 = onPtyExit(session.id, () => {
       if (!disposed) onBack();
@@ -66,7 +71,7 @@ export function TerminalPage({
       void u2.then((fn) => fn());
     };
     // MobileApp stabilizes onBack with useCallback; resubscribe only when the session ID changes.
-  }, [session.id, session.engine, onBack]);
+  }, [session.id, session.engine, session.kind, historyView, onBack]);
 
   // Shared image-injection path for terminal paste/drop and KeyBar: upload through the
   // `save_pasted_image` WS invocation, write the server path to the terminal, and show failures for five seconds.
@@ -92,7 +97,7 @@ export function TerminalPage({
 
   return (
     <div className="m-page" style={vvh ? { flex: "none", height: vvh } : undefined}>
-      <header className="m-header">
+      <header className={`m-header${session.kind === "kiro" ? " m-header-kiro" : ""}`}>
         <button type="button" className="m-back" onClick={onBack}>
           {tr("mobile.back")}
         </button>
@@ -101,18 +106,22 @@ export function TerminalPage({
         </span>
         <span className="m-title">{session.name}</span>
         <span className="m-kind">{session.kind}</span>
+        {session.kind === "kiro" && <MobileSessionLink sessionId={session.id} view={historyView ? "terminal" : "history"}
+          className="vlx-btn m-session-view-link">
+          {tr(historyView ? "session.showTerminal" : "session.showConversation")}
+        </MobileSessionLink>}
         {(window as Window & { __VELATERM_CONNECTION_MENU__?: boolean }).__VELATERM_CONNECTION_MENU__ && <details className="m-menu">
           <summary aria-label={tr("mobile.more")}>•••</summary>
           <div className="m-menu-items"><ConnectionMenuEntry /></div>
         </details>}
       </header>
       <div className="m-session-content">
-        <ErrorBoundary key={session.id} fallback={(error, retry) => <div className="m-load-error" role="alert">
+        <ErrorBoundary key={`${session.id}:${view}`} fallback={(error, retry) => <div className="m-load-error" role="alert">
           <p>{tr("err.renderTitle")}</p><p>{error.message}</p>
           <button type="button" onClick={retry}>{tr("common.retry")}</button>
         </div>}>
           <MobileSessionBody session={session} cwd={cwd} onBack={onBack}
-            onImages={injectImages} imgError={imgError} />
+            onImages={injectImages} imgError={imgError} view={view} />
         </ErrorBoundary>
       </div>
     </div>

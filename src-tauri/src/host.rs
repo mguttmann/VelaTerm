@@ -91,12 +91,23 @@ pub(crate) fn kill_process_tree(child: &mut std::process::Child) {
     {
         use std::process::Stdio;
         let pid = child.id().to_string();
-        let _ = command("taskkill")
+        if let Ok(mut killer) = command("taskkill")
             .args(["/PID", pid.as_str(), "/T", "/F"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
-            .status();
+            .spawn()
+        {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            loop {
+                match killer.try_wait() {
+                    Ok(Some(_)) | Err(_) => break,
+                    Ok(None) if std::time::Instant::now() < deadline =>
+                        std::thread::sleep(std::time::Duration::from_millis(20)),
+                    Ok(None) => { let _ = killer.kill(); let _ = killer.wait(); break; }
+                }
+            }
+        }
     }
     let _ = child.kill();
 }

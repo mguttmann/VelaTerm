@@ -752,6 +752,7 @@ export function ShellRow({ row, onCancel }: {
         <code className="sv-shell-command">{row.command}</code>
       </div>
       {truncated && <div className="sv-shell-truncated">{t("chat.shell.truncated")}</div>}
+      {row.outputIncomplete && <div className="sv-shell-truncated">{t("chat.shell.outputIncomplete")}</div>}
       {row.stdout && <pre className="sv-shell-out">{row.stdout}</pre>}
       {row.stderr && (
         <pre className="sv-shell-err" aria-label={t("chat.shell.stderr")}>{row.stderr}</pre>
@@ -760,17 +761,17 @@ export function ShellRow({ row, onCancel }: {
         {running ? (
           <>
             <span className="sv-shell-status">{t("chat.shell.running")}</span>
-            <button type="button" className="sv-shell-cancel" onClick={() => onCancel?.(row.id)}>
+            {onCancel && <button type="button" className="sv-shell-cancel" onClick={() => onCancel(row.id)}>
               {t("chat.shell.cancel")}
-            </button>
+            </button>}
           </>
         ) : row.status === "cancelled" ? (
           <span className="sv-shell-status sv-shell-cancelled">{t("chat.shell.cancelled")}</span>
-        ) : (
+        ) : row.exitCode != null ? (
           <span className={`sv-shell-status${row.exitCode === 0 ? "" : " sv-shell-failed"}`}>
-            {t("chat.shell.exitCode", row.exitCode ?? 0)}
+            {t("chat.shell.exitCode", row.exitCode)}
           </span>
-        )}
+        ) : null}
       </div>
     </div>
   );

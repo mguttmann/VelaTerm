@@ -1,5 +1,5 @@
 //! Two independent launch drafts backed by the same agent capability catalogue.
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useT } from "../i18n";
 import type { SpawnRequest } from "../ipc/events";
 import { planExecuteDefaults, type LaunchOption } from "../ipc/launch";
@@ -47,18 +47,23 @@ function withRemembered(
   return { ...value, plan: merge("plan"), exec: merge("exec") };
 }
 
-export function PlanExecuteFields({ parentSessionId, config, options, onChange, resolved = false, cwd }: {
+export function PlanExecuteFields({ parentSessionId, config, options, onChange, resolved = false, cwd, disabled = false, confirmed = false }: {
   parentSessionId: string; config: Config; options: LaunchOption[];
   onChange: (value: Config | null) => void;
   resolved?: boolean;
+  disabled?: boolean;
+  confirmed?: boolean;
   cwd?: string | null;
 }) {
   const t = useT();
-  const [draft, setDraft] = useState<Config | null>(null);
+  const locked = useRef(disabled || confirmed);
+  locked.current = disabled || confirmed;
+  const [editable, setDraft] = useState<Config | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [revision, setRevision] = useState(0);
   useEffect(() => {
     let live = true;
+    if (confirmed) { onChange(null); return; }
     setDraft(null); setError(null); onChange(null);
     void (resolved ? Promise.resolve(config) : planExecuteDefaults(parentSessionId, config)).then(value => {
       if (!live) return;
@@ -68,13 +73,17 @@ export function PlanExecuteFields({ parentSessionId, config, options, onChange, 
       setDraft(seeded); onChange(launchable(seeded, options));
     }).catch((cause) => { if (live) setError(launchErrorText(cause)); });
     return () => { live = false; };
-  }, [parentSessionId, config, revision, onChange, resolved, options]);
-  const publish = (next: Config) => { setDraft(next); onChange(launchable(next, options)); };
+  }, [parentSessionId, config, revision, onChange, resolved, options, confirmed]);
+  const draft = confirmed ? config : editable;
+  const publish = (next: Config) => {
+    if (locked.current) return;
+    setDraft(next); onChange(launchable(next, options));
+  };
   const available = options.filter(option => option.supportsPlanExecute);
   if (!draft) return <LaunchLoadState state={error ? "error" : "loading"} error={error} retry={() => setRevision(r => r + 1)} />;
   return <div className="launch-role-panels">
     <label className="launch-panel launch-split-option">
-      <span className="launch-inline"><input type="checkbox" checked={draft.splitTasks ?? false}
+      <span className="launch-inline"><input type="checkbox" disabled={disabled || confirmed} checked={draft.splitTasks ?? false}
         onChange={event => publish({ ...draft, splitTasks: event.target.checked })} />
         <strong>{t("launch.splitTasks")}</strong></span>
       <span className="launch-hint">{t("launch.splitTasksHint")}</span>
@@ -86,13 +95,14 @@ export function PlanExecuteFields({ parentSessionId, config, options, onChange, 
         const next = { ...draft, [role]: { ...value, ...patch } };
         publish(next);
       };
-      const remember = (patch: { agent?: SessionKind | null; model?: string | null; effort?: string | null }) =>
-        useTermStore.getState().setPlanExecuteRolePrefs(role, patch);
+      const remember = (patch: { agent?: SessionKind | null; model?: string | null; effort?: string | null }) => {
+        if (!locked.current) useTermStore.getState().setPlanExecuteRolePrefs(role, patch);
+      };
       const label = t(role === "plan" ? "launch.planTitle" : "launch.execTitle");
       return <section className="launch-panel" key={role} aria-label={label}>
         <h3>{label}</h3>
         <LaunchField label={t("spawn.agentLabel")}>
-          <Combo value={value.agent ?? ""} width="100%" menuPortal ariaLabel={t("spawn.agentLabel")}
+          <Combo key={String(disabled || confirmed)} disabled={disabled || confirmed} value={value.agent ?? ""} width="100%" menuPortal ariaLabel={t("spawn.agentLabel")}
             options={available.map(option => ({ value: option.id, label: option.label }))}
             onChange={agent => {
               update({ agent: agent as typeof value.agent, model: "", effort: "" });
@@ -100,7 +110,7 @@ export function PlanExecuteFields({ parentSessionId, config, options, onChange, 
             }} />
         </LaunchField>
         {spec && <div className="launch-model-grid">
-          <ModelEffortFields spec={spec} model={value.model ?? ""} effort={value.effort ?? ""}
+          <ModelEffortFields disabled={disabled || confirmed} spec={spec} model={value.model ?? ""} effort={value.effort ?? ""}
             context={{ parentSessionId, cwd }} onChange={(model, effort) => update({ model, effort })}
             onModelCommit={model => remember({ model })} onEffortCommit={effort => remember({ effort })} />
         </div>}

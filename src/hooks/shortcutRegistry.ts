@@ -17,6 +17,7 @@ import { env } from "../platform";
 export type ShortcutAction =
   | "openProject"
   | "newTab"
+  | "newAgentSession"
   | "newBrowserTab"
   | "closePane"
   | "splitRight"
@@ -29,6 +30,7 @@ export type ShortcutAction =
 export const SHORTCUT_ACTIONS: ShortcutAction[] = [
   "openProject",
   "newTab",
+  "newAgentSession",
   "newBrowserTab",
   "splitRight",
   "splitDown",
@@ -84,6 +86,7 @@ export const DEFAULT_BINDINGS: Record<ShortcutAction, string> =
     ? {
         openProject: "mod+o",
         newTab: "mod+t",
+        newAgentSession: "mod+n",
         newBrowserTab: "mod+shift+b",
         closePane: "mod+w",
         splitRight: "mod+d",
@@ -95,6 +98,7 @@ export const DEFAULT_BINDINGS: Record<ShortcutAction, string> =
     : {
         openProject: "mod+alt+o",
         newTab: "mod+alt+t",
+        newAgentSession: "mod+alt+n",
         newBrowserTab: "mod+alt+b",
         closePane: "mod+alt+w",
         splitRight: IS_MAC ? "cmd+d" : "mod+alt+d",

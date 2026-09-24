@@ -62,17 +62,6 @@
 .memory-history small { display: block; color: var(--text-muted); }
 .memory-editor { max-width: 850px; display: flex; flex-direction: column; gap: 18px; }
 .memory-editor > label { display: flex; flex-direction: column; gap: 8px; }
-.memory-compile .memory-agent-field { border: 0; padding: 0; margin: 0; min-width: 0; }
-.memory-agent-field legend { padding: 0; margin-bottom: 8px; }
-.memory-agent-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
-.memory-agent-option { display: flex; align-items: center; gap: 10px; min-height: 54px; padding: 12px 14px; border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elevated); cursor: pointer; }
-.memory-agent-option:hover { border-color: var(--accent); }
-.memory-agent-option:has(:checked) { border-color: var(--accent); background: var(--accent-soft); box-shadow: inset 0 0 0 1px var(--accent); }
-.memory-agent-option:has(:focus-visible) { outline: 2px solid var(--accent); outline-offset: 3px; }
-.memory-agent-option:has(:disabled) { opacity: .5; cursor: not-allowed; }
-.memory-agent-option input { width: 16px; height: 16px; flex-shrink: 0; margin: 0; accent-color: var(--accent); }
-.memory-agent-option strong { font-weight: 600; }
-.memory-agent-option small { display: block; margin-top: 4px; color: var(--text-secondary); }
 .memory-compile > footer { border-top: 1px solid var(--border); padding-top: 16px; margin-top: 3px; }
 .memory-compile .btn { min-height: 38px; padding: 8px 16px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-elevated); color: var(--text-primary); font: inherit; cursor: pointer; }
 .memory-compile .btn:hover { background: var(--bg-hover); text-decoration: none; }

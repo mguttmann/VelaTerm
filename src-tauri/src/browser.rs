@@ -259,6 +259,19 @@ pub async fn browser_open(
     Ok(())
 }
 
+/// Reports a browser command that runs long.
+///
+/// Each of these drives a native child WebView from the UI thread, so the cost is set by the platform
+/// WebView rather than by this code: WKWebView, WebKitGTK and WebView2 charge very differently for the same
+/// call, and only WebView2 crosses a process boundary to do it.
+fn slow(command: &'static str) -> crate::diagnostics::Slow {
+    crate::diagnostics::Slow::new(
+        "ui_thread_slow",
+        crate::commands::UI_THREAD_REPORT_THRESHOLD,
+        serde_json::json!({ "command": command }),
+    )
+}
+
 /// Address-bar navigation after HTTPS/search normalization and invalid-scheme rejection.
 #[tauri::command]
 pub fn browser_navigate(
@@ -267,6 +280,7 @@ pub fn browser_navigate(
     tab_id: String,
     input: String,
 ) -> Result<(), String> {
+    let _slow = slow("browser_navigate");
     let url = normalize_url(&input)?;
     let Some(wv) = webview_of(&app, &state, &tab_id) else {
         return Ok(());
@@ -294,6 +308,7 @@ pub fn browser_forward(app: AppHandle, state: State<'_, BrowserManager>, tab_id:
 /// Reload through Webview::reload, available in 2.11.
 #[tauri::command]
 pub fn browser_reload(app: AppHandle, state: State<'_, BrowserManager>, tab_id: String) {
+    let _slow = slow("browser_reload");
     if let Some(wv) = webview_of(&app, &state, &tab_id) {
         let _ = wv.reload();
     }
@@ -319,6 +334,7 @@ pub fn browser_set_bounds(
     h: f64,
     css_viewport_h: f64,
 ) -> Result<(), String> {
+    let _slow = slow("browser_set_bounds");
     let Some(wv) = webview_of(&app, &state, &tab_id) else {
         return Ok(());
     };
@@ -339,6 +355,7 @@ pub fn browser_set_visible(
     tab_id: String,
     visible: bool,
 ) {
+    let _slow = slow("browser_set_visible");
     if let Some(wv) = webview_of(&app, &state, &tab_id) {
         let _ = if visible { wv.show() } else { wv.hide() };
     }
@@ -347,6 +364,7 @@ pub fn browser_set_visible(
 /// Close and destroy a child WebView when its tab closes.
 #[tauri::command]
 pub fn browser_close(app: AppHandle, state: State<'_, BrowserManager>, tab_id: String) {
+    let _slow = slow("browser_close");
     let label = if let Ok(mut map) = state.0.lock() {
         map.remove(&tab_id)
     } else {

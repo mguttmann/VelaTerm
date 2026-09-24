@@ -1182,6 +1182,13 @@ fn dispatch_inner(app: &AppCtx, cmd: &str, args: &Value, source: &str, origin: C
         // Authoritative session facts. Every client asks for the whole set once it connects, then follows
         // the `session://state` broadcast; a client that never opened a session still learns about it.
         "session_states" => to_value(crate::session_state::snapshot()),
+        // A session's `vrun` commands: the end of one's log for the viewer, and stopping one. Both read
+        // or signal on disk, so they stay on this path rather than the main thread.
+        "run_log_tail" => crate::agent::runs::log_tail(app, &req_str(args, "label")?),
+        "run_stop" => {
+            crate::agent::runs::stop(app, &req_str(args, "label")?)?;
+            Ok(Value::Null)
+        }
         // A client reports that someone has now looked at this session: it was on screen, in a focused
         // window, for long enough to count as read. The backend clears the marker for **every** client,
         // which is the whole point — reading a reply in the browser must clear the dot on the desktop.
@@ -1244,15 +1251,16 @@ fn dispatch_inner(app: &AppCtx, cmd: &str, args: &Value, source: &str, origin: C
             Ok(Value::Null)
         }
 
-        // Answers true only for the client that answered first; a later caller must drop its card
-        // without spawning anything.
-        "resolve_spawn" => Ok(Value::Bool(core::resolve_spawn(
-            app,
-            source,
-            &req_str(args, "parentSessionId")?,
-            &req_str(args, "prompt")?,
-            req_bool(args, "confirmed")?,
-        ))),
+        "spawn_prepare" => to_value(crate::agent::spawn_requests::prepare(app, &req_str(args, "requestId")?, opt_str(args, "kind").as_deref())?),
+        "spawn_requests" => to_value(crate::agent::spawn_requests::list(app)?),
+        "spawn_request" => to_value(crate::agent::spawn_requests::read(app, &req_str(args, "requestId")?)?),
+        "spawn_retry" => to_value(crate::agent::spawn_requests::resume(app, &req_str(args, "requestId")?)?),
+        "resolve_spawn" => to_value(core::resolve_spawn(app, source, &req_str(args, "requestId")?,
+            req_bool(args, "confirmed")?, args.get("request").filter(|v| !v.is_null()).map(|v| serde_json::from_value(v.clone()).map_err(|e| e.to_string())).transpose()?)?),
+        "agent_session_prepare" => to_value(crate::agent::spawn_requests::prepare_agent_session(app,
+            &serde_json::from_value(args.get("context").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?)?),
+        "agent_session_create" => to_value(crate::agent::spawn_requests::create_agent_session(app,
+            &serde_json::from_value(args.get("request").cloned().unwrap_or(Value::Null)).map_err(|e| e.to_string())?)?),
 
         other => Err(format!("Unknown command: {other}")),
     }

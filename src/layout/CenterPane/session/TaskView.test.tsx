@@ -5,11 +5,13 @@ import type { TaskTab } from "../../../store/termStore";
 
 vi.mock("../../../ipc/transport", async (original) => ({
   ...await original<typeof import("../../../ipc/transport")>(), invoke: vi.fn(), listen: vi.fn(),
+  onTransportReconnect: vi.fn(() => vi.fn()), onTransportDisconnect: vi.fn(() => vi.fn()),
 }));
 
-import { invoke, listen } from "../../../ipc/transport";
+import { invoke, listen, onTransportReconnect, onTransportDisconnect } from "../../../ipc/transport";
 import { setLang } from "../../../i18n";
-import { TaskView, fmtElapsed } from "./TaskView";
+import { useTermStore } from "../../../store/termStore";
+import { TaskView, fmtElapsed, taskStatusKey } from "./TaskView";
 
 let eventCallback: ((event: ChatEvent) => void) | undefined;
 let unlisten: ReturnType<typeof vi.fn>;
@@ -21,6 +23,7 @@ const seed: ChatBackgroundTask = {
   description: "Alpha: alpha-worker",
   summary: "protocol probe",
   status: "running",
+  finished: false, can_stop: true, elapsed_ms: 65_000,
   started_at: 1_000_000,
   usage: { total_tokens: 1200, tool_uses: 2, duration_ms: 20 },
   last_tool_name: "alpha-worker",
@@ -87,7 +90,7 @@ it("follows extras events for its own task and ignores other tasks", async () =>
   expect(screen.getByText("Alpha: alpha-worker")).toBeTruthy();
   expect(screen.queryByText("Other: worker")).toBeNull();
   // The task missing from a list is a signal that it ended; the last state stays on screen.
-  expect(screen.getByText("Ended")).toBeTruthy();
+  expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
 
   extras([{ ...seed, description: "Beta: gamma-worker", last_tool_name: "gamma-worker", usage: { total_tokens: 64131, tool_uses: 3, duration_ms: 5000 } }]);
   expect(screen.getByText("Beta: gamma-worker")).toBeTruthy();
@@ -110,9 +113,9 @@ it("renders the workflow's phases and agents, with results only for finished age
   expect(screen.getByText("BETA")).toBeTruthy();
   expect(screen.queryByText("not yet")).toBeNull();
   expect(screen.getByText("Reply GAMMA")).toBeTruthy();
-  expect(screen.getByText("attempt 2")).toBeTruthy();
-  expect(screen.getAllByText("done").length).toBe(2);
-  expect(screen.getAllByText("running").length).toBe(1);
+  expect(screen.getByText("Attempt 2")).toBeTruthy();
+  expect(screen.getAllByText("Done").length).toBe(2);
+  expect(screen.getAllByText("Running", { selector: ".sv-task-agent-state" }).length).toBe(1);
   expect(screen.queryByText("This task reports no per-agent progress.")).toBeNull();
 });
 
@@ -124,7 +127,7 @@ it("says so when a workflow reports no per-agent progress", async () => {
 it("shows the final state once the task ends and drops the Stop action", async () => {
   await mount();
   expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
-  extras([{ ...seed, status: "completed", ended_at: 1_006_324, summary: 'Dynamic workflow "protocol probe" completed', output_file: "/tmp/tasks/worwyzf75.output", usage: { total_tokens: 64131, tool_uses: 0, duration_ms: 6324 } }]);
+  extras([{ ...seed, status: "completed", finished: true, can_stop: false, elapsed_ms: 6324, ended_at: 1_006_324, summary: 'Dynamic workflow "protocol probe" completed', output_file: "/tmp/tasks/worwyzf75.output", usage: { total_tokens: 64131, tool_uses: 0, duration_ms: 6324 } }]);
   expect(screen.getByText("Completed")).toBeTruthy();
   expect(screen.getByText('Dynamic workflow "protocol probe" completed')).toBeTruthy();
   expect(screen.getByText("/tmp/tasks/worwyzf75.output")).toBeTruthy();
@@ -132,8 +135,8 @@ it("shows the final state once the task ends and drops the Stop action", async (
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
 });
 
-it("shows a running task as ended once its process exits, and stops the clock and the Stop action", async () => {
-  vi.useFakeTimers();
+it("retains the last reported state but marks it unavailable after exit, and stops the clock and Stop action", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "Date", "performance"] });
   vi.setSystemTime(1_000_000 + 65_000);
   await mount();
   expect(screen.getByText("Running")).toBeTruthy();
@@ -142,19 +145,19 @@ it("shows a running task as ended once its process exits, and stops the clock an
 
   // The process sends no extras on its way out; the exit itself is the last word about its tasks.
   act(() => eventCallback?.({ type: "exited", code: 1, stderr: "", released: false }));
-  expect(screen.getByText("Ended")).toBeTruthy();
+  expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
   expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
-  expect(screen.queryByText("Running")).toBeNull();
-  const elapsed = screen.getByText("Elapsed").nextElementSibling!.textContent;
+  expect(screen.getByText("Running")).toBeTruthy();
+  const elapsed = screen.getByText("Elapsed time").nextElementSibling!.textContent;
   act(() => { vi.advanceTimersByTime(3000); });
-  expect(screen.getByText("Elapsed").nextElementSibling!.textContent).toBe(elapsed);
+  expect(screen.getByText("Elapsed time").nextElementSibling!.textContent).toBe(elapsed);
 });
 
-it("shows a running task as ended when a new process takes the session over", async () => {
+it("marks old task data unavailable when a new process takes the session over", async () => {
   await mount();
   act(() => eventCallback?.({ type: "reset", epoch: 2 }));
-  expect(screen.getByText("Ended")).toBeTruthy();
+  expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
 });
 
@@ -165,30 +168,30 @@ it("does not let a snapshot that resolves after the exit revive the task", async
     command === "chat_snapshot" ? (new Promise<unknown>((resolve) => { resolveSnapshot = resolve; }) as Promise<never>) : previous(command, args));
   await mount();
   act(() => eventCallback?.({ type: "exited", code: 0, stderr: "", released: true }));
-  expect(screen.getByText("Ended")).toBeTruthy();
+  expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
   await act(async () => resolveSnapshot({ running: false, rows: [], queue: [], permissions: [], commands: [], configKeys: [], backgroundTasks: [seed] }));
-  expect(screen.getByText("Ended")).toBeTruthy();
+  expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
 });
 
 it("treats a snapshot without a task list as an empty one: the backend omits empty lists", async () => {
   snapshotTasks = undefined;
   await mount();
-  expect(screen.getByText("Ended")).toBeTruthy();
+  expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
 });
 
-it("shows a task the snapshot no longer lists as ended, not as running or empty", async () => {
+it("retains last task facts with an unavailable label when the snapshot no longer lists it", async () => {
   snapshotTasks = [];
   await mount();
   expect(screen.getByText("protocol probe", { selector: ".sv-task-title" })).toBeTruthy();
   expect(screen.getByText("Alpha: alpha-worker")).toBeTruthy(); // The last state seen stays on screen.
-  expect(screen.getByText("Ended")).toBeTruthy();
+  expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
   expect(screen.getByText("No longer reported by the agent")).toBeTruthy();
   expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
 });
 
 it("ticks the elapsed time once a second while the task runs", async () => {
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "Date", "performance"] });
   vi.setSystemTime(1_000_000 + 65_000);
   await mount();
   expect(screen.getByText("1:05")).toBeTruthy();
@@ -197,7 +200,7 @@ it("ticks the elapsed time once a second while the task runs", async () => {
 });
 
 it("stays mounted but invisible while hidden, and pauses the ticker until shown again", async () => {
-  vi.useFakeTimers();
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "Date", "performance"] });
   vi.setSystemTime(1_000_000 + 65_000);
   const view = render(<TaskView tab={tab} hidden={true} />);
   await act(async () => {});
@@ -237,4 +240,60 @@ it("formats durations as m:ss and h:mm:ss", () => {
   expect(fmtElapsed(0)).toBe("0:00");
   expect(fmtElapsed(65_000)).toBe("1:05");
   expect(fmtElapsed(3_723_000)).toBe("1:02:03");
+});
+
+it("registers a fresh snapshot on reconnect without starting the agent", async () => {
+  await mount();
+  const reconnect = vi.mocked(onTransportReconnect).mock.calls.at(-1)![0];
+  const disconnect = vi.mocked(onTransportDisconnect).mock.calls.at(-1)![0];
+  act(() => disconnect());
+  expect(screen.getByRole("alert").textContent).toContain("synchron");
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  snapshotTasks = [{ ...seed, finished: true, can_stop: false, status: "completed", elapsed_ms: 67000 }];
+  await act(async () => reconnect());
+  expect(screen.getByText("Completed")).toBeTruthy();
+  expect(screen.getByText("1:07")).toBeTruthy();
+  expect(vi.mocked(invoke).mock.calls.filter(([command]) => command === "chat_snapshot")).toHaveLength(2);
+  expect(vi.mocked(invoke).mock.calls.some(([command]) => command === "chat_start")).toBe(false);
+});
+
+it("shows snapshot failures and allows a bounded user retry", async () => {
+  vi.mocked(invoke).mockRejectedValueOnce(new Error("offline"));
+  await mount();
+  expect(screen.getByRole("alert")).toBeTruthy();
+  expect(screen.queryByRole("button", { name: "Stop" })).toBeNull();
+  fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await act(async () => {});
+  expect(screen.queryByRole("alert")).toBeNull();
+  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+});
+
+it("unknown task states use backend lifecycle facts and labels depend on task type", async () => {
+  await mount();
+  extras([{ ...seed, task_type: "local_agent", status: "waiting_for_peer", last_tool_name: "Bash" }]);
+  expect(screen.getByText("waiting_for_peer")).toBeTruthy();
+  expect(screen.getByText("Last reported tool")).toBeTruthy();
+  expect(screen.getByText("Bash")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Stop" })).toBeTruthy();
+  extras([{ ...seed, task_type: "future_task", last_tool_name: "unclassified" }]);
+  expect(screen.queryByText("Last reported tool")).toBeNull();
+  expect(screen.queryByText("Last reported agent")).toBeNull();
+  expect(screen.queryByText("unclassified")).toBeNull();
+});
+
+it("client wall-clock jumps do not change a backend task duration", async () => {
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "setTimeout", "clearTimeout", "Date", "performance"] });
+  await mount();
+  expect(screen.getByText("1:05")).toBeTruthy();
+  vi.setSystemTime(Date.now() + 12 * 60 * 60 * 1000);
+  act(() => vi.advanceTimersByTime(2000));
+  expect(screen.getByText("1:07")).toBeTruthy();
+});
+
+it("hydrates a deep-link placeholder without changing focus or inventing an unknown status", async () => {
+  const hydrate = vi.spyOn(useTermStore.getState(), "hydrateTaskTab");
+  await mount({ taskType: "", seed: undefined });
+  expect(hydrate).toHaveBeenCalledWith("s", seed);
+  expect(taskStatusKey(undefined)).toBeNull();
+  hydrate.mockRestore();
 });

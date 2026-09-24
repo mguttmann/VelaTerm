@@ -69,7 +69,7 @@ impl ChatManager {
         {
             let turn = previous.turn.lock().unwrap();
             // Queued prompts and background work need their own explicit disposition. Never discard them.
-            if !turn.waiting.is_empty() || !turn.active_tasks.is_empty() || !turn.background_tasks.is_empty() {
+            if previous.shell_running.load(Ordering::Relaxed) || !turn.waiting.is_empty() || !turn.active_tasks.is_empty() || !turn.background_tasks.is_empty() {
                 return Err("CHAT_PERMISSION_RESTART_TASKS".into());
             }
         }

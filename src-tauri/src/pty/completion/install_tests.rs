@@ -78,3 +78,46 @@ fn scripts_are_private_and_powershell_paths_are_utf8() {
     assert!(!script.exists());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn bash_startup_replays_login_profiles_and_loads_integration() {
+    if !Path::new("/bin/bash").exists() {
+        return;
+    }
+    let root = std::env::temp_dir().join(format!("vlx-bash-startup-' 中文-{}", uuid::Uuid::new_v4()));
+    let home = root.join("user ' 中文");
+    std::fs::create_dir_all(&home).unwrap();
+    // Bash reads the first readable file of this list only, so a login shell records just one marker.
+    for (name, marker) in [
+        (".bash_profile", "P"),
+        (".bash_login", "L"),
+        (".profile", "R"),
+    ] {
+        std::fs::write(
+            home.join(name),
+            format!("VLX_TEST_ORDER+=\"{marker}\"\n"),
+        )
+        .unwrap();
+    }
+    let (state, _) = install(&root, "/bin/bash").unwrap().unwrap();
+    let rcfile = configure_bash_startup(&state).unwrap();
+    let output = std::process::Command::new("/bin/bash")
+        .env_clear()
+        .env("HOME", &home)
+        .env("PATH", "/usr/bin:/bin")
+        .args([
+            "--rcfile",
+            &rcfile.to_string_lossy(),
+            "-ic",
+            "printf 'RESULT:%s:%s' \"$VLX_TEST_ORDER\" \"$_vlxc_nonce\"",
+        ])
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    // The integration announces its state first; Bash 3 reports itself unsupported right when it loads.
+    assert!(String::from_utf8_lossy(&output.stdout)
+        .ends_with(&format!("RESULT:P:{}", state.nonce)));
+    drop(state);
+    std::fs::remove_dir_all(root).unwrap();
+}

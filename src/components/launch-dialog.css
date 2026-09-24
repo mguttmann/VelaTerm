@@ -83,6 +83,24 @@
   padding: var(--launch-padding);
   flex: none;
 }
+.launch-header-actions {
+  display: flex;
+  align-items: center;
+  flex: none;
+  gap: 8px;
+  margin-left: auto;
+}
+.launch-dialog .launch-close {
+  width: 28px;
+  height: 28px;
+  margin: -4px -6px 0 0;
+  border: none;
+  background: none;
+  cursor: pointer;
+}
+.launch-dialog .launch-close:hover {
+  background: var(--bg-hover);
+}
 .launch-header p {
   margin-top: 5px;
   color: var(--text-muted);

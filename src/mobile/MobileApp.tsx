@@ -6,21 +6,20 @@
 //! subscribe to global events. Differences:
 //! - `useKeyboardShortcuts` is omitted because phones have no physical shortcut keys;
 //! - `view://request` is ignored because mobile has no document tabs;
-//! - navigation uses local `openId` state without touching tab, split, or keep-alive store state.
+//! - navigation uses session URLs without mirroring tab, split, or keep-alive store state.
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect } from "react";
 import { isShareSurface } from "../ipc/shareBase";
-import { navigateSharedSession, selectedSharedSession } from "../sharing/sessionNavigation";
+import { navigateMobileSession, useMobileSessionNavigation } from "./sessionNavigation";
+import { useSpawnNavigation } from "./useSpawnNavigation";
 import { SplitTaskConfirmModal } from "../components/SplitTaskConfirmModal";
 import { SpawnConfirmModal } from "../components/SpawnConfirmModal";
 import { useNotifications } from "../hooks/useNotifications";
 import {
   onSessionState,
-  onSpawnRequest,
-  onSpawnResolved,
   onTreeChanged,
 } from "../ipc/events";
-import { getClientSource } from "../ipc/transport";
+import { startSpawnRecovery } from "../ipc/spawnRecovery";
 import { ConnectionBanner } from "../remote/ConnectionBanner";
 import {
   refreshSettingsFromBackend,
@@ -34,34 +33,24 @@ import { TerminalPage } from "./TerminalPage";
 import "./mobile.css";
 import { useMobileTree } from "./useMobileTree";
 import { settleFirstMirrorAlign } from "../store/mirrorAlign";
-import { mobileNotifications } from "./nativeNotifications";
 import { bindMobilePush } from "./pushSubscription";
-
-const useSessionUrl = isShareSurface || !!mobileNotifications();
 
 function MobileApp() {
   const projects = useTermStore((s) => s.projects);
   const sessions = useTermStore((s) => s.sessions);
   const loadTree = useTermStore((s) => s.loadTree);
   const loadMobileTree = useCallback(() => {
-    // 手机不参加布局镜像，无需等待桌面镜像初始化的超时。
+    // Mobile does not mirror desktop layout or wait for its initial alignment.
     settleFirstMirrorAlign(false);
     return loadTree().then(() => { void bindMobilePush() });
   }, [loadTree]);
   const treeRequest = useMobileTree(loadMobileTree);
-  const handleSpawnRequest = useTermStore((s) => s.handleSpawnRequest);
   const applyAppearance = useTermStore((s) => s.applyAppearance);
   const clearNotification = useTermStore((s) => s.clearNotification);
 
   // The currently viewed session; null displays the list. TerminalPage owns mount/unmount behavior.
-  const [openId, setOpenId] = useState<SessionId | null>(()=>useSessionUrl?selectedSharedSession():null);
+  const { sessionId: openId, view } = useMobileSessionNavigation();
   const treeLoaded=useTermStore(s=>s.treeLoaded);
-  useEffect(()=>{
-    if(!useSessionUrl)return;
-    const restore=()=>setOpenId(selectedSharedSession());
-    window.addEventListener("popstate",restore);
-    return ()=>window.removeEventListener("popstate",restore);
-  },[]);
 
   useNotifications();
 
@@ -82,15 +71,7 @@ function MobileApp() {
     const unwatch = watchSystemTheme(() => {
       if (useTermStore.getState().theme === "system") applyAppearance();
     });
-    // Handle child-task requests normally. The new session appears in the tree and receives its
-    // prompt through usePtySession when opened.
-    const unlistenSpawn = onSpawnRequest((req) => void handleSpawnRequest(req));
-    // Another client answering the card must clear it here too. Without this the phone keeps showing a
-    // request the desktop already confirmed, and tapping Confirm launches the same task a second time.
-    const unlistenResolved = onSpawnResolved((ev) => {
-      if (ev.source === getClientSource()) return;
-      useTermStore.getState().handleSpawnResolved(ev.parentSessionId, ev.prompt);
-    });
+    const stopSpawnRecovery = startSpawnRecovery();
     // Synchronize the tree across clients: after any successful mutation, the backend broadcasts
     // `tree://changed`; debounce the event before reloading.
     let treeTimer: ReturnType<typeof setTimeout> | undefined;
@@ -101,8 +82,7 @@ function MobileApp() {
     return () => {
       unwatch();
       stopSettingsWatch();
-      void unlistenSpawn.then((fn) => fn());
-      void unlistenResolved.then((fn) => fn());
+      stopSpawnRecovery();
       clearTimeout(treeTimer);
       void unlistenTree.then((fn) => fn());
       void unlistenSessionState.then((fn) => fn());
@@ -115,18 +95,19 @@ function MobileApp() {
     (id: SessionId) => {
       // Match desktop openSession behavior: opening a session clears its unread marker.
       clearNotification(id);
-      if(useSessionUrl)navigateSharedSession(id);else setOpenId(id);
+      navigateMobileSession(id);
     },
     [clearNotification],
   );
-  const back = useCallback(() => {if(useSessionUrl)navigateSharedSession(null);else setOpenId(null)}, []);
+  const back = useCallback(() => navigateMobileSession(null), []);
+  useSpawnNavigation(open);
 
   const session = openId ? (sessions.find((s) => s.id === openId) ?? null) : null;
 
   // Return to the list if the active session disappears after deletion or archiving.
   useEffect(() => {
-    if (treeLoaded && openId && !session) setOpenId(null);
-  }, [treeLoaded, openId, session]);
+    if (treeLoaded && !treeRequest.loading && !treeRequest.error && openId && !session) navigateMobileSession(null, "terminal", true);
+  }, [treeLoaded, treeRequest.loading, treeRequest.error, openId, session]);
 
   const project = session ? projects.find((p) => p.id === session.projectId) : null;
   const cwd = session ? (session.cwd ?? projectRoot(project) ?? undefined) : undefined;
@@ -134,7 +115,7 @@ function MobileApp() {
   return (
     <div className="m-app">
       {session ? (
-        <TerminalPage session={session} cwd={cwd} onBack={back} />
+        <TerminalPage session={session} cwd={cwd} onBack={back} view={view} />
       ) : (
         <SessionListPage onOpen={open} loading={treeRequest.loading} error={treeRequest.error} onRefresh={treeRequest.refresh} />
       )}

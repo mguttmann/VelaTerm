@@ -56,7 +56,12 @@ pub fn run_spawn(args: &[String]) -> ! {
     };
     let body = build_spawn_body(&sid, &parsed, &cwd);
     let endpoint = format!("{url}/spawn?t={token}");
-    match post_json(&endpoint, &body) {
+    let request: serde_json::Value = serde_json::from_str(&body).unwrap_or_default();
+    let request_id = request["requestId"].as_str().unwrap_or("");
+    eprintln!("vspawn: requestId={request_id}; retain this ID when retrying with --request-id");
+    // A missing acknowledgement is safe to retry only with this exact serialized request.
+    let status = post_json(&endpoint, &body).or_else(|| post_json(&endpoint, &body));
+    match status {
         Some(code) if (200..300).contains(&code) => {
             let wt = if parsed.plan_execute.as_ref().and_then(|c| c.worktree_mode)
                 == Some(super::plan_execute::WorktreeMode::Each)
@@ -85,7 +90,7 @@ pub fn run_spawn(args: &[String]) -> ! {
                     value["requestId"].as_str().unwrap_or("")
                 );
             } else {
-                println!("spawned sub-session ({about}): {}", parsed.prompt);
+                println!("Submitted child-task request {request_id} ({about})");
             }
             std::process::exit(0);
         }
@@ -153,6 +158,7 @@ const SPAWN_USAGE: &str =
     --plan-model / --exec-model <model>   model for each role\n\
     --plan-effort / --exec-effort <level> reasoning effort for each role\n\
     --cwd <path>      child working directory and repository used to create a worktree\n\
+    --request-id <uuid> reuse the same request identity after a lost acknowledgement\n\
     --yes             skip initial launch confirmation; split-task proposals still require review\n\
     --model <name>    model for the child session, such as opus or gpt-5.5; names are agent specific\n\
     --effort <level>  reasoning effort for agents that offer one, such as low, medium, or high";
@@ -178,6 +184,7 @@ fn require_env(name: &str) -> Result<String, String> {
 
 /// Spawn argument parsing result.
 struct SpawnArgs {
+    request_id: Option<String>,
     plan_execute: Option<super::plan_execute::Config>,
     worktree: bool,
     /// Explicit child/repository directory; absent means the command's current directory.
@@ -204,6 +211,7 @@ enum SpawnParse {
 /// and everything after `--` is prompt text even when prefixed by `-`. Other options are errors;
 /// remaining words join into a required prompt.
 fn parse_spawn_args(rest: &[String]) -> SpawnParse {
+    let mut request_id = None;
     let mut workflow = false;
     let mut flow_config = super::plan_execute::Config::default();
     let mut flow_options = false;
@@ -218,6 +226,14 @@ fn parse_spawn_args(rest: &[String]) -> SpawnParse {
     while i < rest.len() {
         let a = rest[i].as_str();
         match a {
+            _ if a == "--request-id" || a.starts_with("--request-id=") => {
+                let value = if let Some((_, value)) = a.split_once('=') { value } else {
+                    i += 1;
+                    match rest.get(i) { Some(value) => value, None => return SpawnParse::Err("vspawn: --request-id needs a UUID".into()) }
+                };
+                if uuid::Uuid::parse_str(value).is_err() { return SpawnParse::Err("vspawn: --request-id needs a UUID".into()); }
+                request_id = Some(value.to_owned());
+            }
             "--plan-execute" => workflow = true,
             "--split-tasks" => { flow_config.split_tasks = true; flow_options = true; }
             _ if a == "--worktree-mode" || a.starts_with("--worktree-mode=") => {
@@ -354,6 +370,7 @@ fn parse_spawn_args(rest: &[String]) -> SpawnParse {
         }
     }
     SpawnParse::Ok(SpawnArgs {
+        request_id,
         plan_execute: workflow.then_some(flow_config),
         worktree,
         cwd,
@@ -365,18 +382,15 @@ fn parse_spawn_args(rest: &[String]) -> SpawnParse {
     })
 }
 
-/// Build the `/spawn` JSON body, omitting kind so the frontend can inherit it when absent. serde_json
+/// Build the `/spawn` JSON body, omitting kind so the backend can inherit it when absent. serde_json
 /// safely escapes quotes, newlines, and backslashes. The supplied cwd is the resolved invocation
 /// directory. `noConfirm`, `model`, and `effort` are only
-/// written when set, keeping the body identical to previous builds for ordinary spawns.
+/// written when set. Every task has a request ID, including ordinary spawns.
 fn build_spawn_body(sid: &str, args: &SpawnArgs, cwd: &str) -> String {
     let mut obj = serde_json::Map::new();
+    obj.insert("requestId".into(), serde_json::json!(args.request_id.clone().unwrap_or_else(|| uuid::Uuid::new_v4().to_string())));
     if let Some(config) = &args.plan_execute {
         obj.insert("planExecute".into(), serde_json::json!(config));
-        obj.insert(
-            "requestId".into(),
-            serde_json::json!(uuid::Uuid::new_v4().to_string()),
-        );
     }
     obj.insert("parentSessionId".into(), serde_json::json!(sid));
     obj.insert("prompt".into(), serde_json::json!(args.prompt));
@@ -1406,6 +1420,12 @@ fn post_json_read(url: &str, body: &str) -> Option<(u16, String)> {
     post_json_read_with(url, body, READ_TIMEOUT)
 }
 
+/// Post a small notification, waiting only a moment for the answer. For announcements the service can
+/// also discover on its own, where a slow reply must not hold up the caller.
+pub(crate) fn post_brief(url: &str, body: &str) -> Option<u16> {
+    post_json_read_with(url, body, std::time::Duration::from_secs(2)).map(|(code, _)| code)
+}
+
 /// Use the existing HTTP client so framing, UTF-8 across chunks, and truncated bodies are handled once.
 fn post_json_read_with(
     url: &str,
@@ -1468,6 +1488,7 @@ mod tests {
     /// Body-building fixture: only the fields a test cares about are set by the caller.
     fn spawn_args(prompt: &str) -> SpawnArgs {
         SpawnArgs {
+            request_id: None,
             plan_execute: None,
             worktree: false,
             cwd: None,
@@ -1660,6 +1681,17 @@ mod tests {
             parse_spawn_args(&args(&["--worktree"])),
             SpawnParse::Err(_)
         ));
+    }
+
+    #[test]
+    fn ordinary_requests_have_distinct_ids_and_explicit_retries_keep_their_id() {
+        let mut args = spawn_args("same task");
+        let first: serde_json::Value = serde_json::from_str(&build_spawn_body("parent", &args, "/tmp")).unwrap();
+        let second: serde_json::Value = serde_json::from_str(&build_spawn_body("parent", &args, "/tmp")).unwrap();
+        assert_ne!(first["requestId"], second["requestId"]);
+        args.request_id = Some(first["requestId"].as_str().unwrap().into());
+        let retry: serde_json::Value = serde_json::from_str(&build_spawn_body("parent", &args, "/tmp")).unwrap();
+        assert_eq!(first, retry);
     }
 
     #[test]

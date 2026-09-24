@@ -12,9 +12,9 @@ The launch settings select `run.config.worktreeMode`, through the dialog or `--w
 
 1. Inspect the task and current workspace. Resolve material ambiguity with the user. Write a concrete acceptance checklist and an implementation plan in `plans/impl/`, including the existing uncommitted changes, the executor's permitted scope, verification requirements and the intended final location of the result. You own planning and audit; the executor owns implementation.
 2. For automatic task splitting, follow the proposal and confirmation steps below. Otherwise send a self-contained task with `vflow dispatch`. In single-task mode, the first dispatch creates the executor with the saved launch configuration; later dispatches address that same executor. Include the plan's absolute path, relevant files, constraints, acceptance criteria and existing user modifications. Follow the selected directory mode; only executors edit implementation files within their assigned scope. The next dispatch round is the recorded round plus one.
-3. After dispatch, end your turn and let the executor work. Its report is delivered automatically as a new message in this conversation. Do not poll continuously or create a replacement executor. A sent/queued receipt is delivery evidence, not task completion.
-4. On a report, check the current round, actual source changes, diff, tests and other necessary evidence. Do not accept a self-reported success without review. Findings must identify the affected file/location, observed behavior, required correction and verification. Send the remaining issues in the next dispatch. Do not repeat resolved findings unless a new change invalidates their evidence.
-5. Accept only when every requirement is verified or explicitly excluded by the user. Run `vflow accept` with the final audit: delivered result and location, acceptance checklist, checks actually run, remaining limitations, and any separate worktree awaiting integration. Work in a separate worktree is not delivery into the original branch unless the task explicitly permits that location. Move completed plan/report files to `plans/processed/` only after delivery is verified.
+3. After dispatch, end your turn and let the executor work. Its report is delivered automatically as a new message in this conversation. Do not poll continuously or create a replacement executor. A delivery receipt is evidence of delivery, not of task completion.
+4. On a report, audit in three tiers and stop at the tier the risk warrants. Tier 1, always: check the current round, the recorded evidence files (exit codes, test counts against the baseline, lint and build output), a clean working tree, and that the diff stays inside the assigned scope. Tier 2, by default: read the diff of the changed files against the acceptance checklist and the repository's conventions, and run the existing test suites once. Tier 3, only on a risk signal: start the application and exercise the specified scenarios yourself, or write an independent verification script. Risk signals are an executor model weaker than the planner's, changes to migrations, money handling, parsing or other data-integrity code, a checklist item without evidence, a test count that did not grow with new behaviour, a report that contradicts the diff, or a task the user marked as critical. Do not repeat the executor's full verification without one of these signals; verified evidence is review, and re-running it is not. Do not accept a self-reported success without review. Findings must identify the affected file/location, observed behavior, required correction and verification. Only functional defects, missing requirements and convention violations justify a correction round; record wording, comment and naming remarks in the acceptance audit instead of dispatching for them, and send all remaining issues together in one dispatch. Do not repeat resolved findings unless a new change invalidates their evidence.
+5. Accept only when every requirement is verified or explicitly excluded by the user. Run `vflow accept` with the final audit: delivered result and location, acceptance checklist, the audit tier reached and the checks actually run, remarks not worth a correction round, remaining limitations, and any separate worktree awaiting integration. Work in a separate worktree is not delivery into the original branch unless the task explicitly permits that location. Move completed plan/report files to `plans/processed/` only after delivery is verified.
 6. If a decision, permission or external dependency prevents progress, use `vflow block` and state the precise missing input. If the same finding persists through two correction rounds without new evidence or a viable change, pause with an explicit account rather than running identical attempts indefinitely. Never claim success because of a round count or token limit. Blocking leaves communication available: the executor can report the current round directly into review. Use a new dispatch when assigning further work, rather than requiring one merely to receive a report.
 
 ## Automatic task splitting
@@ -54,11 +54,32 @@ Confirmation creates the approved task workflows and starts their execution sess
 
 ## Executor
 
-Read the plan and implement only the assigned scope. Preserve other people's changes and the agreed architecture. Run appropriate existing checks. Follow project rules about announcing new automated tests before adding them. Do not start further agents or external actions without authorization.
+Read the plan and implement only the assigned scope. Preserve other people's changes and the agreed architecture. Run appropriate existing checks and keep their evidence: save the complete output and exit code of every verification command (tests, lint, build, scenario checks) to files under an `evidence/` directory next to the plan document, one file per command and round. The planner audits from these files before deciding whether to re-run anything. Follow project rules about announcing new automated tests before adding them. Do not start further agents or external actions without authorization.
 
-When the round is ready for review, submit `vtell --report --round N` with the same recorded round. The backend automatically targets your planner; an explicit target must identify that same session. Include changed files, what changed, commands and results, known omissions and the evidence required by the planner. Reporting is your last action that affects the work: do not modify files after reporting, because the planner may begin auditing immediately. End your turn; a correction request will arrive in this same conversation. Use `vflow block` for a real blocker and preserve incomplete work. Ordinary `vtell <session>` messages do not submit a report or change workflow state.
+When the round is ready for review, submit `vtell --report --round N` with the same recorded round. The backend automatically targets your planner; an explicit target must identify that same session. Include changed files, what changed, each verification command with its exit code, test counts before and after, the paths of the evidence files, known omissions and any other evidence the plan requires. Reporting is your last action that affects the work: do not modify files after reporting, because the planner may begin auditing immediately. End your turn; a correction request will arrive in this same conversation. Use `vflow block` for a real blocker and preserve incomplete work. Ordinary `vtell <session>` messages do not submit a report or change workflow state.
 
 If the workflow is `blocked`, you can still send progress messages with ordinary `vtell` and submit the current round with `vtell --report` when it is ready for review. The report enters review directly; do not request another dispatch or increment the round just to report. Completed or explicitly stopped workflows cannot accept new execution reports.
+
+## Long-running commands
+
+A command expected to run for more than a minute must be started so that its completion wakes you. You
+learn that work has finished only when a command you issued returns; nothing else will tell you. This
+failure is silent — no error appears, the work simply completes and nobody looks at the result.
+
+Start such work with `vrun <label> <command...>`, issued as a background shell command. It starts the
+work under `nohup`, waits for it, and exits when the work exits, so the completion notice arrives by
+itself. It prints the exit code, the elapsed time and the tail of the log. `vrun --status <label>`
+reports on a task that is still running.
+
+Do not start the work and then write a separate command to wait for it. Two failures on 2026-09-17 came
+from exactly that: one session's watcher was still attached to the previous round, so a verification that
+finished in 30 seconds went unnoticed for 38 minutes; another waited on a process matched by name and
+matched the waiting command itself, so its condition could never become true. Both sessions had to be
+asked before anyone noticed.
+
+Two rules follow. A waiting condition must name a specific PID — never `pgrep`, `ps | grep` or any
+command-line pattern, because the waiting command's own arguments contain that pattern. And every wait
+needs an upper bound, so that a wrong condition costs one timeout rather than the rest of the session.
 
 ## Commands and reliable delivery
 
@@ -70,6 +91,18 @@ vflow accept <workflow-id> --round N --message-id msg-UUID < audit.txt
 vflow block <workflow-id> --round N --message-id msg-UUID < blocker.txt
 vflow stop <workflow-id>
 ```
+
+Messages between a planner and its executors follow a direction rule. A planner correcting work already
+under way sends `vtell <executor> --steer`: the message joins the turn the executor is running rather than
+waiting for it to end, which is the whole point of a correction. Routine progress notes need no steering.
+An executor never steers its planner — a report interrupting the planner's own reasoning helps nobody, and
+`--report` rejects `--steer` for that reason.
+
+Report the receipt exactly as it came back. `sent` started a new turn. `steered` joined a turn already
+running. `blocked` reached a recipient stopped on a question or a permission prompt: the message is
+delivered and will not be lost, but its agent reads nothing until someone answers. `queued` is still
+waiting and the recipient has seen nothing at all. For `blocked` and `queued`, say what the recipient is
+waiting on and what the user has to do; neither is evidence that the message arrived in front of anyone.
 
 Generate a UUID for each distinct submission; retain the ID and exact text in your plan directory before sending. Use a quoted heredoc or a UTF-8 input file so prose is never interpreted as shell code. On timeout, retry with the same message ID, round and text. Never change the ID to bypass an unresolved receipt. `chat_submission_pending` means delivery is uncertain: inspect the target conversation and ask for resolution if needed. A receipt marked `retained` means the report is preserved but could not be added to the initiator's terminal conversation. For workflows created from the New Session menu, an acceptance or planner-side blocker is marked `recorded`: it is saved in the workflow ledger without sending another prompt to yourself. Present that audit or blocker in your final response in this planning conversation.
 

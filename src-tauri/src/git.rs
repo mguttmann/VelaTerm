@@ -283,6 +283,119 @@ pub struct WorktreeInfo {
     pub base_ref: String,
 }
 
+/// Durable creation intent. The ownership ref and branch are created in one Git ref transaction;
+/// a retry can distinguish our interrupted operation from a pre-existing directory or branch.
+#[derive(Debug, Clone, Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OwnedWorktree {
+    pub repo: String,
+    pub path: String,
+    pub branch: String,
+    pub base_ref: String,
+    pub start_commit: String,
+    pub owner: String,
+}
+
+pub fn prepare_owned_worktree(repo: &str, name: &str, sibling: bool) -> Result<OwnedWorktree, String> {
+    let top = run_git_checked(repo, &["rev-parse", "--show-toplevel"])?;
+    let repo = std::fs::canonicalize(&top).map_err(|e| e.to_string())?.to_string_lossy().into_owned();
+    let start_commit = run_git_checked(&repo, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let base_ref = resolve_head_ref(&repo).ok_or("Cannot resolve the worktree base")?;
+    let owner = Uuid::new_v4().to_string();
+    let leaf = format!("{}-{owner}", slugify(name));
+    let storage = if sibling {
+        worktree_list(&repo)?.first().map(|w| w.path.clone()).ok_or("Cannot locate worktree storage")?
+    } else { repo.clone() };
+    Ok(OwnedWorktree {
+        repo, path: std::path::Path::new(&storage).join(".vlx-worktrees").join(&leaf).to_string_lossy().into_owned(),
+        branch: format!("vlx/{leaf}"), base_ref, start_commit, owner,
+    })
+}
+
+fn owned_refs(receipt: &OwnedWorktree, create: bool) -> Result<(), String> {
+    use std::io::Write;
+    let branch = format!("refs/heads/{}", receipt.branch);
+    let marker = format!("refs/velaterm/worktrees/{}", receipt.owner);
+    let verb = if create { "create" } else { "delete" };
+    let input = format!("start\n{verb} {branch} {}\n{verb} {marker} {}\nprepare\ncommit\n", receipt.start_commit, receipt.start_commit);
+    let mut child = crate::host::command("git").arg("-C").arg(&receipt.repo)
+        .args(["update-ref", "--create-reflog", "-m", &format!("VelaTerm worktree {}", receipt.owner), "--stdin"])
+        .stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped())
+        .spawn().map_err(|e| format!("Failed to reserve worktree refs: {e}"))?;
+    child.stdin.take().ok_or("Git input is unavailable")?.write_all(input.as_bytes()).map_err(|e| e.to_string())?;
+    let output = child.wait_with_output().map_err(|e| e.to_string())?;
+    if !output.status.success() { return Err(String::from_utf8_lossy(&output.stderr).trim().to_string()); }
+    Ok(())
+}
+
+fn verify_owned_refs(receipt: &OwnedWorktree) -> Result<(), String> {
+    let branch = format!("refs/heads/{}", receipt.branch);
+    let marker = format!("refs/velaterm/worktrees/{}", receipt.owner);
+    for reference in [&branch, &marker] {
+        if run_git_checked(&receipt.repo, &["rev-parse", "--verify", reference])? != receipt.start_commit {
+            return Err("The worktree branch or ownership ref has changed; resources were preserved".into());
+        }
+    }
+    let history = run_git_checked(&receipt.repo, &["reflog", "show", "--format=%gs", &branch])?;
+    if history != format!("VelaTerm worktree {}", receipt.owner) {
+        return Err("The worktree branch history has changed; resources were preserved".into());
+    }
+    Ok(())
+}
+
+pub fn materialize_owned_worktree(receipt: &OwnedWorktree) -> Result<WorktreeInfo, String> {
+    let marker = format!("refs/velaterm/worktrees/{}", receipt.owner);
+    if run_git(&receipt.repo, &["rev-parse", "--verify", &marker]).is_some() {
+        verify_owned_refs(receipt)?;
+    } else {
+        if std::path::Path::new(&receipt.path).symlink_metadata().is_ok() {
+            return Err("The worktree path already exists; no existing resources were changed".into());
+        }
+        owned_refs(receipt, true)?;
+    }
+    let entries = worktree_list(&receipt.repo)?;
+    if let Some(entry) = entries.iter().find(|entry| entry.path == receipt.path) {
+        if entry.branch.as_deref() != Some(receipt.branch.as_str()) {
+            return Err("The worktree path belongs to another branch".into());
+        }
+    } else {
+        if std::path::Path::new(&receipt.path).symlink_metadata().is_ok() {
+            return Err("An unregistered directory occupies the worktree path; it was preserved".into());
+        }
+        run_git_checked(&receipt.repo, &["worktree", "add", &receipt.path, &receipt.branch])?;
+    }
+    ensure_worktrees_ignored(&receipt.repo);
+    Ok(WorktreeInfo { path: receipt.path.clone(), branch: receipt.branch.clone(), base_ref: receipt.base_ref.clone() })
+}
+
+/// The caller must first exclude references from persisted sessions/groups/projects while holding
+/// its creation lock. Git's own non-force removal remains the final dirty-worktree check.
+pub fn rollback_owned_worktree(receipt: &OwnedWorktree) -> Result<(), String> {
+    let marker = format!("refs/velaterm/worktrees/{}", receipt.owner);
+    let branch = format!("refs/heads/{}", receipt.branch);
+    if run_git(&receipt.repo, &["rev-parse", "--verify", &marker]).is_none() {
+        if run_git(&receipt.repo, &["rev-parse", "--verify", &branch]).is_none()
+            && std::path::Path::new(&receipt.path).symlink_metadata().is_err() { return Ok(()); }
+        return Err("Worktree ownership cannot be verified; resources were preserved".into());
+    }
+    verify_owned_refs(receipt)?;
+    let entries = worktree_list(&receipt.repo)?;
+    if let Some(entry) = entries.iter().find(|entry| entry.path == receipt.path) {
+        if entry.branch.as_deref() != Some(receipt.branch.as_str())
+            || run_git_checked(&receipt.path, &["rev-parse", "HEAD"])? != receipt.start_commit {
+            return Err("The worktree checkout has changed; resources were preserved".into());
+        }
+        if !run_git_checked(&receipt.path, &["status", "--porcelain=v1", "--untracked-files=all", "--ignored"])?.is_empty() {
+            return Err("The worktree contains uncommitted changes or untracked files; resources were preserved".into());
+        }
+        run_git_checked(&receipt.repo, &["worktree", "remove", &receipt.path])?;
+    } else if std::path::Path::new(&receipt.path).symlink_metadata().is_ok() {
+        return Err("The worktree directory is not registered; it was preserved".into());
+    }
+    // Compare-and-delete both refs together. A concurrent commit makes the transaction fail safely.
+    owned_refs(receipt, false)
+}
+
 /// Resolve HEAD to a full branch ref or detached commit SHA. Worktree creation records this base
 /// independently from session parentage.
 fn resolve_head_ref(repo: &str) -> Option<String> {

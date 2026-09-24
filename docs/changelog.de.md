@@ -1,3 +1,51 @@
+## v0.2.3 — 2026-09-24
+
+- 🪟 Bestehende Sitzungen lassen sich in Teilungen verschieben. Über das Kontextmenü der Seitenleiste öffnet eine Sitzung in einer rechten Teilung, einer unteren Teilung oder im fokussierten Bereich; zieht man sie aus der Seitenleiste an den Rand eines Bereichs, wird in diese Richtung geteilt, und ein Ablegen in der Mitte ersetzt die dort gezeigte Sitzung. Zwei bis vier ausgewählte Sitzungen lassen sich in einem gleichmäßig geteilten Tab nebeneinander anordnen, und Sitzungen in den übrigen Bereichen des aktuellen Tabs sind in der Seitenleiste gekennzeichnet.
+
+- 🗂️ Hintergrundaufgaben, die ein Agent startet, öffnen in eigenen Tabs neben der Unterhaltung – mit Status, verstrichener Zeit, Tokens, Werkzeugaufrufen, dem zuletzt gemeldeten Werkzeug und den Phasen jedes Agenten. Eine Aufgabe hat eine eigene Adresse, und beim Verlassen kehrt die Ansicht in den Bereich zurück, aus dem sie geöffnet wurde.
+
+- 💬 In der Unterhaltungsansicht wird eine Nachricht, die mit `!` beginnt, in der Shell der Sitzung ausgeführt. Die Ausgabe erscheint laufend, der Exit-Code wird angezeigt, der Befehl lässt sich währenddessen abbrechen, und er bleibt im Leseverlauf von Claude-, Codex-, OpenCode-, Pi- und OMP-Sitzungen erhalten.
+
+- ⏱️ Der neue Befehl `vrun` startet einen lang laufenden Befehl und wartet in einem einzigen Aufruf auf ihn, sodass ein Agent erfährt, wann die Arbeit tatsächlich beendet ist. So gestartete Befehle stehen über dem Terminal, zusammen mit ihrer Laufzeit, einem Protokollfenster und einer Schaltfläche zum Beenden, die eine Bestätigung verlangt.
+
+- ⌨️ Neue Agentensitzungen haben eine eigene Seite und ein eigenes Tastenkürzel: Agenten und Voreinstellungen durchsuchen, die zuletzt verwendete übernehmen und festlegen, ob die Sitzung neben der aktuellen oder darunter entsteht.
+
+- 🧰 Die Eingabe-Symbolleiste lässt sich in den Einstellungen zusammenstellen: Sie wählen, welche Elemente neben der Nachricht stehen und in welcher Reihenfolge. Abgeschaltete Elemente und solche, die nicht in die Breite passen, bleiben über das Menü „Mehr“ erreichbar.
+
+- 📥 Beim Herunterladen einer Datei in einem URL- oder SSH-Verbindungsfenster wird zuerst auf diesem Rechner der Speicherort abgefragt, danach zeigt die Oberfläche den Fortschritt und eine Schaltfläche zum Abbrechen.
+
+- 🗃️ Kiro-Sitzungen lassen sich in ein Projekt importieren und lesen: Der Import ordnet Sitzungen über das Arbeitsverzeichnis zu, und jede öffnet in einer schreibgeschützten Verlaufsansicht mit Suche. Derzeit werden reine Textaufzeichnungen unterstützt.
+
+- 🧠 Das Ordnen der Wissensdatenbank funktioniert neben Claude und Codex auch mit Grok, OpenCode, Pi und OMP, und der Agent wird über dieselbe Art von Auswahlliste gewählt wie an den übrigen Stellen der Anwendung.
+
+- 📱 iOS und Android: Die Startseite bewahrt Ihre SSH- und URL-Verbindungen auf, meldet Sie an einem VelaTerm-Konto an und listet die Geräte auf, die darüber teilen. Der Fingerabdruck eines Hosts wird einmal bestätigt und gemerkt, ein QR-Code füllt die Dienstadresse aus, und sämtliche nativen Bildschirme und Systemmeldungen liegen in allen 11 Oberflächensprachen vor.
+
+- 🔐 Claude-Sitzungen starten in dem gewählten Berechtigungsmodus: Zusätzliche Startargumente behalten ihre vorgesehene Rangfolge, der Modus wird beim Start mit der Meldung des CLI abgeglichen, und eine ohne Rückfragen gestartete Sitzung bleibt entsprechend gekennzeichnet.
+
+- 🧩 Das Modellmenü führt Opus 5.5 auf und ergänzt die zusätzlichen Modelle, die das gewählte CLI meldet, ohne die eingebaute Reihenfolge zu verändern; ein Modell, das mit einem CLI-Update hinzukommt, erscheint ohne Neustart der Anwendung.
+
+- 🌱 Anfragen für untergeordnete Sitzungen überstehen Unterbrechungen: Eine Anfrage, deren Antwort verloren ging, lässt sich nach dem erneuten Verbinden wiederherstellen, ein bereits bestätigter Start verwendet bei einem erneuten Versuch dieselbe Sitzung und dieselben Einstellungen, und ein Arbeitsbaum, der nicht angelegt werden konnte, wird zurückgenommen, ohne zuvor Vorhandenes anzutasten.
+
+- ⚡ Die Anwendung startet schneller – der beim Start geladene Code ist rund halb so groß wie zuvor, und die Seiten für Wissensdatenbank, Sicherheitsaudit, Sitzungsimport und geteilte Projekte werden erst beim Öffnen geladen.
+
+- 🖼️ In eine Nachricht eingefügte oder gezogene Bilder werden vor dem Senden auf 1568 Pixel an der langen Seite verkleinert.
+
+- 🐚 Bash-Sitzungen laden die Shell-Vervollständigung aus einer Startdatei, sodass eine neue Bash-Sitzung nicht mehr mit einem bereits eingetippten Befehl öffnet. Die Anmeldeprofile werden weiterhin in der von Bash vorgesehenen Reihenfolge gelesen.
+
+- ✍️ Markdown: Eine einzelne Tilde streicht den Rest der Zeile nicht mehr durch, sodass eine eingefügte Shell-Eingabeaufforderung lesbar bleibt, und Fett- oder Kursivschrift, die direkt nach chinesischen, japanischen oder koreanischen Zeichen endet, wird korrekt geschlossen, statt Sternchen auf dem Bildschirm zu hinterlassen.
+
+- 📨 `vtell --steer` stellt eine Nachricht in die gerade laufende Runde des Empfängers zu, statt deren Ende abzuwarten. Steht der Empfänger bei einer Rückfrage, lautet die Rückmeldung blocked, denn die Nachricht wird erst gelesen, wenn diese Rückfrage beantwortet ist.
+
+- 🔁 In der Unterhaltungsansicht endet der Status einer Sitzung zugleich mit ihrer Runde, die Ungelesen-Markierung verschwindet, sobald die Arbeit tatsächlich beginnt, und eine Sitzung mit weiterlaufender Hintergrundarbeit bleibt als laufend gekennzeichnet.
+
+- 🪟 Windows: Cursor-Hooks starten korrekt, und die Fensterschicht wurde für die nach einer RDP-Neuverbindung oder einem Wechsel des virtuellen Desktops gemeldeten Tastatureingabeprobleme aktualisiert.
+
+- 🛡️ Sicherheitsaudit: Modellliste und Agentennamen stammen aus demselben Startkatalog wie im Rest der Anwendung, sodass frühere Durchläufe den aktuellen Namen jedes Agenten zeigen.
+
+- 🩹 Kleinere Korrekturen: Fehlermeldungen in der Unterhaltung richten sich an der mittleren Spalte aus; beide Startdialoge lassen sich jederzeit schließen, und ein bestätigter, aber fehlgeschlagener Start kann abgebrochen werden; Nachrichten und Nachrichten in der Warteschlange zeigen ihren Absender; eine lange Warteschlange scrollt innerhalb einer festen Höhe; leere HTML-Anker zeigen beim Bearbeiten eines Dokuments keine Markierung mehr; und der Statusfilter auf dem Telefon nimmt Sitzungen auf, die erst später dazu passen.
+
+---
+
 ## v0.2.2 — 2026-09-15
 
 - ⏳ Automatische Fortsetzung nach Nutzungslimits, standardmäßig in den Einstellungen deaktiviert: Wenn Claude oder Codex an einem 5-Stunden- oder Wochenlimit stoppt, setzt die Sitzung von selbst fort, sobald das Limit zurückgesetzt ist. Über der Eingabe erscheint ein Banner mit der Rücksetzzeit und einer Schaltfläche „Abbrechen“; die Wartezeit übersteht einen App-Neustart und endet, sobald du eine Nachricht sendest, zurücksetzt, die Sitzung leerst oder die Einstellung ausschaltest.

@@ -26,6 +26,30 @@ pub fn cli_permission_mode(stored: Option<&str>) -> Option<&str> {
     }
 }
 
+/// Preserve the documented extra-argument override while publishing the mode Claude actually starts
+/// with. Verified with Claude 2.1.278 initialize.current_permission_mode: the last mode wins, but either
+/// dangerous-skip flag (including one generated from the stored choice) takes precedence over all modes.
+pub fn launch_permission_mode(stored: Option<&str>, extra_args: &[String]) -> String {
+    let mut mode = cli_permission_mode(stored).unwrap_or("default").to_string();
+    let mut bypass = mode == "bypassPermissions";
+    let mut index = 0;
+    while index < extra_args.len() {
+        let arg = &extra_args[index];
+        if arg == "--" { break; }
+        if arg == "--dangerously-skip-permissions" { bypass = true; }
+        if let Some(value) = arg.strip_prefix("--permission-mode=") {
+            mode = value.to_string();
+        } else if arg == "--permission-mode" {
+            if let Some(value) = extra_args.get(index + 1) {
+                mode = value.clone();
+                index += 1;
+            }
+        }
+        index += 1;
+    }
+    if bypass { "bypassPermissions".into() } else { mode }
+}
+
 /// Command line that starts an agent in streaming JSON mode.
 ///
 /// Every flag here is load-bearing:
@@ -637,6 +661,22 @@ mod tests {
     use super::*;
 
     /// The stored `skip` becomes the agent's own word for it; anything unrecognized is left to the agent.
+    #[test]
+    fn permission_overrides_match_the_real_cli_precedence() {
+        let args = |values: &[&str]| values.iter().map(|value| value.to_string()).collect::<Vec<_>>();
+        for stored in [None, Some(""), Some("  "), Some("unknown")] {
+            assert_eq!(launch_permission_mode(stored, &[]), "default");
+        }
+        for mode in CLI_PERMISSION_MODES {
+            assert_eq!(launch_permission_mode(Some(mode), &[]), *mode);
+        }
+        assert_eq!(launch_permission_mode(Some("default"), &args(&["--permission-mode", "plan", "--permission-mode=acceptEdits"])), "acceptEdits");
+        assert_eq!(launch_permission_mode(Some("plan"), &args(&["--dangerously-skip-permissions"])), "bypassPermissions");
+        assert_eq!(launch_permission_mode(Some("skip"), &args(&["--permission-mode", "plan"])), "bypassPermissions");
+        assert_eq!(launch_permission_mode(Some("default"), &args(&["--allow-dangerously-skip-permissions"])), "default");
+        assert_eq!(launch_permission_mode(Some("plan"), &args(&["--", "--dangerously-skip-permissions"])), "plan");
+    }
+
     #[test]
     fn stored_permission_mode_is_translated_for_the_command_line() {
         assert_eq!(cli_permission_mode(Some("skip")), Some("bypassPermissions"));

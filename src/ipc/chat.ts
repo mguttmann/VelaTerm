@@ -149,6 +149,7 @@ export type ChatRow =
       /** The head of the stream was cut; only the tail is kept. */
       stdoutTruncated: boolean;
       stderrTruncated: boolean;
+      outputIncomplete?: boolean;
       status: "running" | "completed" | "cancelled";
       exitCode?: number;
       at?: number;
@@ -257,14 +258,16 @@ export type CodexPersonality = (typeof CODEX_PERSONALITIES)[number];
 /** One phase of a Claude workflow, as `task_progress.workflow_progress` lists it. */
 export interface ChatWorkflowPhase {
   type: "workflow_phase";
-  index: number;
+  id?: string;
+  index?: number;
   title: string;
 }
 
 /** One agent of a Claude workflow. Everything but the label is optional: older CLIs send less. */
 export interface ChatWorkflowAgent {
   type: "workflow_agent";
-  index: number;
+  id?: string;
+  index?: number;
   label: string;
   phaseIndex?: number;
   phaseTitle?: string;
@@ -279,6 +282,8 @@ export interface ChatWorkflowAgent {
   lastProgressAt?: number;
   tokens?: number;
   toolCalls?: number;
+  elapsedMs?: number;
+  elapsedRunning?: boolean;
   durationMs?: number;
   resultPreview?: string;
 }
@@ -297,11 +302,14 @@ export interface ChatBackgroundTask {
   description: string;
   /** "running", one of Claude's terminal values, or "ended" when the task left the inventory silently. */
   status?: string;
+  finished?: boolean;
+  can_stop?: boolean;
+  elapsed_ms?: number;
   /** The static description, then the final summary once the task ends. */
   summary?: string;
   tool_use_id?: string;
   workflow_name?: string;
-  /** The agent working right now, for workflows. */
+  /** Last reported tool for local_agent, last reported agent label for local_workflow. */
   last_tool_name?: string;
   started_at?: number;
   ended_at?: number;
@@ -311,8 +319,8 @@ export interface ChatBackgroundTask {
 }
 
 /** Whether a task reports nothing more. A task without a status is one the backend still lists as live. */
-export function isTaskFinished(task: Pick<ChatBackgroundTask, "status">): boolean {
-  return !!task.status && !["running", "pending", "paused"].includes(task.status);
+export function isTaskFinished(task: Pick<ChatBackgroundTask, "finished" | "ended_at">): boolean {
+  return task.finished ?? task.ended_at != null;
 }
 
 /** An MCP server as the running agent reports it. */
@@ -394,6 +402,8 @@ export interface ChatCollaborationMode {
 export interface QueuedMessage {
   id: string;
   text: string;
+  /** Command preview parsed by the backend; the original context stays in text. */
+  shellCommand?: string;
   origin?: MessageOrigin;
   /** Images attached to it, waiting along with the text. */
   images?: ChatImageValue[];
@@ -644,7 +654,8 @@ export function chatClear(sessionId: string): Promise<Session> {
  *
  * `images` go out as part of the same turn and wait with it when it is queued.
  *
- * Answers `"sent"` or `"queued"`, so the composer can say which happened.
+ * Answers `"sent"`, `"steered"` when it joined a turn already running, `"blocked"` when that turn is
+ * waiting for an answer to a permission question, or `"queued"`, so the composer can say which happened.
  */
 export function chatSend(
   sessionId: string,
@@ -652,7 +663,7 @@ export function chatSend(
   behavior?: SendBehavior,
   images?: ChatImage[],
   messageId?: string,
-): Promise<"sent" | "queued" | "command"> {
+): Promise<"sent" | "steered" | "blocked" | "queued" | "command"> {
   return invoke("chat_send", { sessionId, text, behavior, images, messageId });
 }
 

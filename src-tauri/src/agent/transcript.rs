@@ -62,6 +62,7 @@ const GROK_CONTEXT_LIMIT_DEFAULT: u64 = 500_000;
 
 /// Queries model, context usage, and current tool for the Info panel.
 pub fn context_info(kind: SessionKind, agent_session_id: &str) -> Result<AgentContextInfo, String> {
+    if kind == SessionKind::Kiro { return super::kiro_info::context_info(agent_session_id); }
     if matches!(kind, SessionKind::Codex) {
         let path =
             resume::find_codex_rollout(agent_session_id).ok_or("Codex rollout file not found")?;
@@ -801,7 +802,7 @@ pub fn source_path(kind: SessionKind, agent_session_id: &str) -> Option<std::pat
         SessionKind::Codex => resume::find_codex_rollout(agent_session_id),
         SessionKind::Grok => resume::find_grok_updates(agent_session_id),
         SessionKind::Pi | SessionKind::Omp => resume::find_pi_session(kind, agent_session_id),
-        // OpenCode/Copilot/Cursor lack flat parseable files; terminal/browser nodes have no conversation.
+        // Kiro uses identity-aware multi-source reads; other non-file stores and plain terminals have no path.
         _ => None,
     }
 }
@@ -834,6 +835,13 @@ fn pi_pieces(content: &str) -> Vec<Piece> {
             Event::User { text, ts } => Some(Piece {
                 role: "user",
                 text,
+                timestamp: ts,
+                tools: Vec::new(),
+            }),
+            // Keep native shell commands at their existing prose/search position.
+            Event::Shell { command, ts, .. } => Some(Piece {
+                role: "user",
+                text: format!("!{command}"),
                 timestamp: ts,
                 tools: Vec::new(),
             }),
@@ -911,7 +919,9 @@ pub fn read(kind: SessionKind, agent_session_id: &str) -> Result<Vec<TranscriptM
             Err("Transcript view is not supported for kimi sessions yet".to_string())
         }
         SessionKind::Kiro => {
-            Err("Transcript view is not supported for kiro sessions yet".to_string())
+            Ok(super::kiro_store::read(agent_session_id)?.messages?.into_iter().map(|message| TranscriptMessage {
+                role: message.role.into(), text: message.text, timestamp: message.timestamp, tools: Vec::new(),
+            }).collect())
         }
         SessionKind::Grok => {
             let path = resume::find_grok_updates(agent_session_id)

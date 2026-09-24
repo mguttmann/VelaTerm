@@ -889,7 +889,7 @@ pub(super) fn dispatch(
     }
     proc.user_targets.lock().unwrap().insert(
         row_id.to_string(),
-        RewindTarget { message_id: message_id.clone(), turn_id: None, text: text.to_string() },
+        RewindTarget { message_id: message_id.clone(), last_message_id: None, turn_id: None, text: text.to_string() },
     );
     let agent = proc.collaboration_mode.lock().unwrap().clone();
     let model = proc.model.lock().unwrap().clone();
@@ -953,7 +953,7 @@ pub(super) fn steer(proc: &Arc<ChatProcess>, row_id: &str, text: &str, images: &
     let body = wire::prompt_body(&message_id, text, images, agent.as_deref(), model.as_deref(), variant.as_deref());
     proc.opencode.lock().unwrap().user_messages.insert(message_id.clone(), row_id.to_string());
     proc.user_targets.lock().unwrap().insert(row_id.to_string(), RewindTarget {
-        message_id: message_id.clone(), turn_id: None, text: text.to_string(),
+        message_id: message_id.clone(), last_message_id: None, turn_id: None, text: text.to_string(),
     });
     if let Err(error) = server.post(&format!("/session/{native}/prompt_async"), Some(&body)) {
         proc.opencode.lock().unwrap().user_messages.remove(&message_id);

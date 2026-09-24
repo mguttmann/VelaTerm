@@ -16,6 +16,7 @@ use super::session::{
 use super::{AgentState, StatusSignal};
 use crate::agent::inject;
 use crate::agent::server::HookEndpoint;
+use crate::diagnostics::TrackedMutex;
 use crate::host::AppCtx;
 use crate::models::SessionKind;
 
@@ -65,6 +66,13 @@ const QUIET_HEAL: Duration = Duration::from_secs(6);
 
 /// Output replay limit. Roughly 512 KB covers several full TUI redraws and recent history for new subscribers.
 const SCROLLBACK_CAP: usize = 512 * 1024;
+/// Report waiting for the session map at least this long. `pty_write` takes that lock on the UI thread for
+/// every keystroke, so a holder that runs long freezes the whole application rather than one session, and
+/// 50 ms is roughly where the delay stops being invisible.
+const SESSION_LOCK_REPORT_THRESHOLD: Duration = Duration::from_millis(50);
+/// Report a master resize that takes at least this long. A resize is a handful of syscalls and should never
+/// approach one frame, so anything at this scale is already visible to the user.
+const RESIZE_REPORT_THRESHOLD: Duration = Duration::from_millis(50);
 
 /// Per-session recording limit. At 50 MB, recording stops and marks the output as truncated. Only unusually
 /// long, redraw-heavy agent sessions should reach this safety cap.
@@ -80,16 +88,52 @@ pub const DESKTOP_SOURCE: &str = "desktop";
 /// milliseconds; timeout returns an error so the frontend can retry.
 const SPAWN_WAIT_POLL: Duration = Duration::from_millis(50);
 const SPAWN_WAIT_TIMEOUT: Duration = Duration::from_secs(3);
+const INITIAL_WRITE_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// An uncertain first delivery may be inspected, but neither the ledger nor a stale client may replay it.
+fn initial_task_for_open(
+    result: Result<Option<crate::agent::spawn_requests::PtyInitial>, String>,
+    client_prompt: Option<String>,
+) -> Result<(Option<crate::agent::spawn_requests::PtyInitial>, Option<String>), String> {
+    match result {
+        Ok(initial) => {
+            let prompt = initial.as_ref().map(|task| task.prompt.clone()).or(client_prompt);
+            Ok((initial, prompt))
+        }
+        Err(error) if error == "spawn_initial_delivery_uncertain" => Ok((None, None)),
+        Err(error) => Err(error),
+    }
+}
+
+/// Claim durably before touching the writer. Once write_all starts, every failure is uncertain.
+fn write_initial_task(
+    writer: &mut impl Write, command: &[u8],
+    claim: impl FnOnce() -> Result<(), String>,
+    finish: impl FnOnce(Result<(), String>) -> Result<(), String>,
+) -> Result<(), String> {
+    claim()?;
+    let result = writer.write_all(command).and_then(|_| writer.flush())
+        .map_err(|_| "spawn_initial_delivery_uncertain".to_string());
+    finish(result.clone())?;
+    result
+}
 
 /// Global subscriber ID used to detach one browser output stream without affecting others or killing the session.
 static NEXT_SUB_ID: AtomicU64 = AtomicU64::new(1);
+
+/// The session map, wrapped so that contention on it is reported. See `SESSION_LOCK_REPORT_THRESHOLD`.
+pub type SessionMap = TrackedMutex<HashMap<String, PtySession>>;
+
+fn new_session_map() -> SessionMap {
+    TrackedMutex::new(HashMap::new(), "pty_lock", SESSION_LOCK_REPORT_THRESHOLD)
+}
 
 /// Global PTY manager injected as Tauri managed state.
 ///
 /// `sessions` is shared with background readers so they can remove sessions at EOF and promptly release
 /// master PTY handles, preventing descriptor leaks.
 pub struct PtyManager {
-    sessions: Arc<Mutex<HashMap<String, PtySession>>>,
+    sessions: Arc<SessionMap>,
     /// Session state snapshots: session ID → signal kind → latest JSON payload.
     ///
     /// Status events are ephemeral broadcasts, so late attachments and hot reloads can miss earlier agent
@@ -131,7 +175,7 @@ const SNAPSHOT_KINDS: [&str; 7] = [
 impl PtyManager {
     pub fn new() -> Self {
         Self {
-            sessions: Arc::new(Mutex::new(HashMap::new())),
+            sessions: Arc::new(new_session_map()),
             status_cache: Arc::new(Mutex::new(HashMap::new())),
             spawning: Mutex::new(HashSet::new()),
         }
@@ -257,7 +301,7 @@ impl PtyManager {
         let mut first_sink = Some(first_sink);
         let wait_start = Instant::now();
         let _spawn_slot = loop {
-            {
+            if !self.spawning.lock().unwrap().contains(&id) {
                 let map = self.sessions.lock().unwrap();
                 if let Some(session) = map.get(&id) {
                     let pid = session.pid;
@@ -317,6 +361,19 @@ impl PtyManager {
             std::thread::sleep(SPAWN_WAIT_POLL);
         };
         let first_sink = first_sink.take().expect("the sink has not been consumed since the slot was reserved");
+        // A confirmed ordinary spawn owns its launch settings. Screen dimensions and source remain local.
+        let (kind, shell, cwd, resume_id, fork, extra_args, permission_mode, init_prompt) =
+            if let Some(session) = crate::agent::spawn_requests::pty_session(&app, &id)? {
+                let conn = app.db().conn.lock().unwrap();
+                let permission = crate::agent::permission_catalog::effective(&conn, session.kind, session.permission_mode.as_deref())?;
+                let args = inject::merge_permission_flag(session.kind, permission.as_deref(), session.agent_args.as_deref());
+                let pending = crate::db::repo::get_fork_pending(&conn, &id)?;
+                (session.kind, session.shell, session.cwd, session.agent_session_id, pending, args, permission, None)
+            } else { (kind, shell, cwd, resume_id, fork, extra_args, permission_mode, init_prompt) };
+        // Only the actual spawn owner may recover the durable first task. Clients cannot replace it.
+        let (initial_task, init_prompt) = initial_task_for_open(
+            crate::agent::spawn_requests::pty_initial(&app, &id), init_prompt,
+        )?;
 
         // Validate only a real launch, under its reservation. Reattaching to a live PTY
         // must remain possible even when its persisted history is temporarily unavailable.
@@ -376,9 +433,9 @@ impl PtyManager {
         } else {
             CommandBuilder::new(&shell)
         };
-        // Start Unix shells as login shells so profiles and `path_helper` populate `PATH`, matching common terminals.
-        #[cfg(unix)]
-        cmd.arg("-l");
+        // Unix shells start as login shells so profiles and `path_helper` populate `PATH`, matching common
+        // terminals. The argument is appended after the completion integration is installed below, because
+        // Bash loads that integration from an `--rcfile` a login shell would ignore.
         // Add Windows launch arguments by shell family.
         #[cfg(windows)]
         {
@@ -786,6 +843,9 @@ impl PtyManager {
         let mut launch = agent_spawn.launch.clone();
         #[cfg_attr(windows, allow(unused_mut))]
         let mut completion_state = super::completion::State::default();
+        // Set once the Bash integration is installed, replacing `-l` with `--rcfile` for that session.
+        #[cfg(not(windows))]
+        let mut bash_rcfile: Option<std::path::PathBuf> = None;
         // Native completion stays off on Windows whatever the stored setting says: no Bash-family shell offers a
         // startup-file hook, so the integration could only be loaded by typing a command into the terminal, and
         // every request forks MSYS helper processes there, which stalls typing. `completion::AVAILABLE` mirrors
@@ -793,19 +853,38 @@ impl PtyManager {
         #[cfg(not(windows))]
         if kind == SessionKind::Terminal {
             if let Some((state, command)) = super::completion::install(&app.data_dir()?, &shell)? {
-                let is_local_zsh = std::path::Path::new(&shell)
+                let stem = std::path::Path::new(&shell)
                     .file_stem()
-                    .is_some_and(|name| name.to_string_lossy().eq_ignore_ascii_case("zsh"));
-                if is_local_zsh {
-                    super::completion::configure_zsh_startup(&state, &mut cmd)?;
-                } else {
-                    launch = Some(command);
+                    .map(|name| name.to_string_lossy().to_lowercase())
+                    .unwrap_or_default();
+                match stem.as_str() {
+                    // Both shells load the integration from a startup file, leaving nothing on screen. Every
+                    // other shell has no such hook and receives the bootstrap command as terminal input.
+                    "zsh" => super::completion::configure_zsh_startup(&state, &mut cmd)?,
+                    "bash" => bash_rcfile = Some(super::completion::configure_bash_startup(&state)?),
+                    _ => launch = Some(command),
                 }
                 completion_state = state;
             }
         }
+        // Long options must precede short ones, so this is the shell's first argument either way.
+        #[cfg(unix)]
+        match bash_rcfile {
+            Some(path) => {
+                cmd.arg("--rcfile");
+                cmd.arg(path);
+            }
+            None => cmd.arg("-l"),
+        }
         let completion = Arc::new(Mutex::new(completion_state));
 
+        let initial_launch = match initial_task.as_ref() {
+            Some(_) => Some(launch.take().ok_or("The initial task has no agent launch command")?),
+            None => None,
+        };
+        let initial_app = app.clone();
+        let initial_app_for_ack = app.clone();
+        let initial_receipt = initial_task.clone();
         diagnostic.step("spawn");
         let child = pair
             .slave
@@ -833,8 +912,22 @@ impl PtyManager {
         // bounded FIFO queue makes writes return quickly and confines blocking to one session. Keep `pty_write`
         // synchronous so IPC arrival order preserves keystroke order. Dropping the session sender ends the thread.
         let (input_tx, input_rx) = std::sync::mpsc::sync_channel::<Vec<u8>>(INPUT_QUEUE_CAP);
+        let (initial_start, initial_ready) = std::sync::mpsc::sync_channel::<()>(1);
+        let (initial_result, initial_ack) = std::sync::mpsc::sync_channel(1);
         std::thread::spawn(move || {
             let mut writer = writer;
+            if let Some(task) = initial_receipt {
+                // Wait until the reader and lifecycle tracking are installed. This write precedes all
+                // keyboard input and is acknowledged only after both the write and receipt are durable.
+                if initial_ready.recv().is_err() { return; }
+                let command = format!("{}\r", initial_launch.expect("a durable task has a launch command"));
+                let result = write_initial_task(&mut writer, command.as_bytes(),
+                    || crate::agent::spawn_requests::pty_dispatching(&initial_app, &task),
+                    |result| crate::agent::spawn_requests::pty_finished(&initial_app, &task, result));
+                let failed = result.is_err();
+                let _ = initial_result.send(result);
+                if failed { return; }
+            }
             while let Ok(data) = input_rx.recv() {
                 if writer.write_all(&data).is_err() {
                     break; // The PTY is closed; discard meaningless residual input and exit quietly.
@@ -1334,6 +1427,23 @@ impl PtyManager {
             }
         }
 
+        if let Some(task) = initial_task {
+            let _ = initial_start.send(());
+            let result = match initial_ack.recv_timeout(INITIAL_WRITE_TIMEOUT) {
+                Ok(result) => result,
+                Err(_) => {
+                    // A timed-out or lost writer may have written any prefix. Preserve uncertainty;
+                    // neither a reconnect nor another client may automatically dispatch it again.
+                    let error = "spawn_initial_delivery_uncertain".to_string();
+                    let _ = crate::agent::spawn_requests::pty_finished(&initial_app_for_ack, &task, Err(error.clone()));
+                    Err(error)
+                }
+            };
+            if let Err(error) = result {
+                let _ = self.kill(&id, source, KillReason::Restart);
+                return Err(error);
+            }
+        }
         diagnostic.success();
         Ok(SpawnResult {
             pid,
@@ -1443,15 +1553,13 @@ impl PtyManager {
             if !resize_allowed(owner.as_deref(), source, takeover) {
                 return Ok(());
             }
-            session
-                .master
-                .resize(PtySize {
-                    rows,
-                    cols,
-                    pixel_width: 0,
-                    pixel_height: 0,
-                })
-                .map_err(|e| format!("Failed to resize PTY: {e}"))?;
+            timed_resize(
+                session.master.as_ref(),
+                id,
+                PtySize { rows, cols, pixel_width: 0, pixel_height: 0 },
+                "resize",
+            )
+            .map_err(|e| format!("Failed to resize PTY: {e}"))?;
             let mut size = session.size.lock().unwrap();
             let changed = *size != (cols, rows) || owner.as_deref() != Some(source);
             *size = (cols, rows);
@@ -1631,6 +1739,31 @@ fn scrub_color_suppressors(cmd: &mut portable_pty::CommandBuilder) {
     }
 }
 
+/// Resizes a PTY master and reports the call when it runs long.
+///
+/// On Unix this is a single `ioctl` that returns immediately. Under Windows ConPTY it is a synchronous
+/// cross-process call into the console host, which relays out the whole screen buffer before returning.
+/// Both callers hold the global session lock across it, and `pty_write` waits on that lock from the UI
+/// thread, so a slow resize presents as a frozen window rather than as a slow resize.
+fn timed_resize(
+    master: &(dyn portable_pty::MasterPty + Send),
+    id: &str,
+    size: PtySize,
+    step: &'static str,
+) -> Result<(), String> {
+    let started = Instant::now();
+    let outcome = master.resize(size).map_err(|e| e.to_string());
+    let elapsed = started.elapsed();
+    if elapsed >= RESIZE_REPORT_THRESHOLD {
+        crate::diagnostics::record(
+            "WARN",
+            "pty_resize_slow",
+            serde_json::json!({"sessionId":id,"step":step,"cols":size.cols,"rows":size.rows,"durationMs":elapsed.as_millis() as u64}),
+        );
+    }
+    outcome
+}
+
 /// Nudges PTY rows to trigger SIGWINCH and force a full-screen TUI redraw. It operates directly on the master
 /// without changing authoritative size, ownership, or resize broadcasts. Rows minimize text reflow; failures are ignored.
 ///
@@ -1640,7 +1773,7 @@ fn scrub_color_suppressors(cmd: &mut portable_pty::CommandBuilder) {
 ///
 /// Restore on a separate thread without sleeping under the session lock. Re-read authoritative size before
 /// restoring so a real resize during the delay is never overwritten. Missing sessions are ignored.
-fn nudge_winch(sessions: &Arc<Mutex<HashMap<String, PtySession>>>, id: &str) {
+fn nudge_winch(sessions: &Arc<SessionMap>, id: &str) {
     // Step one: briefly lock and apply a one-row nudge.
     {
         let map = sessions.lock().unwrap();
@@ -1654,12 +1787,12 @@ fn nudge_winch(sessions: &Arc<Mutex<HashMap<String, PtySession>>>, id: &str) {
         if bump == rows {
             return;
         }
-        let _ = session.master.resize(PtySize {
-            rows: bump,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        let _ = timed_resize(
+            session.master.as_ref(),
+            id,
+            PtySize { rows: bump, cols, pixel_width: 0, pixel_height: 0 },
+            "nudge",
+        );
     }
     // Step two: restore authoritative size after 50 ms. If a real resize already restored it, this is a harmless no-op.
     let sessions = Arc::clone(sessions);
@@ -1669,12 +1802,12 @@ fn nudge_winch(sessions: &Arc<Mutex<HashMap<String, PtySession>>>, id: &str) {
         let map = sessions.lock().unwrap();
         let Some(session) = map.get(&id) else { return };
         let (cols, rows) = *session.size.lock().unwrap();
-        let _ = session.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: 0,
-            pixel_height: 0,
-        });
+        let _ = timed_resize(
+            session.master.as_ref(),
+            &id,
+            PtySize { rows, cols, pixel_width: 0, pixel_height: 0 },
+            "nudge_restore",
+        );
     });
 }
 
@@ -1846,6 +1979,11 @@ fn spawn_idle_heal(
             // Only a session still displaying working may be corrected. Reading the emitted snapshot
             // keeps this decision on the same state clients see, including states set by hooks.
             if app.pty().cached_agent_state(&sid).as_deref() != Some("working") {
+                continue;
+            }
+            // A quiet terminal is expected while the session's `vrun` work runs: that working is held on
+            // purpose and ends when the work does.
+            if crate::agent::runs::has_live(&sid) {
                 continue;
             }
             healed = true;
@@ -2205,6 +2343,47 @@ mod tests {
     use super::{KillReason, DESKTOP_SOURCE};
     use portable_pty::{native_pty_system, CommandBuilder, PtySize};
     use std::io::Read;
+
+    #[test]
+    fn uncertain_initial_delivery_opens_without_any_initial_prompt() {
+        let (initial, prompt) = super::initial_task_for_open(
+            Err("spawn_initial_delivery_uncertain".into()), Some("stale client task".into()),
+        ).unwrap();
+        assert!(initial.is_none() && prompt.is_none());
+        assert!(super::initial_task_for_open(Err("database unavailable".into()), None).is_err());
+        let (_, prompt) = super::initial_task_for_open(Ok(None), Some("ordinary first prompt".into())).unwrap();
+        assert_eq!(prompt.as_deref(), Some("ordinary first prompt"));
+    }
+
+    #[test]
+    fn initial_task_never_writes_before_claim_and_records_partial_failures() {
+        use std::cell::RefCell;
+        use std::io::{self, Write};
+        struct Writer { bytes: Vec<u8>, partial: bool, flush_fails: bool }
+        impl Write for Writer {
+            fn write(&mut self, value: &[u8]) -> io::Result<usize> {
+                if self.partial && !self.bytes.is_empty() { return Err(io::ErrorKind::BrokenPipe.into()); }
+                let count = if self.partial { 1 } else { value.len() };
+                self.bytes.extend_from_slice(&value[..count]); Ok(count)
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                if self.flush_fails { Err(io::ErrorKind::BrokenPipe.into()) } else { Ok(()) }
+            }
+        }
+        let mut writer = Writer { bytes: vec![], partial: false, flush_fails: false };
+        assert!(super::write_initial_task(&mut writer, b"launch\r", || Err("database unavailable".into()), |_| panic!("no claimed write")).is_err());
+        assert!(writer.bytes.is_empty());
+        for (partial, flush_fails) in [(true, false), (false, true), (false, false)] {
+            let mut writer = Writer { bytes: vec![], partial, flush_fails };
+            let recorded = RefCell::new(None);
+            let result = super::write_initial_task(&mut writer, b"launch\r", || Ok(()), |outcome| { *recorded.borrow_mut() = Some(outcome); Ok(()) });
+            assert_eq!(result.is_ok(), !partial && !flush_fails);
+            assert_eq!(recorded.into_inner().unwrap(), result);
+            assert!(!writer.bytes.is_empty());
+        }
+        assert!(super::write_initial_task(&mut writer, b"launch\r", || Ok(()), |_| Err("receipt unavailable".into())).is_err());
+        assert_eq!(writer.bytes, b"launch\r");
+    }
 
     /// Color suppressors inherited from the launcher are dropped, while a `FORCE_COLOR` that was raised
     /// deliberately survives. Values come from the base environment a `CommandBuilder` starts with.

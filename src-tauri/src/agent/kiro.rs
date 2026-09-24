@@ -82,7 +82,7 @@ pub fn audit_install(status: &str, duration_ms: u128) {
 }
 
 /// Kiro configuration root: `KIRO_HOME` when set, otherwise `~/.kiro`.
-fn kiro_home() -> Option<PathBuf> {
+pub(crate) fn kiro_home() -> Option<PathBuf> {
     if let Some(home) = std::env::var_os("KIRO_HOME") {
         return Some(PathBuf::from(home));
     }

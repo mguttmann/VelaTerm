@@ -14,7 +14,8 @@ use std::path::{Path, PathBuf};
 /// Built-in `(command name, main-program subcommand arguments)` shims. `vspawn` creates a child session
 /// without a worktree, `vspawn-tree` forces `--worktree`, `vopen` opens a document or browser tab,
 /// `vrefer` reads another session's conversation, `vsearch` searches across every session, `vstat` reports which sessions are busy, and `vkb` queries code
-/// and the knowledge base. `vtell` sends session messages and execution reports.
+/// and the knowledge base. `vtell` sends session messages and execution reports, and
+/// `vrun` starts a long-running command and waits for it, so its completion reaches whoever started it.
 ///
 /// Unique `v`-prefixed names avoid shadowing system commands such as Vim's `/usr/bin/view`, so simply
 /// prepending the bin directory is sufficient without ZDOTDIR/path_helper reordering.
@@ -28,6 +29,7 @@ const SHIMS: &[(&str, &str)] = &[
     ("vkb", "--knowledge"),
     ("vflow", "--flow"),
     ("vtell", "--tell"),
+    ("vrun", "--run"),
 ];
 
 #[cfg(feature = "gui")]

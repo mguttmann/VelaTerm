@@ -1,6 +1,7 @@
 import {afterEach,describe,it,expect,vi} from "vitest";
 import {render,screen,cleanup} from "@testing-library/react";
 import type {Session} from "../types";
+import { supportsChatEngine } from "../types";
 vi.mock("../layout/CenterPane/session/ChatPane",()=>({ChatPane:()=> <div data-testid="chat"/>}));
 vi.mock("./MobileRecordedConversation",()=>({MobileRecordedConversation:()=> <div data-testid="recorded"/>}));
 vi.mock("./MobileTerminal",()=>({MobileTerminal:()=> <div data-testid="terminal"/>}));
@@ -8,6 +9,21 @@ vi.mock("./KeyBar",()=>({KeyBar:()=> <div data-testid="keys"/>}));
 import {MobileSessionBody} from "./MobileSessionBody";
 afterEach(cleanup);
 describe("手机 App 和浏览器共用的会话内容选择",()=>{
+ it("keeps Kiro interactive by default without advertising a live chat engine",()=>{
+  expect(supportsChatEngine("kiro")).toBe(false);
+  render(<MobileSessionBody session={{id:"kiro",kind:"kiro",engine:"tui"} as Session} onBack={()=>{}} onImages={()=>{}} imgError={null}/>);
+  expect(screen.queryByTestId("recorded")).toBeNull();
+  expect(screen.queryByTestId("terminal")).not.toBeNull();
+  expect(screen.queryByTestId("keys")).not.toBeNull();
+  expect(screen.queryByTestId("chat")).toBeNull();
+ });
+ it("mounts only read-only history when explicitly selected for Kiro",()=>{
+  render(<MobileSessionBody session={{id:"kiro",kind:"kiro",engine:"tui"} as Session} view="history" onBack={()=>{}} onImages={()=>{}} imgError={null}/>);
+  expect(screen.queryByTestId("recorded")).not.toBeNull();
+  expect(screen.queryByTestId("terminal")).toBeNull();
+  expect(screen.queryByTestId("keys")).toBeNull();
+  expect(screen.queryByTestId("chat")).toBeNull();
+ });
  it("已有会话引擎时只挂载会话，不创建 PTY 或快捷键栏",()=>{
   render(<MobileSessionBody session={{id:"chat",kind:"codex",engine:"chat"} as Session} onBack={()=>{}} onImages={()=>{}} imgError={null}/>);
   expect(screen.queryByTestId("chat")).not.toBeNull();expect(screen.queryByTestId("terminal")).toBeNull();expect(screen.queryByTestId("keys")).toBeNull();

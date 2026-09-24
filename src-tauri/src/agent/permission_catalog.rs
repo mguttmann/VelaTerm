@@ -82,7 +82,9 @@ pub fn effective(
     stored: Option<&str>,
 ) -> Result<Option<String>, String> {
     if let Some(mode) = stored.map(str::trim).filter(|mode| !mode.is_empty()) {
-        return Ok(Some(mode.to_string()));
+        return Ok(Some(if kind == SessionKind::Claude && normalize(kind, Some(mode)).is_err() {
+            "default".to_string()
+        } else { mode.to_string() }));
     }
     let settings: Value = repo::get_app_settings(conn)?
         .get("vlx-settings")
@@ -92,7 +94,9 @@ pub fn effective(
         .as_str()
         .map(str::trim)
         .filter(|mode| !mode.is_empty())
-        .map(str::to_string))
+        .map(|mode| if kind == SessionKind::Claude && normalize(kind, Some(mode)).is_err() {
+            "default".to_string()
+        } else { mode.to_string() }))
 }
 
 /// Patch only this agent's permission under the database lock, retaining paths, arguments, and other preferences.
@@ -308,6 +312,23 @@ mod tests {
         ))
         .unwrap();
         assert!(config.get("permission").is_none());
+    }
+
+    #[test]
+    fn legacy_unknown_claude_modes_read_as_default_but_new_writes_are_rejected() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(crate::db::schema::SCHEMA).unwrap();
+        assert_eq!(effective(&conn, SessionKind::Claude, Some("unknown")).unwrap().as_deref(), Some("default"));
+        assert!(validate(SessionKind::Claude, Some("unknown")).is_err());
+        for mode in ["plan", "default", "acceptEdits", "auto", "skip", "unknown"] {
+            repo::set_app_settings(&conn, &std::collections::HashMap::from([("vlx-settings".into(),
+                json!({"agentDefaults":{"claude":{"permissionMode":mode}}}).to_string())])).unwrap();
+            let expected = if mode == "unknown" { "default" } else { mode };
+            for stored in [None, Some(""), Some(" ")] {
+                assert_eq!(effective(&conn, SessionKind::Claude, stored).unwrap().as_deref(), Some(expected));
+            }
+            assert_eq!(effective(&conn, SessionKind::Claude, Some("acceptEdits")).unwrap().as_deref(), Some("acceptEdits"));
+        }
     }
 
     #[test]

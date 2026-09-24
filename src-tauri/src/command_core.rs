@@ -1176,7 +1176,7 @@ pub fn chat_send(
         behavior.unwrap_or("queue")
     ]))
     .map_err(|e| e.to_string())?;
-    let claim = submissions::claim(
+    let claim = submissions::claim_retry(
         &ctx.db().conn.lock().unwrap(),
         session_id,
         message_id,
@@ -1185,12 +1185,14 @@ pub fn chat_send(
     if let Claim::Complete(outcome) = claim {
         return outcome.and_then(|value| match value.as_str() {
             "sent" => Ok("sent"),
+            "steered" => Ok("steered"),
+            "blocked" => Ok("blocked"),
             "queued" => Ok("queued"),
             "command" => Ok("command"),
             _ => Err("Invalid submission receipt".into()),
         });
     }
-    let outcome = ctx.chat().send_identified(
+    let outcome = ctx.chat().send_identified_checked(
         ctx,
         session_id,
         &text,
@@ -1198,6 +1200,12 @@ pub fn chat_send(
         behavior.unwrap_or("queue"),
         Some(message_id),
     );
+    use crate::agent::chat::engine::SubmissionFailure;
+    if let Err(SubmissionFailure::Rejected(error)) = &outcome {
+        submissions::finish_rejected(&ctx.db().conn.lock().unwrap(), session_id, message_id, error)?;
+        return Err(error.clone());
+    }
+    let outcome = outcome.map_err(|_| "chat_submission_pending".to_string());
     submissions::finish(
         &ctx.db().conn.lock().unwrap(),
         session_id,
@@ -1228,10 +1236,29 @@ pub fn chat_run_shell(
     if message_id.trim().is_empty() {
         return Err("A shell command needs a message id".into());
     }
-    if !ctx.chat().is_alive(session_id) {
-        chat_start(ctx, session_id, None, None, false)?;
+    let receipt_id = crate::agent::chat::shell::submission_id(message_id);
+    {
+        let conn = ctx.db().conn.lock().unwrap();
+        match crate::agent::chat::submissions::claim_retry(&conn, session_id, &receipt_id, command.as_bytes())? {
+            crate::agent::chat::submissions::Claim::New => {},
+            crate::agent::chat::submissions::Claim::Complete(result) => return result.map(|_| ()),
+        }
     }
-    ctx.chat().run_shell(ctx, session_id, command, message_id)
+    use crate::agent::chat::engine::SubmissionFailure;
+    let outcome = (|| {
+        if !ctx.chat().is_alive(session_id) {
+            chat_start(ctx, session_id, None, None, false).map_err(SubmissionFailure::Rejected)?;
+        }
+        ctx.chat().run_shell_checked(ctx, session_id, command, message_id)?;
+        Ok("accepted".to_string())
+    })();
+    if let Err(SubmissionFailure::Rejected(error)) = &outcome {
+        crate::agent::chat::submissions::finish_rejected(&ctx.db().conn.lock().unwrap(), session_id, &receipt_id, error)?;
+        return Err(error.clone());
+    }
+    let outcome = outcome.map_err(|_: SubmissionFailure| "chat_submission_pending".to_string());
+    crate::agent::chat::submissions::finish(&ctx.db().conn.lock().unwrap(), session_id, &receipt_id, &outcome)?;
+    outcome.map(|_| ())
 }
 
 /// Stop the shell command `message_id` names, together with everything it started.
@@ -1422,12 +1449,20 @@ pub fn chat_models(ctx: &AppCtx, session_id: &str) -> Result<serde_json::Value, 
         repo::get_session(&conn, session_id)?.ok_or("Session not found")?
     };
     match session.kind {
-        // Live capabilities enrich the complete catalogue; the CLI picker only lists a subset.
-        SessionKind::Claude => serde_json::to_value(
-            ctx.chat()
-                .live_claude_models(session_id)
-                .unwrap_or_else(crate::agent::claude_models::list),
-        ),
+        // Live capabilities enrich the complete catalogue; the CLI picker only lists a subset. What a
+        // running conversation reports is kept, so a session that is not running still offers the models
+        // only the installed CLI knows about.
+        SessionKind::Claude => {
+            let bin = crate::agent::executable::for_session(ctx, &session);
+            let models = match ctx.chat().live_claude_models(session_id) {
+                Some(live) => {
+                    crate::agent::claude_models::remember_reported(&bin, &live);
+                    live
+                }
+                None => crate::agent::claude_models::list_for_bin(&bin),
+            };
+            serde_json::to_value(models)
+        }
         SessionKind::Codex => {
             let bin = crate::agent::executable::for_session(ctx, &session);
             let args = crate::agent::inject::split_extra_args(session.agent_args.as_deref());
@@ -1751,6 +1786,7 @@ pub fn agent_turn_stats(
     session_id: &str,
 ) -> Result<crate::agent::transcript::TurnStats, String> {
     let (kind, agent_id) = session_kind_and_agent(ctx, session_id)?;
+    if kind == SessionKind::Kiro { return crate::agent::kiro_info::turn_stats(&agent_id); }
     let mut stats = crate::agent::transcript::current_turn_stats(kind, &agent_id)?;
     if let Ok(context) = agent_context_info(ctx, session_id) {
         stats.with_context(&context);
@@ -1937,77 +1973,12 @@ pub fn mirror_push(ctx: &AppCtx, source: &str, state: serde_json::Value) -> serd
     payload
 }
 
-/// How long an answered spawn request is remembered. Long enough that a client which was offline
-/// during the answer cannot revive the card by answering it later, short enough that the table stays
-/// small in a session running for days.
-const SPAWN_CLAIM_TTL: std::time::Duration = std::time::Duration::from_secs(600);
-
-/// Spawn requests already answered, keyed by parent session and prompt, with the time they were claimed.
-fn spawn_claims() -> &'static std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>
-{
-    static CLAIMS: std::sync::OnceLock<
-        std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
-    > = std::sync::OnceLock::new();
-    CLAIMS.get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-}
-
-/// Forget a request's claim, so a fresh card for the same task can be answered again.
-///
-/// Called when the agent issues the request. An agent that retries a task the user just cancelled sends
-/// the identical parent and prompt, and without this the new card would look like an answered one and
-/// confirming it would silently do nothing.
-pub fn release_spawn_claim(parent_session_id: &str, prompt: &str) {
-    spawn_claims()
-        .lock()
-        .unwrap()
-        .remove(&spawn_claim_key(parent_session_id, prompt));
-}
-
-/// Claim one spawn request, returning true only for the first caller.
-///
-/// The confirmation card appears on every connected client, so the same request can be answered twice
-/// within the same second — one person on a desktop and a phone, or two people. The broadcast alone
-/// cannot prevent the duplicate, because it arrives after the other client has already begun creating
-/// a worktree and a child session. Claiming decides a single winner before any work starts.
-///
-/// Expired entries are pruned on each call, which is enough: claims are rare and few.
-fn claim_spawn(key: String) -> bool {
-    let mut claims = spawn_claims().lock().unwrap();
-    let now = std::time::Instant::now();
-    claims.retain(|_, at| now.duration_since(*at) < SPAWN_CLAIM_TTL);
-    claims.insert(key, now).is_none()
-}
-
-/// Build the claim key. The unit separator cannot appear in a session ID, so no prompt can be crafted
-/// to collide with a different request.
-fn spawn_claim_key(parent_session_id: &str, prompt: &str) -> String {
-    format!("{parent_session_id}\u{1f}{prompt}")
-}
-
-/// Answer a spawn request on behalf of the calling client, and report whether this caller won it.
-///
-/// Returns false when another client already confirmed or cancelled the same request; that caller must
-/// then do nothing but drop its card, or the task runs twice. The winner's broadcast carries
-/// `parentSessionId` and `prompt` for identification plus a `source` connection ID so the originator can
-/// skip its own echo.
+/// Persist one request's decision and return its backend-owned execution receipt.
 pub fn resolve_spawn(
-    ctx: &AppCtx,
-    source: &str,
-    parent_session_id: &str,
-    prompt: &str,
-    confirmed: bool,
-) -> bool {
-    if !claim_spawn(spawn_claim_key(parent_session_id, prompt)) {
-        return false;
-    }
-    let payload = serde_json::json!({
-        "source": source,
-        "parentSessionId": parent_session_id,
-        "prompt": prompt,
-        "confirmed": confirmed,
-    });
-    ctx.emit("spawn://resolved", payload);
-    true
+    ctx: &AppCtx, source: &str, request_id: &str, confirmed: bool,
+    request: Option<crate::agent::server::SpawnRequest>,
+) -> Result<crate::agent::spawn_requests::Receipt, String> {
+    crate::agent::spawn_requests::decide(ctx, source, request_id, confirmed, request)
 }
 
 /// Turn mirror mode on or off for every client, persisting the choice for the next launch.
@@ -2116,8 +2087,8 @@ pub fn web_server_autostart(ctx: &AppCtx) -> Result<Option<crate::web::WebServer
 #[cfg(test)]
 mod tests {
     use super::{
-        autostart_config, check_images, claim_spawn, get_app_settings, install_id,
-        release_spawn_claim, set_app_settings, spawn_claim_key, web_server_autostart,
+        autostart_config, check_images, get_app_settings, install_id,
+        set_app_settings, web_server_autostart,
         web_server_status, web_server_stop, ChatImage, MAX_IMAGES_PER_MESSAGE, MAX_IMAGE_BYTES,
     };
     use std::collections::HashMap;
@@ -2147,31 +2118,6 @@ mod tests {
             data: "AAAA".into(),
         };
         assert!(check_images(&[pdf]).is_err(), "only images travel this way");
-    }
-
-    /// Only the first answer to a spawn request wins; a second one — the same card confirmed on a phone
-    /// a moment later — must be told it lost, so it cannot create a second worktree and child session.
-    #[test]
-    fn only_the_first_answer_claims_a_spawn_request() {
-        let key = spawn_claim_key("ses-claim-test", "build the thing");
-        assert!(claim_spawn(key.clone()), "the first answer wins");
-        assert!(!claim_spawn(key.clone()), "a second answer must lose");
-        // A different prompt, or the same prompt under a different parent, is a different request.
-        assert!(claim_spawn(spawn_claim_key(
-            "ses-claim-test",
-            "build something else"
-        )));
-        assert!(claim_spawn(spawn_claim_key(
-            "ses-claim-test2",
-            "build the thing"
-        )));
-        // An agent retrying a task the user cancelled sends the identical parent and prompt. Issuing the
-        // new card releases the old claim, so confirming it works instead of silently doing nothing.
-        release_spawn_claim("ses-claim-test", "build the thing");
-        assert!(
-            claim_spawn(key),
-            "a re-issued request can be answered again"
-        );
     }
 
     /// Builds a headless AppCtx over a fresh SQLite db inside `dir` (mirrors web::tests).

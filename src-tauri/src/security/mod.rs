@@ -87,6 +87,9 @@ pub struct Run {
     pub project_id: String,
     pub session_id: String,
     pub agent: String,
+    /// The agent's display name, filled in on read so stored runs pick up a renamed agent.
+    #[serde(default)]
+    pub agent_label: String,
     pub root: String,
     pub scope: String,
     pub path: String,
@@ -119,9 +122,11 @@ fn required<'a>(args: &'a Value, key: &str) -> Result<&'a str> {
 }
 fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Run> {
     let text: String = row.get(0)?;
-    serde_json::from_str(&text).map_err(|e| {
+    let mut run: Run = serde_json::from_str(&text).map_err(|e| {
         rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
-    })
+    })?;
+    run.agent_label = agent_label(&run.agent);
+    Ok(run)
 }
 fn get(app: &AppCtx, id: &str) -> Result<Run> {
     app.db()
@@ -205,25 +210,42 @@ fn settings(app: &AppCtx, agent: &str) -> Result<Value> {
         .and_then(|v| v.get("agentDefaults").and_then(|a| a.get(agent)).cloned())
         .unwrap_or(json!({})))
 }
+/// The models an audit agent offers, with the reasoning levels each supports.
+///
+/// Enumeration is the shared launch catalogue, so the audit sees the same models as the spawn dialog
+/// and picks up the website-hosted Claude catalogue without knowing it exists. Only the two agents the
+/// audit can actually attach its MCP server to are accepted; see `upstream::launch_args`.
 fn models(app: &AppCtx, agent: &str) -> Result<Value> {
-    let defaults = settings(app, agent)?;
-    let bin = defaults
-        .get("path")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(agent);
-    let rows = match agent {
-        "claude" => serde_json::to_value(crate::agent::claude_models::list_for_bin(bin)),
-        "codex" => {
-            let args = crate::agent::inject::split_extra_args(
-                defaults.get("args").and_then(Value::as_str),
-            );
-            serde_json::to_value(crate::agent::codex_models::list(bin, &args)?)
-        }
-        _ => return Err("security_invalid:agent".into()),
+    let kind = audit_kind(agent)?;
+    // The configured launch arguments select a provider for some CLIs, so the catalogue has to be read
+    // with the same arguments the audit will run with.
+    let context = crate::agent::launch_models::Context {
+        inherit_args: true,
+        ..Default::default()
     };
-    rows.map_err(|e| e.to_string())
+    let catalog = crate::agent::launch_models::list(app, kind, &context)
+        .map_err(|_| "security_models_unavailable".to_string())?;
+    serde_json::to_value(catalog.models).map_err(|e| e.to_string())
+}
+
+/// Agents the audit can run, in the order the dialog lists them.
+///
+/// The audit attaches its own MCP server to collect findings, and the argument that does so is written
+/// differently by every CLI. Adding an agent here means teaching `upstream::launch_args` that CLI's
+/// syntax first; listing one without it would offer an audit that silently collects nothing.
+const AUDIT_AGENTS: &[&str] = &["codex", "claude"];
+
+/// The agent kind for an audit request, rejecting any agent the audit cannot instrument.
+fn audit_kind(agent: &str) -> Result<SessionKind> {
+    if !AUDIT_AGENTS.contains(&agent) {
+        return Err("security_invalid:agent".into());
+    }
+    Ok(SessionKind::from_db(agent))
+}
+
+/// Display name for an audit agent, taken from the launch catalogue so every view spells it the same.
+fn agent_label(agent: &str) -> String {
+    crate::agent::launch_options::label(SessionKind::from_db(agent))
 }
 
 fn validate_selection(model: Option<&str>, effort: Option<&str>, catalog: &Value) -> Result<()> {
@@ -265,11 +287,7 @@ fn start(app: &AppCtx, request: Request) -> Result<Run> {
     if request.path.len() > 4096 || request.project_id.len() > 100 {
         return Err("security_invalid:request".into());
     }
-    let kind = match request.agent.as_str() {
-        "codex" => SessionKind::Codex,
-        "claude" => SessionKind::Claude,
-        _ => return Err("security_invalid:agent".into()),
-    };
+    let kind = audit_kind(&request.agent)?;
     let explicit = request
         .model
         .as_deref()
@@ -345,6 +363,7 @@ fn start(app: &AppCtx, request: Request) -> Result<Run> {
         id,
         project_id: request.project_id,
         session_id: session.id,
+        agent_label: agent_label(&request.agent),
         agent: request.agent,
         root,
         scope: request.scope,
@@ -417,7 +436,7 @@ fn start(app: &AppCtx, request: Request) -> Result<Run> {
 pub fn dispatch(app: &AppCtx, cmd: &str, args: &Value) -> Result<Value> {
     match cmd {
         "security_options" => Ok(
-            json!({"agents":[{"id":"codex","label":"Codex"},{"id":"claude","label":"Claude Code"}],
+            json!({"agents":AUDIT_AGENTS.iter().map(|agent| json!({"id":agent,"label":agent_label(agent)})).collect::<Vec<_>>(),
             "scopes":["repository","path","working-tree"],"defaultAgent":"codex","defaultScope":"repository",
             "workflow":{"phases":["preflight","threat","discovery","validation","attack_path","report"],"package":"@openai/codex-security","packageVersion":upstream::PACKAGE_VERSION,"pluginVersion":upstream::PLUGIN_VERSION,"adapter":upstream::ADAPTER_VERSION}}),
         ),
@@ -439,7 +458,7 @@ pub fn dispatch(app: &AppCtx, cmd: &str, args: &Value) -> Result<Value> {
             let mut result = vec![];
             for run in runs {
                 let r = reconcile(app, run)?;
-                result.push(json!({"id":r.id,"agent":r.agent,"status":r.status,"phase":r.phase,"createdAt":r.created_at,"scope":r.scope,"path":r.path,"findingCount":r.findings.len(),"model":r.model,"effort":r.effort}));
+                result.push(json!({"id":r.id,"agent":r.agent,"agentLabel":r.agent_label,"status":r.status,"phase":r.phase,"createdAt":r.created_at,"scope":r.scope,"path":r.path,"findingCount":r.findings.len(),"model":r.model,"effort":r.effort}));
             }
             Ok(json!(result))
         }

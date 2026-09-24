@@ -238,6 +238,10 @@ fn discover_inner(ctx: &AppCtx, project_id: &str) -> Result<History, String> {
     ] {
         if let Err(e) = result { warnings.push(format!("{label}: {e}")); }
     }
+    match super::kiro_store::Roots::native() {
+        Ok(roots) => scan_kiro(&roots, Path::new(&directory), &mut sessions, &mut warnings),
+        Err(e) => warnings.push(e),
+    }
     // Prefer user-assigned Codex names when the optional native title index is available.
     match std::fs::File::open(codex.join("session_index.jsonl")) {
         Ok(file) => for line in std::io::BufReader::new(file).lines() {
@@ -264,6 +268,15 @@ fn discover_inner(ctx: &AppCtx, project_id: &str) -> Result<History, String> {
         s.imported = existing.iter().any(|e| e.kind == s.kind && e.agent_session_id.as_deref() == Some(&s.agent_session_id));
     }
     Ok(History { directory, sessions, warnings })
+}
+
+fn scan_kiro(roots: &super::kiro_store::Roots, directory: &Path, sessions: &mut Vec<HistoricalSession>, warnings: &mut Vec<String>) {
+    let (found, issues) = super::kiro_store::discover(roots, directory);
+    warnings.extend(issues);
+    sessions.extend(found.into_iter().map(|s| HistoricalSession {
+        kind: SessionKind::Kiro, agent_session_id: s.id, title: s.title,
+        cwd: s.cwd.to_string_lossy().into_owned(), updated_at: s.updated_at, imported: false,
+    }));
 }
 
 /// Re-discover on submission; titles, cwd, defaults and duplicate checks remain server-owned.
@@ -301,8 +314,7 @@ fn import_discovered(ctx: &AppCtx, project_id: &str, selected: Vec<Selection>, h
                 rusqlite::params![s.kind.as_str(), s.agent_session_id], |r| r.get(0)).map_err(|e| e.to_string())?;
             if exists { continue; }
             let defaults = &settings["agentDefaults"][s.kind.as_str()];
-            // Imported conversations were run in the agent's own terminal interface, so they open in the
-            // terminal engine; the user can switch one to the conversation view afterwards.
+            // Imported conversations retain the agent's terminal engine and native resume identity.
             let mut record = repo::create_session_full(&tx, project_id, None, &s.title, s.kind,
                 None, Some(&s.cwd), None, None, None, defaults["args"].as_str(),
                 defaults["permissionMode"].as_str(), None, None, None, None)?;
@@ -430,6 +442,35 @@ mod tests {
         }
         assert!(import_discovered(&ctx, &project.id, picks(), history()).unwrap().is_empty());
         let invalid = vec![Selection { kind: SessionKind::Codex, agent_session_id:"foreign-session".into() }];
+        assert!(import_discovered(&ctx, &project.id, invalid, history()).is_err());
+    }
+
+    #[test]
+    fn kiro_discovery_import_preserves_native_identity_and_is_repeatable() {
+        let native = super::super::kiro_store::tests::Fixture::new();
+        native.pair("kiro-first", &native.dir, "First native question");
+        native.pair("kiro-second", &native.dir, "Second native question");
+        native.pair("kiro-other", &native.dir.join("other"), "Another project");
+        let db = crate::db::Db::open(&native.dir.join("app.db")).unwrap();
+        let ctx = AppCtx::Headless(std::sync::Arc::new(crate::host::HeadlessHost::new(native.dir.clone(), db)));
+        let project = crate::command_core::import_project(&ctx, native.dir.to_str().unwrap()).unwrap();
+        let history = || {
+            let mut sessions=Vec::new(); let mut warnings=Vec::new();
+            scan_kiro(&native.roots, &native.dir, &mut sessions, &mut warnings);
+            assert!(warnings.is_empty());
+            History { directory:project.root_path.clone(),sessions,warnings }
+        };
+        let picks = || vec![Selection {kind:SessionKind::Kiro,agent_session_id:"kiro-first".into()},
+            Selection {kind:SessionKind::Kiro,agent_session_id:"kiro-first".into()},
+            Selection {kind:SessionKind::Kiro,agent_session_id:"kiro-second".into()}];
+        let records = import_discovered(&ctx, &project.id, picks(), history()).unwrap();
+        assert_eq!(records.len(),2);
+        assert_eq!(records[0].agent_session_id.as_deref(),Some("kiro-first"));
+        assert_eq!(records[0].cwd.as_deref(),native.dir.to_str());
+        assert!(same_dir(Path::new(records[0].cwd.as_deref().unwrap()),Path::new(&project.root_path)));
+        assert_eq!(records[0].engine,"tui");
+        assert!(import_discovered(&ctx, &project.id, picks(), history()).unwrap().is_empty());
+        let invalid=vec![Selection {kind:SessionKind::Kiro,agent_session_id:"kiro-other".into()}];
         assert!(import_discovered(&ctx, &project.id, invalid, history()).is_err());
     }
 

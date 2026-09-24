@@ -1,3 +1,51 @@
+## v0.2.3 — 2026-09-24
+
+- 🪟 Sessões existentes podem ser movidas para os painéis divididos. O menu de contexto da barra lateral abre uma sessão em um painel à direita, um painel abaixo ou no painel em foco; ao arrastar uma sessão da barra lateral até a borda de um painel, a divisão segue aquela direção, e soltá-la no meio substitui a sessão ali exibida. De duas a quatro sessões selecionadas podem ser dispostas lado a lado em uma mesma aba dividida igualmente, e as sessões presentes nos demais painéis da aba atual ficam sinalizadas na barra lateral.
+
+- 🗂️ As tarefas em segundo plano iniciadas por um agente abrem em abas próprias ao lado da conversa, com status, tempo decorrido, tokens, chamadas de ferramentas, a última ferramenta informada e as fases de cada agente. Cada tarefa tem seu próprio endereço e, ao sair dela, a visualização volta ao painel de onde foi aberta.
+
+- 💬 Na visualização de conversa, uma mensagem que começa com `!` é executada no shell da sessão. A saída aparece conforme chega, o código de saída é exibido, o comando pode ser cancelado enquanto executa e permanece no histórico de leitura das sessões Claude, Codex, OpenCode, Pi e OMP.
+
+- ⏱️ O novo comando `vrun` inicia um comando demorado e aguarda por ele em uma única chamada, de modo que o agente descobre quando o trabalho realmente terminou. Os comandos iniciados assim aparecem acima do terminal com o tempo de execução, uma janela de log e um botão de parada que pede confirmação.
+
+- ⌨️ A criação de sessões de agente ganhou página própria e atalho de teclado: pesquise agentes e predefinições, reaproveite a última utilizada e escolha se a sessão será criada no mesmo nível da atual ou abaixo dela.
+
+- 🧰 A barra de ferramentas de digitação é configurável nas configurações: escolha quais itens ficam ao lado da mensagem e em que ordem. Os itens desativados, assim como os que não cabem na largura, continuam disponíveis no menu Mais.
+
+- 📥 Ao baixar um arquivo em uma janela de conexão por URL ou SSH, primeiro escolhe-se onde salvá-lo nesta máquina e, em seguida, o progresso do download é exibido, com um botão para cancelá-lo.
+
+- 🗃️ Sessões do Kiro podem ser importadas para um projeto e consultadas: a importação associa sessões pelo diretório de trabalho e cada uma abre em uma visualização de histórico somente leitura com busca. Por enquanto há suporte a registros apenas de texto.
+
+- 🧠 A organização da base de conhecimento funciona com Grok, OpenCode, Pi e OMP além de Claude e Codex, e o agente é escolhido no mesmo tipo de lista suspensa usada no restante do aplicativo.
+
+- 📱 iOS e Android: a página inicial guarda suas conexões SSH e URL, permite entrar em uma conta VelaTerm e lista os dispositivos que compartilham conteúdo nela. A impressão digital de um host é confirmada uma vez e fica memorizada, um QR code preenche o endereço do serviço, e todas as telas nativas e avisos do sistema estão traduzidos nos 11 idiomas da interface.
+
+- 🔐 As sessões do Claude iniciam no modo de permissão escolhido: os argumentos de inicialização adicionais mantêm a precedência prevista, o modo é conferido com o que a CLI informa na inicialização, e uma sessão iniciada sem confirmações permanece marcada dessa forma.
+
+- 🧩 O menu de modelos lista o Opus 5.5 e acrescenta os modelos adicionais informados pela CLI selecionada, preservando a ordem original; um modelo que chega com uma atualização da CLI aparece sem reiniciar o aplicativo.
+
+- 🌱 As solicitações de sessão derivada resistem a interrupções: uma solicitação cuja resposta se perdeu pode ser recuperada depois de reconectar, uma inicialização já confirmada reutiliza a mesma sessão e as mesmas configurações ao ser repetida, e uma árvore de trabalho que não pôde ser criada é revertida sem tocar no que já existia.
+
+- ⚡ O aplicativo inicia mais rápido: o código carregado na inicialização tem cerca de metade do tamanho anterior, e as páginas de base de conhecimento, auditoria de segurança, importação de sessões e projetos compartilhados são carregadas ao serem abertas.
+
+- 🖼️ Imagens coladas ou arrastadas para uma mensagem são reduzidas a 1568 pixels no lado maior antes do envio.
+
+- 🐚 As sessões Bash carregam o autocompletar do shell a partir de um arquivo de inicialização, então uma nova sessão Bash não abre mais com um comando já digitado. Os arquivos de perfil de login continuam sendo lidos na ordem própria do Bash.
+
+- ✍️ Markdown: um til isolado não risca mais o restante da linha, de modo que um prompt de shell colado continua legível, e o negrito ou itálico que termina junto a caracteres chineses, japoneses ou coreanos fecha corretamente, sem deixar asteriscos na tela.
+
+- 📨 `vtell --steer` entrega a mensagem dentro do turno que o destinatário está executando, em vez de esperar esse turno terminar. Se o destinatário está parado em uma pergunta, o retorno é blocked, pois a mensagem só é lida depois que essa pergunta for respondida.
+
+- 🔁 Na visualização de conversa, o status de uma sessão termina junto com o turno, a marca de não lido some quando o trabalho realmente começa, e uma sessão com trabalho em segundo plano em andamento continua marcada como ativa.
+
+- 🪟 Windows: os hooks do Cursor iniciam corretamente, e a camada de janelas foi atualizada em resposta aos problemas de entrada de teclado relatados após uma reconexão RDP ou troca de área de trabalho virtual.
+
+- 🛡️ Auditoria de segurança: a lista de modelos e os nomes dos agentes vêm do mesmo catálogo de inicialização usado no restante do aplicativo, de modo que execuções anteriores mostram o nome atual de cada agente.
+
+- 🩹 Outras correções: as mensagens de erro da conversa se alinham à coluna central; as duas caixas de diálogo de inicialização sempre podem ser fechadas e uma inicialização confirmada que falhou pode ser cancelada; mensagens e mensagens na fila mostram quem as enviou; uma fila longa rola dentro de uma altura fixa; âncoras HTML vazias não exibem mais uma marca durante a edição de um documento; e o filtro de status no celular passa a incluir as sessões que começam a corresponder a ele depois.
+
+---
+
 ## v0.2.2 — 2026-09-15
 
 - ⏳ Retomada automática após limites de uso, desativada por padrão nas configurações: quando o Claude ou o Codex para em um limite de 5 horas ou semanal, a sessão continua sozinha assim que o limite é redefinido. Acima da área de escrita aparece um aviso com o horário da redefinição e um botão "Cancelar"; a espera sobrevive ao reinício do aplicativo e termina ao enviar uma mensagem, reverter, limpar a sessão ou desligar a configuração.

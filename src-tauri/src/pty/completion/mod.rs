@@ -321,6 +321,34 @@ pub fn configure_zsh_startup(
 }
 
 /// Install only in application data; shell profiles are never edited.
+/// Bash has no `ZDOTDIR` equivalent. `--rcfile` is its only startup hook, and it replaces `~/.bashrc`, which
+/// a login shell never reads, so the caller starts Bash without `-l` and this file replays the login sequence
+/// itself. Two differences from a real login shell remain: `shopt -q login_shell` reports false, and
+/// `~/.bash_logout` does not run on exit.
+pub fn configure_bash_startup(state: &State) -> Result<PathBuf, String> {
+    let dir = state
+        .selection_file
+        .parent()
+        .ok_or("Missing completion directory")?;
+    let quote = |s: &str| format!("'{}'", s.replace('\'', "'\\''"));
+    let body = format!(
+        "# Load the user's login startup files in Bash's own order, then the integration.\n\
+         [[ ! -r /etc/profile ]] || builtin source /etc/profile\n\
+         for _vlxc_startup_profile in \"$HOME/.bash_profile\" \"$HOME/.bash_login\" \"$HOME/.profile\"; do\n\
+         \t[[ -r $_vlxc_startup_profile ]] || continue\n\
+         \tbuiltin source \"$_vlxc_startup_profile\"\n\
+         \tbreak\n\
+         done\n\
+         unset _vlxc_startup_profile\n\
+         builtin source {}\n",
+        quote(&dir.join("integration.bash").to_string_lossy())
+    );
+    let path = dir.join("bashrc");
+    std::fs::write(&path, body).map_err(|e| e.to_string())?;
+    Ok(path)
+}
+
+/// Install only in application data; shell profiles are never edited.
 pub fn install(data_dir: &Path, shell: &str) -> Result<Option<(State, String)>, String> {
     let name = Path::new(shell)
         .file_name()

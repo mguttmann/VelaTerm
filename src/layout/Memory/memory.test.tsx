@@ -74,9 +74,9 @@ describe("Knowledge Base interactions", () => {
   it("uses the backend agent default and submits the user's selected model", async () => {
     api.start.mockResolvedValue({ id: "job-1", reused: false });
     render(<MemoryCompile sessionId="session" />);
-    const codex = await screen.findByRole("radio", { name: "Codex" }) as HTMLInputElement;
-    await waitFor(() => expect(codex.checked).toBe(true));
-    fireEvent.click(screen.getByRole("radio", { name: "Claude" }));
+    const agents = await screen.findByRole("combobox", { name: "Agent" });
+    await waitFor(() => expect(agents.textContent).toContain("Codex"));
+    choose("Agent", "Claude");
     await screen.findByRole("combobox", { name: "Model (optional)" });
     choose("Model (optional)", "Chosen model");
     choose("Thinking effort", "High");
@@ -95,7 +95,7 @@ describe("Knowledge Base interactions", () => {
     expect((screen.getByRole("combobox", { name: "Thinking effort" }) as HTMLButtonElement).disabled).toBe(true);
     choose("Model (optional)", "Chosen model");
     choose("Thinking effort", "Low");
-    fireEvent.click(screen.getByRole("radio", { name: "Claude" }));
+    choose("Agent", "Claude");
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model (optional)" }).textContent).toContain("Default model"));
     expect(screen.getByRole("combobox", { name: "Thinking effort" }).textContent).toContain("Agent default");
   });
@@ -103,8 +103,8 @@ describe("Knowledge Base interactions", () => {
   it("restores the remembered agent, model and effort on reopen", async () => {
     store.memoryPrefs = { agent: "claude", model: "chosen-model", effort: "high" };
     render(<MemoryCompile sessionId="session" />);
-    const claude = await screen.findByRole("radio", { name: "Claude" }) as HTMLInputElement;
-    await waitFor(() => expect(claude.checked).toBe(true));
+    const agents = await screen.findByRole("combobox", { name: "Agent" });
+    await waitFor(() => expect(agents.textContent).toContain("Claude"));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model (optional)" }).textContent).toContain("Chosen model"));
     expect(screen.getByRole("combobox", { name: "Thinking effort" }).textContent).toContain("High");
   });
@@ -112,7 +112,7 @@ describe("Knowledge Base interactions", () => {
   it("remembers each selection for the next visit", async () => {
     render(<MemoryCompile sessionId="session" />);
     await screen.findByRole("combobox", { name: "Model (optional)" });
-    fireEvent.click(screen.getByRole("radio", { name: "Claude" }));
+    choose("Agent", "Claude");
     expect(store.setMemoryPrefs).toHaveBeenCalledWith({ agent: "claude", model: null, effort: null });
     await screen.findByRole("combobox", { name: "Model (optional)" });
     choose("Model (optional)", "Chosen model");
@@ -125,8 +125,8 @@ describe("Knowledge Base interactions", () => {
     store.memoryPrefs = { agent: "claude", model: "chosen-model", effort: "high" };
     api.options.mockResolvedValue({ agents: [{ id: "claude", label: "Claude", available: false }, { id: "codex", label: "Codex", available: true }], defaultAgent: "codex", catalog: [] });
     render(<MemoryCompile sessionId="session" />);
-    const codex = await screen.findByRole("radio", { name: "Codex" }) as HTMLInputElement;
-    await waitFor(() => expect(codex.checked).toBe(true));
+    const agents = await screen.findByRole("combobox", { name: "Agent" });
+    await waitFor(() => expect(agents.textContent).toContain("Codex"));
     await waitFor(() => expect(screen.getByRole("combobox", { name: "Model (optional)" }).textContent).toContain("Default model"));
   });
 

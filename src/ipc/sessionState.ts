@@ -11,6 +11,7 @@
 
 import { invoke } from "./transport";
 import type { AgentKind, AgentState } from "../types";
+import type { BackgroundRun } from "./runs";
 
 /** One session's authoritative record. Absent from a batch means "nothing known", not "false". */
 export interface SessionStateRecord {
@@ -20,8 +21,9 @@ export interface SessionStateRecord {
   agent?: AgentKind | null;
   /** What that agent is doing. Meaningless without an agent. */
   agentState?: AgentState | null;
-  /** Codex's activity source, chosen at launch. Other agents leave it unset. */
-  stateSource?: "hooks" | "legacy" | null;
+  /** Activity source chosen at launch: `chat` for a conversation-view session, `hooks` or `legacy` for a Codex
+   *  terminal. Other terminal agents leave it unset. */
+  stateSource?: "hooks" | "legacy" | "chat" | null;
   /** Whether modern Codex has completed the handshake proving its hooks actually run. */
   hookReady?: boolean;
   /** A source covering the full turn lifecycle has reported; guesses may not override it. */
@@ -30,6 +32,8 @@ export interface SessionStateRecord {
   everWorked?: boolean;
   /** A process is running behind this session right now. */
   alive?: boolean;
+  /** Commands this session started with `vrun` that are still running, oldest first. */
+  runs?: BackgroundRun[];
   /** Milliseconds since the epoch of the record's last change. */
   updatedAt?: number;
 }

@@ -26,14 +26,14 @@ test('the start page renders German with locale de and English with locale en', 
   assert.equal(text(en, 'mobile.phaseDisconnected'), 'Disconnected');
   assert.equal(text(de, 'mobile.phaseDisconnected'), 'Verbindung getrennt');
   assert.equal(text(en, 'mobile.buildInfo').startsWith('App vx · Built y'), true);
-  assert.equal(text(de, 'mobile.deleteConnectionConfirm'), '„x“ und die gespeicherten Zugangsdaten löschen? Remote-Projekte werden nicht gelöscht.');
+  assert.equal(text(de, 'mobile.deleteConnectionConfirm'), '„x“ und die zugehörigen gespeicherten Zugangsdaten löschen? Remote-Projekte werden nicht gelöscht.');
 });
 
 test('German and Chinese entries exist for every used key and are not English fallbacks', () => {
   for (const key of usedKeys) {
     assert.ok(key in de, `${key} is missing in de.ts`);
     assert.ok(key in zhCN, `${key} is missing in zh-CN.ts`);
-    if (key === 'mobile.remote' || key === 'mobile.online' || key === 'mobile.offline') continue; // identical product terms
+    if (key === 'mobile.online' || key === 'mobile.offline') continue; // identical product terms
     assert.notEqual(text(de, key), text(en, key), `${key} is untranslated in de.ts`);
     assert.match(text(zhCN, key), /[\u4e00-\u9fff]/, `${key} has no Chinese text in zh-CN.ts`);
   }

@@ -615,6 +615,11 @@
   box-shadow: 0 0 0 1px var(--accent);
 }
 
+/* ── Empty HTML anchors hidden in WYSIWYG mode; source mode still shows the tags ── */
+.docview .milkdown .vlx-html-anchor {
+  display: none;
+}
+
 /* ── Mermaid diagrams rendered as decorations below fenced blocks in WYSIWYG mode ── */
 .vlx-mermaid {
   display: flex;

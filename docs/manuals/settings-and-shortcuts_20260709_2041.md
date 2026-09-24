@@ -44,9 +44,9 @@ Applies to agent conversation views (the chat layout), not to terminal sessions.
 | Item | Description |
 |------|-------------|
 | Conversation font / size / line height | Font, size and line height of the conversation view, independent of the terminal font |
-| Composer toolbar | Which chips sit beside the message input, and in which order: Model, Thinking effort, Collaboration mode, Permission mode, Fast mode, Speed, Tone, MCP servers, Background tasks, Account, Codex reset credits. Each chip has an On/Off switch; the arrows move a chip that is on up or down. Model, Thinking effort, Collaboration mode and Permission mode are on by default. A chip that is on is always in the toolbar and a chip that is off never is, regardless of what the agent is doing right now: when a chip's feature is momentarily unavailable (no running agent process for MCP servers and Background tasks, an empty task list, an unresolved sign-in for Account) the chip stays in place, shown empty or dimmed and not openable; while the agent process is not running, MCP servers and Background tasks say so in their tooltip. Only a chip the current agent kind does not have at all is left out (for example Codex reset credits in a Claude session, or Fast mode when the model does not offer it) |
+| Composer toolbar | Choose which chips appear beside the message input and set their order: Model, Thinking effort, Collaboration mode, Permission mode, Fast mode, Speed, Tone, MCP servers, Background tasks, Account and Codex reset credits. Use each On/Off switch to include or remove a chip from the input row; use the arrows to reorder chips that are on. Model, Thinking effort, Collaboration mode and Permission mode are on by default. Chips unsupported by the current agent or model are omitted. A supported chip remains present when its feature is temporarily unavailable: MCP servers and Background tasks are disabled while the agent process is stopped, and Account is disabled during a pending sign-in or account operation. With a running agent and no background tasks, the Background tasks menu shows an empty state |
 
-The **More** menu in the composer appears only while the chips that are on do not fit the row. It then holds the chips that overflowed plus the chips that are off, so nothing you turned off becomes unreachable: switch it back on here, or open it from More whenever that menu is shown. A chip you switch off and on again returns at the end of the inline order, even while it has nothing to show (for example Background tasks with an empty task list). On the mobile layout all chips that are off stay visible in a second row.
+On desktop, **More** appears whenever a supported chip is off or the chips that are on do not all fit beside the input. It contains both the overflowed chips and those that are off. Even with every chip off, you can open More and use the supported controls without first enabling them in Settings. More is absent when there are no supported chips, or when every supported chip is on and fits in the row. To return a chip to the input row, turn it on in Settings; turning a chip off and on again places it at the end of the inline order. Temporarily disabled controls remain disabled in More. On mobile, chips that are off remain visible in a second row.
 
 ## 5. Behavior
 
@@ -89,6 +89,7 @@ Click an action's binding, then press the new combination (must include ⌘/Ctrl
 |--------|-------|-----------------|
 | Open project | ⌘O | Ctrl+Alt+O |
 | New scratch terminal | ⌘T | Ctrl+Alt+T |
+| New agent session | ⌘N | Ctrl+Alt+N |
 | New browser tab | ⌘⇧B | Ctrl+Alt+B |
 | Close pane / tab | ⌘W | Ctrl+Alt+W |
 | Split right | ⌘D | Ctrl+Alt+D |
@@ -96,6 +97,12 @@ Click an action's binding, then press the new combination (must include ⌘/Ctrl
 | Find in terminal | ⌘F | Ctrl+Alt+F |
 | Search all sessions | ⌘⇧F | Ctrl+Alt+G |
 | Save document | ⌘S | Ctrl+S |
+
+**New agent session** opens a searchable list of agent types and saved presets, with recently used choices first. Its default is ⌘N in the macOS desktop app and remote-connection windows, and Ctrl+Alt+N on Windows, Linux and regular browsers, including browsers on macOS. You can rebind this action in Settings > Shortcuts.
+
+The picker shows where the new session will be created. With an active saved session, choose **Sibling** to create it at the same level or **Child** to nest it below that session. While the search field is focused, Tab switches between these two positions, ↑/↓ selects a result, and Enter creates the selected session. Shift+Tab moves focus out of the search field to the preceding control; Escape closes the picker. You can also select a result with the mouse and press **Create**. If there is no valid target project, select one or use **Open project** before creating a session.
+
+The picker URL preserves the target, position, search text and selected choice. Copying the URL, refreshing, or using Back and Forward restores that state without creating a session. Creation requires Enter in the search field or the Create button, and a failed attempt leaves the picker open for review or retry.
 
 Fixed, non-rebindable keys: ⌘1–9 (switch tabs), ⌘+ / ⌘- / ⌘0 (terminal font size).
 

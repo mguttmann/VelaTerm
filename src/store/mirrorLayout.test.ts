@@ -162,6 +162,19 @@ describe("buildMirrorLayout", () => {
     expect([layout.activeTabId, layout.activeSessionId, layout.focusedPaneId]).toEqual(["doc-1", null, null]);
   });
 
+  it("keeps the originating split pane while a local task is open and produces no mirror echo", () => {
+    const paneTrees = { A: split(leaf("pa", "A"), leaf("pb", "B")) };
+    const before = source({ paneTrees, activeSessionId: "B", focusedPaneId: "pb" });
+    const localTask = { ...taskTab, sessionId: "B", returnTabId: "A", returnPaneId: "pb" };
+    const published = buildMirrorLayout(source({
+      ...before, ...inTaskTab, paneTrees, openTabs: ["A", "task-1"], taskTabs: { "task-1": localTask },
+    }));
+    expect(published).toEqual(buildMirrorLayout(before));
+    const received = sanitizeMirrorLayout(JSON.parse(JSON.stringify(published)))!;
+    expect([received.center.activeTabId, received.center.activeSessionId, received.center.focusedPaneId]).toEqual(["A", "B", "pb"]);
+    expect(buildMirrorLayout(source({ ...received.center, taskTabs: {} }))).toEqual(published);
+  });
+
   it("publishes a snapshot a peer's reconcile keeps as is, so following it echoes nothing back", () => {
     const published = buildMirrorLayout(source({ ...inTaskTab, openTabs: ["A", "task-1"] }));
     const received = sanitizeMirrorLayout(JSON.parse(JSON.stringify(published)))!;
