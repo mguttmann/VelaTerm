@@ -1,8 +1,11 @@
 # VelaTerm
 
-A terminal manager built for the AI-agent era. VelaTerm organizes scattered terminal sessions into a
-**project → group → session** tree, treats coding agents such as Claude Code and Codex as first-class
-citizens, and lets you take over any session from a browser or another machine.
+English | [简体中文](README.zh-CN.md)
+
+**The best ADE.** Not just a terminal. Not just an IDE.
+
+Manage agent sessions like Codex. Split terminals like iTerm2. VelaTerm keeps both in one native app,
+and brings them to your browser and your phone.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Website](https://img.shields.io/badge/Website-velaterm.com-0b7285.svg)](https://velaterm.com)
@@ -10,54 +13,163 @@ citizens, and lets you take over any session from a browser or another machine.
 [![YouTube](https://img.shields.io/badge/YouTube-@vlinx__soft-FF0000.svg)](https://www.youtube.com/@vlinx_soft)
 [![Discord](https://img.shields.io/badge/Discord-join-5865F2.svg)](https://discord.gg/gaD4NBzggU)
 
-<a href="https://www.youtube.com/watch?v=CuUT6zZ337c"><img src="docs/assets/video-preview.jpg" alt="Watch the demo video" width="100%"></a>
+<a href="https://www.youtube.com/watch?v=X665-GPmaKw"><img src="docs/assets/velaterm-intro-cover-3a-equation-en.jpg" alt="Codex session management plus iTerm2 split panes equals VelaTerm, the agentic development environment. Click to watch the intro video." width="100%"></a>
 
-## Why
+**[Watch the intro video (2:55)](https://www.youtube.com/watch?v=X665-GPmaKw)** ·
+**[Download](https://velaterm.com/download)** ·
+**[User manual](https://velaterm.com/docs)**
 
-Working with coding agents breaks the assumptions traditional terminals were built on:
+## Workspace
 
-- **Session sprawl.** Several agents run at once — one refactoring, one running tests, one waiting for
-  approval. A flat row of tabs stops scaling quickly.
-- **No visibility into agent state.** A plain terminal cannot tell you whether an agent is working,
-  blocked on a question, or finished.
-- **Lost context.** Closing a terminal usually throws away the agent conversation with it.
-- **Tied to one desk.** Long-running tasks keep going after you walk away, with no way to check in.
+### Every major coding agent
 
-VelaTerm addresses each of these directly: a persistent session tree, live per-session agent status,
-transcripts that survive restarts, and remote access from a browser or over SSH.
+Claude Code, Codex, OpenCode, Copilot, Cursor, Antigravity, Cline, Pi and more. Each one runs as a
+managed session, with live status, resume and custom launch arguments.
 
-## Features
+### A full agent dev environment
 
-- **Session tree** — projects, arbitrarily nested groups, and sessions, with drag-and-drop reordering,
-  search, and persisted collapse state.
-- **Real PTYs** — every session is a full pseudo-terminal with complete input, output, and resize
-  handling, kept alive in the background while you work elsewhere.
-- **Agent awareness** — per-session status for supported agents (working, waiting for input, done),
-  driven by the agents' own hook mechanisms, plus desktop notifications and session resumption.
-- **Session spawning** — start a child session from inside a session, optionally in its own git
-  worktree, and merge it back when the work is done.
-- **Split panes** — horizontal and vertical splits, with keyboard shortcuts for switching sessions.
-- **Document, image, and browser tabs** — open Markdown in a WYSIWYG editor, source files with syntax
-  highlighting, images in a viewer, and URLs in a built-in browser tab.
-- **Git integration** — branch, ahead/behind, and change counts per session, plus common actions.
-- **Code audits** — bundled Codex Security workflows using your logged-in local Codex or Claude Code,
-  with model and effort selection, source evidence, retained checkpoints, coverage limits, and Markdown/JSON reports. See the
+Follow an agent's plan, edits, commands and test results as a conversation, or switch the same
+session to the terminal view and work in its TUI.
+
+### Sessions in a tree
+
+Projects → groups → nested sub-groups → sessions. However many sessions you run, they stay in order.
+Every session is a real pseudo-terminal that keeps running in the background, and sessions can be
+split side by side.
+
+### Commands and paths, as you type
+
+Command and path suggestions appear as you type. Choose with the arrow keys, then press Tab to accept.
+
+### Know the moment an agent needs you
+
+Session states follow the conversation live, in the session tree and the status bar, with a desktop
+notification when an agent finishes and waits for you.
+
+### Usage and load, live
+
+While the agent works, the right panel keeps plan quota, context, tokens and system load in view.
+
+## Agents together
+
+### One command, one sub-session
+
+An agent can hand a side task to a child session with `vspawn`: pick the agent, model and effort,
+and give it its own worktree when needed. The child appears under its parent in the tree.
+
+### Agents talk across sessions
+
+Sessions running Claude, Codex, OpenCode or Pi can search each other's conversations, ask about them,
+and send each other messages.
+
+| Command | What it does |
+|---------|--------------|
+| `vsearch` | Search every session |
+| `vrefer` | Read a conversation, or ask about it |
+| `vtell` | Message another session; with `--steer` the message joins the turn that is already running |
+
+### One big task, a team of sessions
+
+Plan / Execute mode splits a large task across several agent sessions, each with one job. The
+**planner** writes the plan, splits the work and reviews every result; the **executors** each build
+one part in its own worktree and report back.
+
+1. **Plan.** Pick agents, models and reasoning effort for planning and execution separately.
+2. **Execute.** The planner proposes the split; you edit tasks and models before anything starts.
+   Executors then work in parallel, one worktree each, as children of the planner in the session tree.
+3. **Review.** Reports come back to the planner automatically; anything short of the bar goes back to
+   the same session, with its context intact.
+
+### Keep what your sessions learn
+
+Organize a session into the Session Knowledge Base, keep Markdown notes in local knowledge bases, and
+search both at once. With `vkb`, an agent looks things up before it acts:
+
+| Command | Looks up |
+|---------|----------|
+| `vkb memories` | Session knowledge |
+| `vkb notes` | Local notes |
+| `vkb explore` | The code graph, queried locally without calling a model |
+
+See the [notebook guide](docs/manuals/knowledge-notebooks_20260910.md).
+
+## Built-in tools
+
+### Editors included
+
+A WYSIWYG Markdown editor, a code editor and an image viewer, plus a built-in browser on desktop. All
+of them work on remote machines too.
+
+### A little break between tasks
+
+Open Game Center from your workspace and play Pixel Wing with a keyboard, touch controls or a
+controller.
+
+### Also included
+
+- **Code audits.** Bundled Codex Security workflows using your logged-in local Codex or Claude Code,
+  with source evidence, coverage limits and Markdown/JSON reports. See the
   [code audit guide](docs/manuals/code-audits_20260908.md).
-- **Code intelligence and knowledge base** — enable CodeGraph per working directory, browse symbol relationships,
-  query code and saved knowledge with `vkb`, and review code references when their source files change.
-- **Local notebooks** — open existing Markdown folders, import files and folders, write with autosave,
-  and navigate tags, favorites, links, and backlinks. Notes remain ordinary files on disk. See the
-  [notebook guide](docs/manuals/knowledge-notebooks_20260910.md).
-- **Remote access** — reach your sessions from a browser with end-to-end encrypted device pairing, or
-  connect to a remote machine over SSH and run sessions there.
-- **Mobile view** — a browser layout tuned for phones, served by the same remote access stack.
-- **Themes and i18n** — light/dark themes that follow the system, and a fully translated interface.
+- **Git integration.** Branch, ahead/behind and change counts per session, plus common actions.
+- **Themes and languages.** Light and dark themes that follow the system, and a fully translated
+  interface.
 
-## Platforms
+## Anywhere
 
-macOS (Apple Silicon and Intel), Windows (x64 and arm64), and Linux (x86_64 and aarch64).
+### Run it anywhere
 
-## Tech stack
+Remote access is built in: connect over SSH, or serve the app over HTTPS with end-to-end encryption.
+
+- **Desktop.** Native app for macOS, Windows and Linux. Connect to remote machines over SSH from
+  inside the app.
+- **Browser.** Open a URL on any machine. No install needed. Served over HTTPS with end-to-end
+  encryption; no readable data crosses the network.
+- **Phone.** A native app for iOS and Android. Scan a QR code to carry the same session tree with you.
+
+### Connect remotely, three ways
+
+Connect over SSH, open a pairing link, or sign in to your account and pick one of your devices.
+
+### Your sessions, in your pocket
+
+Scan a QR code to connect. Browse the tree, read agent replies as they stream and answer them, and get
+a push notification when an agent needs you.
+
+### macOS, Windows and Linux
+
+One native app on every desktop. On Windows, Git Bash comes bundled with the full installer. Built on
+Tauri 2: a small install that stays smooth under heavy terminal load.
+
+| Platform | Architectures | Shells |
+|----------|---------------|--------|
+| macOS | Apple Silicon, Intel | zsh |
+| Windows | x64, arm64 | PowerShell, Git Bash, WSL |
+| Linux | x86_64, aarch64 | bash |
+
+## Download
+
+From the first command to the final review. Get the installer for your platform at
+[velaterm.com/download](https://velaterm.com/download), then start with the
+[getting started guide](docs/manuals/getting-started_20260709_2041.md).
+
+## Documentation
+
+- [Manuals overview](docs/manuals/manuals-overview_20260709_2041.md) — start here
+- [Getting started](docs/manuals/getting-started_20260709_2041.md)
+- [AI agent sessions](docs/manuals/ai-agent-sessions_20260709_2041.md)
+- [Remote development guide](docs/manuals/remote-development-guide_20260709_2041.md)
+- [Changelog](docs/changelog.md)
+
+## Community
+
+- **[X](https://x.com/vlinx_soft)** — release announcements and short demos.
+- **[YouTube](https://www.youtube.com/@vlinx_soft)** — demos and guided tours of the application.
+- **[Discord](https://discord.gg/gaD4NBzggU)** — questions, bug reports and everyday discussion.
+- **[velaterm.com](https://velaterm.com)** — downloads, manuals and the changelog.
+
+## Development
+
+### Tech stack
 
 | Layer | Choice |
 |-------|--------|
@@ -69,7 +181,7 @@ macOS (Apple Silicon and Intel), Windows (x64 and arm64), and Linux (x86_64 and 
 | Persistence | SQLite via `rusqlite` (bundled) |
 | Styling | Tailwind v4 with CSS-variable themes |
 
-## Getting started
+### Build from source
 
 Prerequisites: Node.js, [pnpm](https://pnpm.io/), the [Rust toolchain](https://rustup.rs/), and git.
 Tauri also needs its platform dependencies — see the
@@ -103,7 +215,7 @@ pnpm lint                                         # eslint
 cargo test --manifest-path src-tauri/Cargo.toml   # backend tests
 ```
 
-## Project layout
+### Project layout
 
 ```
 src/              React frontend
@@ -125,22 +237,7 @@ skills/           agent skills exposed inside VelaTerm sessions
 docs/manuals/     user manuals
 ```
 
-## Documentation
-
-- [Manuals overview](docs/manuals/manuals-overview_20260709_2041.md) — start here
-- [Getting started](docs/manuals/getting-started_20260709_2041.md)
-- [AI agent sessions](docs/manuals/ai-agent-sessions_20260709_2041.md)
-- [Remote development guide](docs/manuals/remote-development-guide_20260709_2041.md)
-- [Changelog](docs/changelog.md)
-
-## Community
-
-- **[X](https://x.com/vlinx_soft)** — release announcements and short demos.
-- **[YouTube](https://www.youtube.com/@vlinx_soft)** — demos and guided tours of the application.
-- **[Discord](https://discord.gg/gaD4NBzggU)** — questions, bug reports and everyday discussion.
-- **[velaterm.com](https://velaterm.com)** — downloads, manuals and the changelog.
-
-## Contributing
+### Contributing
 
 Three conventions matter most in this codebase:
 
