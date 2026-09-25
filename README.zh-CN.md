@@ -24,31 +24,45 @@
 
 支持 Claude Code、Codex、OpenCode、Copilot、Cursor、Antigravity、Cline、Pi 等编程智能体。每个智能体都在独立会话中运行，支持实时状态查看、会话恢复与自定义启动参数。
 
+<img src="docs/assets/readme/window.webp" alt="同一个 VelaTerm 窗口中并排运行 Claude Code、Codex、开发服务器和 Shell" width="100%">
+
 ### 一套完整的智能体开发环境
 
 在会话视图中查看智能体的计划、改动、命令与测试结果；也可以把同一个会话切换到终端视图，直接使用智能体自己的 TUI。
+
+<img src="docs/assets/readme/views-conversation.webp" alt="会话视图中的智能体会话，包含计划、改动、命令与测试结果" width="100%">
 
 ### 会话按树形层级组织
 
 项目 → 分组 → 嵌套子分组 → 会话。会话再多，也一样井井有条。每个会话都是真实的伪终端，切到别处后仍在后台运行，多个会话还可以分屏并排显示。
 
+<p align="center"><img src="docs/assets/readme/tree.webp" alt="会话树中的项目、分组、嵌套分组与会话" width="440"></p>
+
 ### 命令与路径，输入即有提示
 
 输入时实时弹出命令与路径建议，用方向键选择，按 Tab 键即可补全。
+
+<img src="docs/assets/readme/suggest-commands.webp" alt="输入 git 命令时弹出的命令建议" width="100%">
 
 ### 智能体需要你介入时，第一时间提醒
 
 会话状态随对话实时更新，在会话树和状态栏中清晰可见；智能体完成工作、等待你处理时，桌面会弹出通知。
 
+<img src="docs/assets/readme/status.webp" alt="会话树、状态栏与通知中的会话状态" width="100%">
+
 ### 用量与资源，实时可见
 
 智能体工作时，右栏实时显示订阅额度、上下文、Token 用量与系统负载。
+
+<p align="center"><img src="docs/assets/readme/info-panel.webp" alt="显示订阅额度、上下文、Token 与系统负载的信息面板" width="440"></p>
 
 ## 多智能体协作
 
 ### 一条命令，派生子会话
 
 智能体可以用 `vspawn` 把旁支任务交给子会话：选择智能体、模型和推理强度，按需分配独立的工作树；子会话会出现在父会话下方。
+
+<img src="docs/assets/readme/vspawn.webp" alt="智能体用 vspawn 派生子会话" width="100%">
 
 ### 不同智能体，跨会话通信
 
@@ -60,6 +74,10 @@ Claude、Codex、OpenCode、Pi 等不同智能体的会话之间，可以互相�
 | `vrefer` | 读取对话，或直接提问 |
 | `vtell` | 给其他会话发消息；加上 `--steer`，消息会插入对方正在进行的回合 |
 
+<img src="docs/assets/readme/vrefer.webp" alt="Claude 会话用 vsearch 和 vrefer 查询 Codex 会话" width="100%">
+
+<img src="docs/assets/readme/vtell.webp" alt="Claude 会话用 vtell 给 Codex 会话发消息" width="100%">
+
 ### 一个大任务，交给一组会话
 
 规划/执行模式把一个大任务拆给多个智能体会话协作完成，每个会话只负责一件事。**规划会话**负责制定方案、拆分任务、逐项验收；**执行会话**各自在独立工作树中实现一项任务，完成后回传报告。
@@ -67,6 +85,10 @@ Claude、Codex、OpenCode、Pi 等不同智能体的会话之间，可以互相�
 1. **规划。** 规划与执行可分别配置智能体、模型和推理强度。
 2. **执行。** 规划会话给出拆分方案后，由你逐项调整任务和模型，确认无误再开始执行。执行会话并行推进，各自使用独立工作树，并作为规划会话的子会话显示在会话树中。
 3. **验收。** 执行报告自动回传给规划会话验收，未达标的任务退回原会话继续修改，上下文完整保留。
+
+<img src="docs/assets/readme/pe-team.webp" alt="规划会话向两个执行会话派发任务" width="100%">
+
+<img src="docs/assets/readme/parallel.webp" alt="执行会话在规划会话下并行推进" width="100%">
 
 ### 会话里的结论，沉淀成知识
 
@@ -80,15 +102,23 @@ Claude、Codex、OpenCode、Pi 等不同智能体的会话之间，可以互相�
 
 详见[笔记本使用指南](docs/manuals/knowledge-notebooks_20260910.md)（英文）。
 
+<img src="docs/assets/readme/kb-sources.webp" alt="附带来源会话的知识库条目" width="100%">
+
+<img src="docs/assets/readme/vkb.webp" alt="智能体用 vkb 查询知识、笔记与代码图谱" width="100%">
+
 ## 内置工具
 
 ### 各类编辑器，开箱即用
 
 自带 Markdown 所见即所得编辑器、代码编辑器与图片查看器，桌面端还内置了浏览器；连接远程服务器时同样可用。
 
+<img src="docs/assets/readme/editor-markdown.webp" alt="带文件树的 Markdown 所见即所得编辑器" width="100%">
+
 ### 任务之间，轻松片刻
 
 从工作空间进入游戏中心，打开 Pixel Wing，用键盘、触控或手柄游玩。
+
+<p align="center"><img src="docs/assets/readme/game.webp" alt="游戏中心里的 Pixel Wing" width="520"></p>
 
 ### 其他功能
 
@@ -106,13 +136,19 @@ Claude、Codex、OpenCode、Pi 等不同智能体的会话之间，可以互相�
 - **浏览器。** 在任意设备上打开网址即可使用，无需安装。全程 HTTPS 端到端加密，传输链路上没有可读的明文。
 - **手机。** 提供 iOS 与 Android 原生应用，扫码即连，随身查看同一棵会话树。
 
+<p><img src="docs/assets/readme/anywhere-desktop.webp" alt="通过 SSH 连接远程服务器的桌面端" width="42%"> <img src="docs/assets/readme/anywhere-browser.webp" alt="浏览器中的同一个工作空间" width="42%"> <img src="docs/assets/readme/anywhere-phone.webp" alt="手机上的同一棵会话树" width="13%"></p>
+
 ### 远程连接，三种方式
 
 通过 SSH 连接远程服务器，打开配对链接，或登录账号后直接选择自己的设备。
 
+<img src="docs/assets/readme/remote-ssh.webp" alt="通过 SSH 连接远程服务器" width="100%">
+
 ### 会话进度，随身掌握
 
 扫码即可连接。浏览会话树、查看智能体进展并直接回复；遇到需要你确认的操作，手机会第一时间收到推送提醒。
+
+<p align="center"><img src="docs/assets/readme/mobile.webp" alt="iOS 与 Android 应用中的会话树与智能体回复" width="560"></p>
 
 ### macOS、Windows 与 Linux
 
@@ -123,6 +159,8 @@ Claude、Codex、OpenCode、Pi 等不同智能体的会话之间，可以互相�
 | macOS | Apple Silicon、Intel | zsh |
 | Windows | x64、arm64 | PowerShell、Git Bash、WSL |
 | Linux | x86_64、aarch64 | bash |
+
+<p><img src="docs/assets/readme/platform-macos.webp" alt="macOS 上的 VelaTerm" width="32%"> <img src="docs/assets/readme/platform-windows.webp" alt="Windows 上使用 Git Bash 的 VelaTerm" width="32%"> <img src="docs/assets/readme/platform-linux.webp" alt="Linux 上的 VelaTerm" width="32%"></p>
 
 ## 下载
 

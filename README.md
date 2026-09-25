@@ -26,10 +26,14 @@ and brings them to your browser and your phone.
 Claude Code, Codex, OpenCode, Copilot, Cursor, Antigravity, Cline, Pi and more. Each one runs as a
 managed session, with live status, resume and custom launch arguments.
 
+<img src="docs/assets/readme/window.webp" alt="Claude Code, Codex, a dev server and a shell side by side in one VelaTerm window" width="100%">
+
 ### A full agent dev environment
 
 Follow an agent's plan, edits, commands and test results as a conversation, or switch the same
 session to the terminal view and work in its TUI.
+
+<img src="docs/assets/readme/views-conversation.webp" alt="An agent session in the conversation view, with the plan, edits, commands and test results" width="100%">
 
 ### Sessions in a tree
 
@@ -37,18 +41,26 @@ Projects → groups → nested sub-groups → sessions. However many sessions yo
 Every session is a real pseudo-terminal that keeps running in the background, and sessions can be
 split side by side.
 
+<p align="center"><img src="docs/assets/readme/tree.webp" alt="Projects, groups, nested groups and sessions in the session tree" width="440"></p>
+
 ### Commands and paths, as you type
 
 Command and path suggestions appear as you type. Choose with the arrow keys, then press Tab to accept.
+
+<img src="docs/assets/readme/suggest-commands.webp" alt="Command suggestions appearing while typing a git command" width="100%">
 
 ### Know the moment an agent needs you
 
 Session states follow the conversation live, in the session tree and the status bar, with a desktop
 notification when an agent finishes and waits for you.
 
+<img src="docs/assets/readme/status.webp" alt="Session states in the session tree, the status bar and a notification" width="100%">
+
 ### Usage and load, live
 
 While the agent works, the right panel keeps plan quota, context, tokens and system load in view.
+
+<p align="center"><img src="docs/assets/readme/info-panel.webp" alt="The info panel with plan quota, context, tokens and system load" width="440"></p>
 
 ## Agents together
 
@@ -56,6 +68,8 @@ While the agent works, the right panel keeps plan quota, context, tokens and sys
 
 An agent can hand a side task to a child session with `vspawn`: pick the agent, model and effort,
 and give it its own worktree when needed. The child appears under its parent in the tree.
+
+<img src="docs/assets/readme/vspawn.webp" alt="An agent starting a child session with vspawn" width="100%">
 
 ### Agents talk across sessions
 
@@ -68,6 +82,10 @@ and send each other messages.
 | `vrefer` | Read a conversation, or ask about it |
 | `vtell` | Message another session; with `--steer` the message joins the turn that is already running |
 
+<img src="docs/assets/readme/vrefer.webp" alt="A Claude session asking about a Codex session with vsearch and vrefer" width="100%">
+
+<img src="docs/assets/readme/vtell.webp" alt="A Claude session steering a Codex session with vtell" width="100%">
+
 ### One big task, a team of sessions
 
 Plan / Execute mode splits a large task across several agent sessions, each with one job. The
@@ -79,6 +97,10 @@ one part in its own worktree and report back.
    Executors then work in parallel, one worktree each, as children of the planner in the session tree.
 3. **Review.** Reports come back to the planner automatically; anything short of the bar goes back to
    the same session, with its context intact.
+
+<img src="docs/assets/readme/pe-team.webp" alt="A planner session dispatching two executor sessions" width="100%">
+
+<img src="docs/assets/readme/parallel.webp" alt="Executor sessions working in parallel under the planner" width="100%">
 
 ### Keep what your sessions learn
 
@@ -93,6 +115,10 @@ search both at once. With `vkb`, an agent looks things up before it acts:
 
 See the [notebook guide](docs/manuals/knowledge-notebooks_20260910.md).
 
+<img src="docs/assets/readme/kb-sources.webp" alt="A knowledge base entry with its source sessions" width="100%">
+
+<img src="docs/assets/readme/vkb.webp" alt="An agent looking up knowledge, notes and the code graph with vkb" width="100%">
+
 ## Built-in tools
 
 ### Editors included
@@ -100,10 +126,14 @@ See the [notebook guide](docs/manuals/knowledge-notebooks_20260910.md).
 A WYSIWYG Markdown editor, a code editor and an image viewer, plus a built-in browser on desktop. All
 of them work on remote machines too.
 
+<img src="docs/assets/readme/editor-markdown.webp" alt="The WYSIWYG Markdown editor with a file tree" width="100%">
+
 ### A little break between tasks
 
 Open Game Center from your workspace and play Pixel Wing with a keyboard, touch controls or a
 controller.
+
+<p align="center"><img src="docs/assets/readme/game.webp" alt="Pixel Wing in Game Center" width="520"></p>
 
 ### Also included
 
@@ -126,14 +156,20 @@ Remote access is built in: connect over SSH, or serve the app over HTTPS with en
   encryption; no readable data crosses the network.
 - **Phone.** A native app for iOS and Android. Scan a QR code to carry the same session tree with you.
 
+<p><img src="docs/assets/readme/anywhere-desktop.webp" alt="The desktop app connected over SSH" width="42%"> <img src="docs/assets/readme/anywhere-browser.webp" alt="The same workspace in a browser" width="42%"> <img src="docs/assets/readme/anywhere-phone.webp" alt="The same session tree on a phone" width="13%"></p>
+
 ### Connect remotely, three ways
 
 Connect over SSH, open a pairing link, or sign in to your account and pick one of your devices.
+
+<img src="docs/assets/readme/remote-ssh.webp" alt="Connecting to a remote server over SSH" width="100%">
 
 ### Your sessions, in your pocket
 
 Scan a QR code to connect. Browse the tree, read agent replies as they stream and answer them, and get
 a push notification when an agent needs you.
+
+<p align="center"><img src="docs/assets/readme/mobile.webp" alt="The iOS and Android app showing the session tree and an agent reply" width="560"></p>
 
 ### macOS, Windows and Linux
 
@@ -145,6 +181,8 @@ Tauri 2: a small install that stays smooth under heavy terminal load.
 | macOS | Apple Silicon, Intel | zsh |
 | Windows | x64, arm64 | PowerShell, Git Bash, WSL |
 | Linux | x86_64, aarch64 | bash |
+
+<p><img src="docs/assets/readme/platform-macos.webp" alt="VelaTerm on macOS" width="32%"> <img src="docs/assets/readme/platform-windows.webp" alt="VelaTerm on Windows with Git Bash" width="32%"> <img src="docs/assets/readme/platform-linux.webp" alt="VelaTerm on Linux" width="32%"></p>
 
 ## Download
 
