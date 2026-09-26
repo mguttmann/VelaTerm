@@ -334,3 +334,102 @@ describe("wsClient pty-resync", () => {
     expect(sentSpawns()[0]).toMatchObject({ t: "pty-spawn", sid: "s1", attachOnly: true });
   });
 });
+
+type ChatInternals = PtyInternals & {
+  events: Map<string, Set<unknown>>;
+  chatResyncing: Set<string>;
+};
+const chatInternals = wsClient as unknown as ChatInternals;
+
+describe("wsClient chat channels", () => {
+  const realWebSocket = globalThis.WebSocket;
+  let socket: FakeWebSocket;
+
+  function open() {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    socket = new FakeWebSocket("ws://test/ws");
+    socket.readyState = FakeWebSocket.OPEN;
+    chatInternals.ws = socket;
+  }
+  const sent = () => socket.sent.map((raw) => JSON.parse(String(raw)) as Record<string, unknown>);
+  const event = (name: string, payload: unknown) =>
+    internals.onMessage({ data: JSON.stringify({ t: "event", name, payload }) });
+
+  afterEach(() => {
+    clearInterval(chatInternals.idleTimer);
+    chatInternals.idleTimer = undefined;
+    globalThis.WebSocket = realWebSocket;
+    chatInternals.ws = null;
+    chatInternals.events.clear();
+    chatInternals.chatResyncing.clear();
+    internals.onMessage({ data: JSON.stringify({ t: "hello", source: "ws-reset" }) });
+  });
+
+  it("mirrors the first and last local listener of a chat name with watch and unwatch", async () => {
+    open();
+    const offA = await wsClient.listen("chat://event/s", () => {});
+    const offB = await wsClient.listen("chat://event/s", () => {});
+    const offTree = await wsClient.listen("tree://changed", () => {});
+    expect(sent()).toEqual([{ t: "watch", name: "chat://event/s" }]);
+    offA();
+    offA();
+    expect(sent()).toHaveLength(1);
+    offB();
+    offTree();
+    expect(sent()).toEqual([{ t: "watch", name: "chat://event/s" }, { t: "unwatch", name: "chat://event/s" }]);
+    expect(chatInternals.events.has("chat://event/s")).toBe(false);
+  });
+
+  it("announces the codec first and watches the listened chat names again when it comes online", async () => {
+    open();
+    await wsClient.listen("chat://event/s", () => {});
+    await wsClient.listen("chat://task/s/t1", () => {});
+    const off = await wsClient.listen("chat://event/gone", () => {});
+    off();
+    await wsClient.listen("spawn://request", () => {});
+    socket.sent = [];
+    chatInternals.goOnline(socket);
+    expect(sent()).toEqual([
+      { t: "caps", chat: 1 },
+      { t: "watch", name: "chat://event/s" },
+      { t: "watch", name: "chat://task/s/t1" },
+    ]);
+  });
+
+  it("hands listeners the decoded payload, not the patch", async () => {
+    open();
+    const seen: unknown[] = [];
+    await wsClient.listen("chat://event/s", (payload) => seen.push(payload));
+    event("chat://event/s", { type: "rows", epoch: 1, retain: ["r"], rows: [{ kind: "assistant", id: "r", text: "Hel", streaming: true }] });
+    event("chat://event/s", { type: "rows", epoch: 1, retain: ["r"], rows: [{ id: "r", patch: { app: { text: "lo" }, len: { text: 3 } } }] });
+    expect(seen[1]).toEqual({ type: "rows", epoch: 1, rows: [{ kind: "assistant", id: "r", text: "Hello", streaming: true }] });
+  });
+
+  it("drops a session's events after a gap until the resync barrier, which reaches the listeners", async () => {
+    open();
+    const seen: Array<{ type?: string }> = [];
+    await wsClient.listen("chat://event/s", (payload) => seen.push(payload as { type?: string }));
+    const other: unknown[] = [];
+    await wsClient.listen("chat://event/o", (payload) => other.push(payload));
+    socket.sent = [];
+    event("chat://event/s", { type: "rows", epoch: 1, retain: ["r"], rows: [{ kind: "reasoning", id: "r", text: "abc", streaming: true }] });
+    // A tampered base length: the decoder must not guess.
+    event("chat://event/s", { type: "rows", epoch: 1, retain: ["r"], rows: [{ id: "r", patch: { app: { text: "d" }, len: { text: 2 } } }] });
+    expect(sent()).toEqual([{ t: "chat-resync", sid: "s" }]);
+    event("chat://event/s", { type: "queued", items: [{ id: "q", text: "late" }] });
+    event("chat://event/s", { type: "rows", epoch: 1, rows: [{ kind: "user", id: "u", text: "full" }] });
+    event("chat://event/o", { type: "queued", items: [] });
+    expect(seen.map((payload) => payload.type)).toEqual(["rows"]);
+    expect(other, "other sessions are unaffected").toHaveLength(1);
+    event("chat://event/s", { type: "resync" });
+    event("chat://event/s", { type: "rows", epoch: 1, retain: ["r"], rows: [{ kind: "reasoning", id: "r", text: "abcd", streaming: true }] });
+    expect(seen.map((payload) => payload.type)).toEqual(["rows", "resync", "rows"]);
+    expect(sent(), "one resync request per gap").toHaveLength(1);
+  });
+
+  it("drops an undecodable event silently when nothing listens to the session", () => {
+    open();
+    event("chat://event/s", { type: "extras", patch: { set: { fastMode: true } } });
+    expect(sent()).toEqual([]);
+  });
+});

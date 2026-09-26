@@ -10,12 +10,23 @@
 //!   { t:"invoke",    id, cmd, args }      Generic commands (list_tree, pty_write, git, etc.)
 //!   { t:"pty-spawn", id, sid, args }      Spawn or attach to a PTY; returns { pid, launch, subId }
 //!   { t:"pty-detach", sid, subId }        Leave the session locally (detach; never kill it)
+//!   { t:"caps", chat:1 }                  First frame once online: this client decodes the chat codec
+//!   { t:"watch" | "unwatch", name }       A `chat://` name gained its first / lost its last local listener
+//!   { t:"chat-resync", sid }              The chat decoder found a gap in this session
 //! Server -> client:
 //!   { t:"reply", id, ok, result | error } Command response
 //!   { t:"event", name, payload }          Forwarded Tauri events (pty://status|exit, spawn://, notify://)
 //!   { t:"pty-resync", sid }               The server dropped this terminal's backlog on a slow link;
 //!                                         reset it and reattach (replay), as after a reconnect
 //!   Binary frame                            PTY output routed to subscribers by sid
+//!
+//! Chat channels (see `chatWire.ts` and `src-tauri/src/web/chat_wire.rs`): after `caps` the server forwards a
+//! session's chat events only while this client watches `chat://event/{sid}`, and a task's workflow tree
+//! only while it watches `chat://task/{sid}/{taskId}`; watches mirror the local listeners and are sent
+//! again after every reconnect. Chat events arrive as patches and are decoded here, before any listener
+//! sees them. On a gap the session's events are dropped, `chat-resync` is sent, and the server's
+//! `{type:"resync"}` barrier event is handed to the listeners, which then reload the conversation in full.
+//! An older server ignores all of this and sends full frames, which pass through the decoder unchanged.
 //!
 //! Reconnection: after a disconnect, reconnect automatically with exponential backoff from
 //! 1s to 30s. Before each retry, probe `GET /api/me` to distinguish failures. A 401 means
@@ -39,6 +50,7 @@ import nacl from "tweetnacl";
 
 import { t } from "../i18n";
 import { handshakeFailureReason, mapBackendError, type HandshakeFailure } from "./backendError";
+import { CHAT_WIRE_VERSION, ChatWireDecoder, ChatWireGap } from "./chatWire";
 import { recordRequestError } from "./reqLog";
 import { apiUrl, shareBasePath } from "./shareBase";
 import type { PtySpawnArgs, PtySpawnResult } from "./transport";
@@ -73,6 +85,10 @@ const IDLE_CHECK_MS = 15_000;
  * This applies to focus/visibility wakeups; `online` is an explicit recovery signal and ignores it.
  */
 const WAKE_STALE_MS = 35_000;
+
+/** Event names whose local listeners are mirrored to the server with watch/unwatch. */
+const WATCHED_PREFIX = "chat://";
+const CHAT_EVENT_PREFIX = "chat://event/";
 
 interface Pending {
   resolve: (v: unknown) => void;
@@ -238,6 +254,10 @@ class WsClient {
   private lastInbound = Date.now();
   /** Idle-detection timer, started when a connection opens and stopped when it closes. */
   private idleTimer: ReturnType<typeof setInterval> | undefined;
+  /** Rebuilds full chat payloads from the patches of this connection. */
+  private readonly chatDecoder = new ChatWireDecoder();
+  /** Sessions whose chat events are dropped until the server's resync barrier arrives. */
+  private readonly chatResyncing = new Set<string>();
 
   // ── E2EE (end-to-end encryption) state ──
   /** Pairing data for this visit (token + server public key); null selects unencrypted token auth. */
@@ -504,6 +524,12 @@ class WsClient {
    * the handshake receives `e2ee_authenticated`.
    */
   private goOnline(ws: WebSocket) {
+    // Announce the chat codec first, then mirror every chat name that has local listeners, so the server
+    // forwards exactly what this client shows before any request of this connection is answered.
+    this.send({ t: "caps", chat: CHAT_WIRE_VERSION });
+    for (const [name, set] of this.events) {
+      if (set.size && name.startsWith(WATCHED_PREFIX)) this.send({ t: "watch", name });
+    }
     this.connectPromise = null;
     this.reconnectAttempts = 0;
     this.everConnected = true;
@@ -732,6 +758,9 @@ class WsClient {
     } else if (msg.t === "hello") {
       // The first frame supplies this connection's source ID; replace it after reconnection.
       this.source = String(msg.source ?? "");
+      // Chat patches of a previous connection never apply to this one.
+      this.chatDecoder.reset();
+      this.chatResyncing.clear();
     } else if (msg.t === "reply") {
       const p = this.pending.get(msg.id as number);
       if (!p) return;
@@ -741,8 +770,15 @@ class WsClient {
       // where every backend error enters the UI; other errors pass through unchanged.
       else p.reject(new Error(mapBackendError(String(msg.error ?? t("transport.cmdFailed")))));
     } else if (msg.t === "event") {
-      const subs = this.events.get(msg.name as string);
-      if (subs) for (const cb of subs) cb(msg.payload);
+      const name = msg.name as string;
+      let payload = msg.payload;
+      if (name.startsWith(CHAT_EVENT_PREFIX)) {
+        const decoded = this.decodeChat(name, payload);
+        if (decoded === DROP) return;
+        payload = decoded;
+      }
+      const subs = this.events.get(name);
+      if (subs) for (const cb of subs) cb(payload);
     } else if (msg.t === "pty-resync") {
       // The server dropped this terminal's unsent output because the link could not keep up, and
       // stopped streaming it. Everything before the marker has arrived; replace it with a replay.
@@ -756,6 +792,35 @@ class WsClient {
         `ws:${String(msg.code ?? "error")}`,
         `${String(msg.message ?? "server rejected the connection")} (client sent token=${this.lastConnectHadToken ? "yes" : "no"})`,
       );
+    }
+  }
+
+  /**
+   * Decode one chat event, or DROP it. A session waiting for its resync barrier drops everything before it:
+   * a partly applied rows event would advance the view's revision past a row it never received. The barrier
+   * itself reaches the listeners, which reload the conversation in full.
+   */
+  private decodeChat(name: string, payload: unknown): unknown {
+    const sid = name.slice(CHAT_EVENT_PREFIX.length);
+    const isBarrier = (payload as { type?: unknown } | null)?.type === "resync";
+    if (this.chatResyncing.has(sid)) {
+      if (!isBarrier) return DROP;
+      this.chatResyncing.delete(sid);
+      this.chatDecoder.forget(sid);
+      return payload;
+    }
+    if (isBarrier) return payload;
+    try {
+      return this.chatDecoder.decode(sid, payload);
+    } catch (error) {
+      if (!(error instanceof ChatWireGap)) throw error;
+      this.chatDecoder.forget(sid);
+      // Without listeners the server has already been told to stop; there is nothing to repair.
+      if (this.events.get(name)?.size) {
+        this.chatResyncing.add(sid);
+        this.send({ t: "chat-resync", sid });
+      }
+      return DROP;
     }
   }
 
@@ -801,9 +866,16 @@ class WsClient {
       this.events.set(name, set);
     }
     const wrapped: EventCb = (p) => cb(p as T);
+    const first = set.size === 0;
     set.add(wrapped);
+    // The server forwards a chat name only while this client listens to it (see the protocol notes).
+    if (first && name.startsWith(WATCHED_PREFIX)) this.send({ t: "watch", name });
+    const listeners = set;
     return () => {
-      set?.delete(wrapped);
+      if (!listeners.delete(wrapped) || listeners.size > 0 || this.events.get(name) !== listeners) return;
+      // Drop the empty set so a reconnect does not watch the name again.
+      this.events.delete(name);
+      if (name.startsWith(WATCHED_PREFIX)) this.send({ t: "unwatch", name });
     };
   }
 
@@ -947,6 +1019,9 @@ class WsClient {
     };
   }
 }
+
+/** Marks a chat event the decoder withheld. */
+const DROP = Symbol("drop");
 
 /** Browser-side singleton. */
 export const wsClient = new WsClient();

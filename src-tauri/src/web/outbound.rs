@@ -15,7 +15,8 @@
 //! Bounds (accounted in plaintext bytes; E2EE's base64 adds about a third on the wire):
 //! - Latest-state events (`chat://event/{sid}` of type `extras`, `tree://changed`,
 //!   `presets://changed`) coalesce latest-wins while an older copy is still unsent: the old entry is
-//!   tombstoned and the new one appended, so it still lands after everything queued before it.
+//!   tombstoned and the new one appended, so it still lands after everything queued before it. Chat events
+//!   encoded as patches for a negotiated connection never coalesce ([`Outbound::push_event_exact`]).
 //! - Each session's unsent terminal output is capped at [`PTY_RESYNC_BYTES`]. Beyond that its unsent frames
 //!   are dropped, a `{"t":"pty-resync","sid":..}` marker is queued in the bulk lane, and the sink reports
 //!   failure so the PTY fan-out removes it; the client resets the terminal and reattaches (replay). Terminal
@@ -359,6 +360,14 @@ impl Outbound {
         let (class, key) = classify(name, &payload);
         let msg = Message::Text(json!({ "t": "event", "name": name, "payload": payload }).to_string());
         self.push_bulk_msg(msg, class, key)
+    }
+
+    /// Queue a forwarded event on the bulk lane without ever coalescing it. For chat events encoded as
+    /// patches against the previous frame (see `chat_wire.rs`): dropping an older one would lose data.
+    pub(crate) fn push_event_exact(&self, name: &str, payload: Value) -> bool {
+        let (class, _) = classify(name, &payload);
+        let msg = Message::Text(json!({ "t": "event", "name": name, "payload": payload }).to_string());
+        self.push_bulk_msg(msg, class, None)
     }
 
     /// Queue a frame on the bulk lane behind everything already there (used for `pty-spawn` replies).

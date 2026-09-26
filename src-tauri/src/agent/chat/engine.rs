@@ -615,13 +615,29 @@ struct CodexPermissionState {
 }
 
 /// Optional bounded synchronization request. Missing options preserve the legacy full snapshot.
-#[derive(Default, serde::Deserialize)]
+#[derive(Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ChatWindow {
     pub before: Option<String>,
     pub from: Option<String>,
     pub since: Option<u64>,
     pub epoch: Option<u64>,
+    /// Page size for a recent or history page, at most `SNAPSHOT_PAGE_ROWS`; 0 asks for no rows at all.
+    pub limit: Option<usize>,
+    /// Leave background tasks' workflow trees out (flagged `detail_omitted`), except `detail_task`'s.
+    pub compact_tasks: Option<bool>,
+    pub detail_task: Option<String>,
+    /// The `metaTag` of the snapshot the client holds; when unchanged the bulky meta fields are left out.
+    pub meta_tag: Option<String>,
+    /// The `historyTag` of the replayed conversation the client holds (conversations without a process).
+    pub history_tag: Option<String>,
+}
+
+impl ChatWindow {
+    /// Rows of a recent or history page for this window.
+    pub(crate) fn page_rows(&self) -> usize {
+        self.limit.map_or(SNAPSHOT_PAGE_ROWS, |limit| limit.min(SNAPSHOT_PAGE_ROWS))
+    }
 }
 
 /// A conversation's full state, as handed to a client that just connected or reopened the view.
@@ -696,6 +712,16 @@ pub struct ChatSnapshot {
     /// instant to redraw only the small elapsed-time label once per second.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub turn_started_at: Option<u64>,
+    /// Hash of the bulky, rarely changing parts (commands, config keys, collaboration modes, context usage,
+    /// rate limit, native usage). Set for windowed requests; see `ChatWindow::meta_tag`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub meta_tag: Option<String>,
+    /// The client's `metaTag` still matches: those parts were left out and the client keeps its own.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub meta_unchanged: bool,
+    /// `"{rows}:{hash}"` of a replayed conversation, for an incremental reopen (see `ChatWindow::history_tag`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub history_tag: Option<String>,
     /// What the Claude process reports about itself beyond the conversation. Empty for other agents.
     #[serde(flatten)]
     pub extras: ClaudeExtras,
@@ -767,6 +793,9 @@ pub struct BackgroundTask {
     pub workflow_progress: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub output_file: Option<String>,
+    /// The task has a workflow tree that was left out of this copy; a client that shows it asks for it.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub detail_omitted: bool,
     /// Seen in a `background_tasks_changed` inventory; only listed tasks are published.
     #[serde(skip)]
     pub listed: bool,
@@ -877,6 +906,16 @@ impl ClaudeExtras {
         let now = now_ms();
         for task in &mut extras.background_tasks { task.publish(now); }
         extras
+    }
+
+    /// Leave out every workflow tree except `detail_task`'s, flagging each omission. The compact status a
+    /// remote client needs until it opens a task; the WebSocket codec applies the same rule to events.
+    pub(crate) fn compact_tasks(&mut self, detail_task: Option<&str>) {
+        for task in &mut self.background_tasks {
+            if Some(task.task_id.as_str()) != detail_task && task.workflow_progress.take().is_some() {
+                task.detail_omitted = true;
+            }
+        }
     }
 }
 
@@ -2509,6 +2548,9 @@ impl ChatManager {
                 pid: None,
                 started_at: None,
                 turn_started_at: None,
+                meta_tag: None,
+                meta_unchanged: false,
+                history_tag: None,
                 extras: ClaudeExtras::default(),
             };
         };
@@ -2534,7 +2576,7 @@ impl ChatManager {
                         }
                     }
                 }
-                start = end.saturating_sub(SNAPSHOT_PAGE_ROWS);
+                start = end.saturating_sub(if delta.is_some() { SNAPSHOT_PAGE_ROWS } else { window.page_rows() });
             }
             let selected: Vec<ChatRow> = if let Some(since) = delta {
                 start = window.and_then(|w| w.from.as_ref()).and_then(|id| timeline.at.get(id)).copied().unwrap_or(start);
@@ -2559,7 +2601,10 @@ impl ChatManager {
         let collaboration_modes = proc.collaboration_modes.lock().unwrap().clone();
         let service_tier = proc.service_tier.lock().unwrap().clone();
         let personality = proc.personality.lock().unwrap().clone();
-        let extras = proc.extras.lock().unwrap().published();
+        let mut extras = proc.extras.lock().unwrap().published();
+        if let Some(window) = window.filter(|window| window.compact_tasks == Some(true)) {
+            extras.compact_tasks(window.detail_task.as_deref());
+        }
         ChatSnapshot {
             positions, page_kind, has_more, total_rows,
             submission_receipts: true,
@@ -2587,7 +2632,18 @@ impl ChatManager {
             pid: Some(proc.pid),
             started_at: Some(proc.started_at),
             turn_started_at,
+            meta_tag: None,
+            meta_unchanged: false,
+            history_tag: None,
             extras,
+        }
+    }
+
+    /// Publish this session's `extras` with the next flush, for a client that just asked for task details.
+    /// The existing pending flag bounds it to one publish per flush interval.
+    pub fn request_extras(&self, session_id: &str) {
+        if let Ok(proc) = self.get(session_id) {
+            mark_extras(&proc);
         }
     }
 
@@ -3528,31 +3584,36 @@ fn spawn_flusher(app: AppCtx, session_id: String, proc: Arc<ChatProcess>) {
     std::thread::spawn(move || {
         loop {
             std::thread::sleep(FLUSH_INTERVAL);
-            let (flush, revision, positions) = {
-                let mut timeline = proc.timeline.lock().unwrap();
-                timeline.revision += 1;
-                let flush = timeline.take_flush();
-                let rows = match &flush { TimelineFlush::Rows(rows) => rows.as_slice(), TimelineFlush::Replace(rows) => &rows[rows.len().saturating_sub(SNAPSHOT_PAGE_ROWS)..], TimelineFlush::None => &[] };
-                let positions: HashMap<_, _> = rows.iter().filter_map(|row| timeline.at.get(row.id()).map(|index| (row.id().to_owned(), *index))).collect();
-                (flush, timeline.revision, positions)
-            };
-            match flush {
-                TimelineFlush::None => {}
-                TimelineFlush::Rows(rows) => {
-                    emit(&app, &session_id, json!({"type":"rows","positions":positions,"rows":rows.iter().map(snapshot_row).collect::<Vec<_>>(),"revision":revision,"epoch":proc.started_at}));
-                }
-                TimelineFlush::Replace(rows) => {
-                    let start = rows.len().saturating_sub(SNAPSHOT_PAGE_ROWS);
-                    emit(&app, &session_id, json!({"type":"replaceRows","positions":positions,"rows":rows[start..].iter().map(snapshot_row).collect::<Vec<_>>(),"hasMore":start > 0,"revision":revision,"epoch":proc.started_at}));
-                }
-            }
-            flush_pending_extras(&app, &session_id, &proc);
+            flush_once(&app, &session_id, &proc);
             if !proc.alive.load(Ordering::Relaxed) {
                 // One last sweep has just run, so nothing written before exit is lost.
                 return;
             }
         }
     });
+}
+
+/// One sweep of the flusher: the rows changed since the last one, then a pending `extras` publish.
+fn flush_once(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>) {
+    let (flush, revision, positions) = {
+        let mut timeline = proc.timeline.lock().unwrap();
+        timeline.revision += 1;
+        let flush = timeline.take_flush();
+        let rows = match &flush { TimelineFlush::Rows(rows) => rows.as_slice(), TimelineFlush::Replace(rows) => &rows[rows.len().saturating_sub(SNAPSHOT_PAGE_ROWS)..], TimelineFlush::None => &[] };
+        let positions: HashMap<_, _> = rows.iter().filter_map(|row| timeline.at.get(row.id()).map(|index| (row.id().to_owned(), *index))).collect();
+        (flush, timeline.revision, positions)
+    };
+    match flush {
+        TimelineFlush::None => {}
+        TimelineFlush::Rows(rows) => {
+            emit(app, session_id, json!({"type":"rows","positions":positions,"rows":rows.iter().map(snapshot_row).collect::<Vec<_>>(),"revision":revision,"epoch":proc.started_at}));
+        }
+        TimelineFlush::Replace(rows) => {
+            let start = rows.len().saturating_sub(SNAPSHOT_PAGE_ROWS);
+            emit(app, session_id, json!({"type":"replaceRows","positions":positions,"rows":rows[start..].iter().map(snapshot_row).collect::<Vec<_>>(),"hasMore":start > 0,"revision":revision,"epoch":proc.started_at}));
+        }
+    }
+    flush_pending_extras(app, session_id, proc);
 }
 
 // ─────────────────────────── Line handling ───────────────────────────
@@ -10019,5 +10080,165 @@ mod tests {
         assert!(!timeline.trim_from_user("missing"));
         assert_eq!(timeline.rows.len(), 1);
         assert!(matches!(timeline.take_flush(), TimelineFlush::None));
+    }
+}
+
+/// Drives the real engine paths (delta handling, the flusher sweep, `extras` publishing) for tests in other
+/// modules that measure what a client receives.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+
+    /// Stream an answer of `total` bytes in `chunk`-byte text deltas through `handle_delta`, sweeping the
+    /// flusher every `per_flush` deltas as the timer would. Returns the streamed text and the sweep count.
+    pub(crate) fn stream_answer(app: &AppCtx, session_id: &str, total: usize, chunk: usize, per_flush: usize) -> (String, usize) {
+        let proc = tests::inert_process(SessionKind::Claude);
+        let feed = |line: &str| {
+            if let Incoming::Delta(delta) = protocol::parse_line(line) {
+                handle_delta(&proc, delta);
+            }
+        };
+        feed(r#"{"type":"stream_event","event":{"type":"message_start","message":{"id":"msg"}}}"#);
+        feed(r#"{"type":"stream_event","event":{"type":"content_block_start","index":0,"content_block":{"type":"text"}}}"#);
+        let mut text = String::new();
+        let mut flushes = 0;
+        for i in 0..total / chunk {
+            let piece: String = std::iter::repeat_n(char::from(b'a' + (i % 26) as u8), chunk).collect();
+            feed(&json!({"type":"stream_event","event":{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":piece}}}).to_string());
+            text.push_str(&piece);
+            if (i + 1) % per_flush == 0 {
+                flush_once(app, session_id, &proc);
+                flushes += 1;
+            }
+        }
+        if !proc.timeline.lock().unwrap().dirty.is_empty() {
+            flush_once(app, session_id, &proc);
+            flushes += 1;
+        }
+        (text, flushes)
+    }
+
+    /// `workflows` running workflow tasks with `agents` agents each, as the inventory lists them.
+    pub(crate) fn workflow_tasks(workflows: usize, agents: usize) -> Vec<BackgroundTask> {
+        let start = now_ms().saturating_sub(60_000);
+        (0..workflows)
+            .map(|w| {
+                let mut tree = vec![json!({"type":"workflow_phase","id":format!("p{w}"),"index":1,"title":"Implement"})];
+                tree.extend((0..agents).map(|a| json!({"type":"workflow_agent","id":format!("w{w}a{a}"),"index":a,
+                    "label":format!("agent {a}"),"phaseIndex":1,"state":"start","startedAt":start,"tokens":1000 + a,
+                    "toolCalls":a,"model":"opus","promptPreview":"Implement the change described in the brief and report back. ".repeat(3)})));
+                BackgroundTask {
+                    task_id: format!("task{w}"),
+                    task_type: "local_workflow".into(),
+                    description: format!("Implement: agent {w}"),
+                    status: "running".into(),
+                    started_at: Some(start),
+                    workflow_name: Some("feature-team".into()),
+                    usage: Some(json!({"total_tokens": 5000, "tool_uses": 12})),
+                    workflow_progress: Some(Value::Array(tree)),
+                    listed: true,
+                    ..BackgroundTask::default()
+                }
+            })
+            .collect()
+    }
+
+    impl ChatManager {
+        /// Register an idle Claude process under `session_id`, without starting anything.
+        pub(crate) fn insert_test_process(&self, session_id: &str) {
+            self.sessions.lock().unwrap().insert(session_id.to_string(), tests::inert_process(SessionKind::Claude));
+        }
+
+        pub(crate) fn update_test_extras(&self, session_id: &str, update: impl FnOnce(&mut ClaudeExtras)) {
+            update(&mut self.get(session_id).unwrap().extras.lock().unwrap());
+        }
+
+        pub(crate) fn update_test_process(&self, session_id: &str, update: impl FnOnce(&mut Vec<Value>, &mut Vec<ConfigKey>)) {
+            let proc = self.get(session_id).unwrap();
+            update(&mut proc.commands.lock().unwrap(), &mut proc.config_keys.lock().unwrap());
+        }
+    }
+
+    /// The flusher's `extras` share for a registered process. Returns whether it published.
+    pub(crate) fn flush_extras(app: &AppCtx, session_id: &str) -> bool {
+        flush_pending_extras(app, session_id, &app.chat().get(session_id).unwrap())
+    }
+
+    /// Publish a registered process's `extras` now, as a low-frequency change does.
+    pub(crate) fn publish_extras(app: &AppCtx, session_id: &str) {
+        emit_extras(app, session_id, &app.chat().get(session_id).unwrap());
+    }
+
+    /// A task tab asks for no rows and only its own task's tree; the conversation pane for no tree at all.
+    #[test]
+    fn a_windowed_snapshot_honors_limit_and_task_compaction() {
+        let manager = ChatManager::new();
+        manager.insert_test_process("s");
+        {
+            let proc = manager.get("s").unwrap();
+            let mut timeline = proc.timeline.lock().unwrap();
+            for i in 0..80 {
+                timeline.upsert(ChatRow::Notice { id: format!("n{i}"), message: "x".into() });
+            }
+        }
+        manager.update_test_extras("s", |extras| extras.background_tasks = workflow_tasks(3, 2));
+        let tab = ChatWindow { limit: Some(0), compact_tasks: Some(true), detail_task: Some("task1".into()), ..ChatWindow::default() };
+        let snapshot = manager.snapshot_window("s", Some(&tab));
+        assert!(snapshot.rows.is_empty(), "limit 0 sends no rows");
+        assert!(snapshot.has_more);
+        let tasks = &snapshot.extras.background_tasks;
+        assert_eq!(tasks.len(), 3);
+        assert!(tasks[1].workflow_progress.is_some() && !tasks[1].detail_omitted, "the opened task keeps its tree");
+        for task in [&tasks[0], &tasks[2]] {
+            assert!(task.workflow_progress.is_none() && task.detail_omitted);
+        }
+        let value = serde_json::to_value(&snapshot).unwrap();
+        assert_eq!(value["backgroundTasks"][0]["detail_omitted"], true);
+        assert!(value["backgroundTasks"][1].get("detail_omitted").is_none(), "false is left out of the wire");
+
+        let pane = ChatWindow { compact_tasks: Some(true), ..ChatWindow::default() };
+        let snapshot = manager.snapshot_window("s", Some(&pane));
+        assert_eq!(snapshot.rows.len(), SNAPSHOT_PAGE_ROWS);
+        assert!(snapshot.extras.background_tasks.iter().all(|task| task.detail_omitted));
+        let big = ChatWindow { limit: Some(10_000), ..ChatWindow::default() };
+        let snapshot = manager.snapshot_window("s", Some(&big));
+        assert_eq!(snapshot.rows.len(), SNAPSHOT_PAGE_ROWS, "a limit never enlarges the page");
+        assert!(snapshot.extras.background_tasks.iter().all(|task| task.workflow_progress.is_some()), "trees stay unless asked");
+        let legacy = manager.snapshot("s");
+        assert_eq!(legacy.rows.len(), 80, "a window-less snapshot stays whole");
+    }
+
+    /// The codec's compaction of a published event and the snapshot's compaction agree on the wire.
+    #[test]
+    fn event_and_snapshot_compaction_agree() {
+        let manager = ChatManager::new();
+        manager.insert_test_process("s");
+        manager.update_test_extras("s", |extras| extras.background_tasks = workflow_tasks(2, 3));
+        let published = manager.get("s").unwrap().extras.lock().unwrap().published();
+        let mut compacted = published.clone();
+        compacted.compact_tasks(Some("task0"));
+        let from_codec = crate::web::chat_wire::compact_extras(serde_json::to_value(&published).unwrap(), |task| task == "task0");
+        assert_eq!(serde_json::to_value(&compacted).unwrap(), from_codec);
+    }
+
+    /// Opening a task tab marks `extras` for the next sweep, which then publishes exactly once.
+    #[test]
+    fn request_extras_publishes_with_the_next_flush() {
+        let dir = std::env::temp_dir().join(format!("vlx-request-extras-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = crate::db::Db::open(&dir.join("t.db")).unwrap();
+        let app = AppCtx::Headless(Arc::new(crate::host::HeadlessHost::new(dir.clone(), db)));
+        app.chat().insert_test_process("s");
+        let seen = Arc::new(Mutex::new(0));
+        let sink = seen.clone();
+        app.listen(&event_name("s"), move |_| *sink.lock().unwrap() += 1);
+        assert!(!flush_extras(&app, "s"), "nothing is pending yet");
+        app.chat().request_extras("s");
+        app.chat().request_extras("s");
+        app.chat().request_extras("missing");
+        assert!(flush_extras(&app, "s"));
+        assert!(!flush_extras(&app, "s"), "one publish per request burst");
+        assert_eq!(*seen.lock().unwrap(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

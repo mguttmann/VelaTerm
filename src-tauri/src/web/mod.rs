@@ -10,6 +10,8 @@
 
 mod access_store;
 mod auth;
+// Per-connection patch encoding of chat events for clients that negotiate it (see ws.rs).
+pub(crate) mod chat_wire;
 // desktop_call also uses dispatch, so expose it within the crate rather than keeping it private to web transport.
 pub(crate) mod dispatch;
 // dispatch mints download tickets, so this is reachable from the crate rather than private to web transport.

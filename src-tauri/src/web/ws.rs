@@ -3,10 +3,20 @@
 //! Protocol (kept in sync with frontend `src/ipc/wsClient.ts`):
 //! - Text frames are JSON control messages; binary PTY output is `[1-byte sid length][sid UTF-8][raw bytes]`.
 //! - Client: {t:"invoke",id,cmd,args} / {t:"pty-spawn",id,sid,args} / {t:"pty-detach",sid,subId}
-//!   / {t:"pong"} (heartbeat response)
+//!   / {t:"pong"} (heartbeat response) / {t:"caps",chat:1} / {t:"watch",name} / {t:"unwatch",name}
+//!   / {t:"chat-resync",sid}
 //! - Server: {t:"hello",source:"ws-N"} is the **first frame** after connection and identifies the source so
 //!   the frontend can compare itself with Resized/SpawnResult.owner; followed by {t:"reply",id,ok,result|error},
 //!   {t:"event",name,payload}, {t:"ping"} every 30 seconds, {t:"pty-resync",sid}, and binary PTY frames.
+//!
+//! Chat channels: a client that sends `caps` with the chat codec version it decodes (see `chat_wire.rs`)
+//! mirrors its local listeners with `watch`/`unwatch` of `chat://event/{sid}` and `chat://task/{sid}/{taskId}`.
+//! The server then forwards a session's chat events exactly while it is watched, encoded as patches against
+//! what this connection was sent last, and sends a task's workflow tree only while that task is watched. A
+//! decoder that finds a gap sends `chat-resync`; the server forgets its bases and queues the barrier event
+//! `{type:"resync"}` on that session's channel, after which everything is whole again. A client that never
+//! sends `caps` keeps the previous behaviour: chat events of every session it started or read through
+//! `chat_start`/`chat_snapshot`, byte-identical to the engine's frames, until the connection closes.
 //!
 //! Outbound frames go through a per-connection [`Outbound`] queue with one writer (see `outbound.rs`): hello,
 //! invoke replies and pings take a control lane that is always sent first; events, PTY frames and pty-spawn
@@ -25,6 +35,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, UNIX_EPOCH};
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
@@ -35,6 +46,7 @@ use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
 use serde_json::{json, Value};
 
+use super::chat_wire::{self, ChatWire, WatchName};
 use super::dispatch::{dispatch, CallOrigin};
 use super::e2ee::{self, Cipher};
 use super::outbound::{self, Class, Outbound, PtyPush};
@@ -245,7 +257,7 @@ async fn handle_socket(
     let mut pty_subs: HashMap<String, u64> = HashMap::new();
     // Sessions with status/exit forwarding already registered, preventing duplicates.
     let mut listened: HashSet<String> = HashSet::new();
-    let mut chat_listened: HashSet<String> = HashSet::new();
+    let mut chat = ChatLinks::default();
 
     // Register session-independent global forwarding. Share connections receive only the events the shared
     // session view consumes: tree refreshes, settings sync, and session state dots. Spawn/orchestration
@@ -296,7 +308,7 @@ async fn handle_socket(
             &outbound,
             &mut pty_subs,
             &mut listened,
-            &mut chat_listened,
+            &mut chat,
             &mut event_ids,
             share.clone(),
         );
@@ -333,7 +345,7 @@ async fn handle_socket(
                             &outbound,
                             &mut pty_subs,
                             &mut listened,
-                            &mut chat_listened,
+                            &mut chat,
                             &mut event_ids,
                             share.clone(),
                         );
@@ -371,6 +383,9 @@ async fn handle_socket(
     // Detach includes the source ID so a connection that owns terminal sizing releases it and broadcasts
     // Resized{owner:None}; remaining clients can then reclaim sizing after a page closes or network drops.
     for id in event_ids {
+        ctx.app.unlisten(id);
+    }
+    for (_, id) in chat.forwarders.drain() {
         ctx.app.unlisten(id);
     }
     // Deregister before detaching so the host stops showing this client the moment the socket is gone,
@@ -491,9 +506,9 @@ fn handle_text(
     outbound: &Outbound,
     pty_subs: &mut HashMap<String, u64>,
     listened: &mut HashSet<String>,
-    // Sessions whose chat channel this connection forwards. Separate from `listened`: a session can have
-    // both a PTY and a chat engine, registered at different moments.
-    chat_listened: &mut HashSet<String>,
+    // Sessions whose chat channel this connection forwards, and its chat codec. Separate from `listened`: a
+    // session can have both a PTY and a chat engine, registered at different moments.
+    chat: &mut ChatLinks,
     event_ids: &mut Vec<ListenerId>,
     // Present on share-tunnel connections; all commands are filtered through the grant's scope.
     share: Option<super::share_policy::ShareScope>,
@@ -521,14 +536,15 @@ fn handle_text(
             // A chat session has no PTY, so its events have no pty-spawn to hang registration off. Register
             // them when the client first asks about that session — starting the engine or reading its state —
             // and do it before dispatching, since starting emits its first events synchronously. Share clients
-            // only register sessions their grant covers, so no other session's events reach them.
-            if matches!(cmd.as_str(), "chat_start" | "chat_snapshot") {
+            // only register sessions their grant covers, so no other session's events reach them. A client that
+            // negotiated the chat codec registers through `watch` instead.
+            if matches!(cmd.as_str(), "chat_start" | "chat_snapshot") && !chat.negotiated() {
                 if let Some(sid) = args.get("sessionId").and_then(Value::as_str) {
                     let covered = share
                         .as_ref()
                         .is_none_or(|scope| scope.covers_session(&ctx.app, sid));
-                    if covered && chat_listened.insert(sid.to_string()) {
-                        event_ids.push(listen_forward(
+                    if covered && !chat.forwarders.contains_key(sid) {
+                        chat.forwarders.insert(sid.to_string(), listen_forward(
                             &ctx.app,
                             &crate::agent::chat::engine::event_name(sid),
                             outbound.clone(),
@@ -647,8 +663,144 @@ fn handle_text(
             }
             pty_subs.remove(sid);
         }
+        "caps" => {
+            if msg.get("chat").and_then(Value::as_u64) == Some(chat_wire::PROTOCOL_VERSION) {
+                chat.lock().enable();
+            }
+        }
+        "watch" | "unwatch" if chat.negotiated() => {
+            let watch = msg["t"] == "watch";
+            let Some(name) = msg.get("name").and_then(Value::as_str).and_then(chat_wire::parse_name) else {
+                if chat.first_rejection() {
+                    crate::diagnostic_warn!("[ws] ignored a watch frame with an invalid name");
+                }
+                return;
+            };
+            // Share clients only watch sessions their grant covers; leaving needs no check.
+            if watch && share.as_ref().is_some_and(|scope| !scope.covers_session(&ctx.app, name.session())) {
+                return;
+            }
+            match (watch, name) {
+                (true, WatchName::Session(sid)) => watch_session(ctx, &sid, outbound, listened, chat, event_ids),
+                (false, WatchName::Session(sid)) => {
+                    chat.lock().unwatch_session(&sid);
+                    if let Some(id) = chat.forwarders.remove(&sid) {
+                        ctx.app.unlisten(id);
+                    }
+                }
+                (true, WatchName::Task(sid, task)) => {
+                    let added = {
+                        let mut wire = chat.lock();
+                        if wire.watched_count() >= chat_wire::MAX_WATCHED_NAMES {
+                            drop(wire);
+                            if chat.first_rejection() {
+                                crate::diagnostic_warn!("[ws] ignored a watch beyond the per-connection limit");
+                            }
+                            return;
+                        }
+                        wire.watch_task(&sid, &task)
+                    };
+                    // The tree goes out with the next publish, which this schedules for the next flush.
+                    if added {
+                        ctx.app.chat().request_extras(&sid);
+                    }
+                }
+                (false, WatchName::Task(sid, task)) => {
+                    chat.lock().unwatch_task(&sid, &task);
+                }
+            }
+        }
+        "chat-resync" if chat.negotiated() => {
+            let sid = msg.get("sid").and_then(Value::as_str).unwrap_or("");
+            if !chat_wire::valid_id(sid) {
+                return;
+            }
+            // Under the codec lock, so the barrier lands after every frame encoded against the old bases
+            // and before any whole frame encoded after them.
+            let mut wire = chat.lock();
+            if wire.resync(sid) {
+                outbound.push_event_exact(&crate::agent::chat::engine::event_name(sid), json!({"type":"resync"}));
+            }
+        }
         _ => {}
     }
+}
+
+/// One connection's chat subscriptions.
+#[derive(Default)]
+struct ChatLinks {
+    /// The chat codec, shared with this connection's forwarders.
+    wire: Arc<Mutex<ChatWire>>,
+    /// sid -> forwarder of `chat://event/{sid}`.
+    forwarders: HashMap<String, ListenerId>,
+    /// An invalid or excess watch was already logged for this connection.
+    warned: bool,
+}
+
+impl ChatLinks {
+    fn lock(&self) -> std::sync::MutexGuard<'_, ChatWire> {
+        self.wire.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn negotiated(&self) -> bool {
+        self.lock().enabled()
+    }
+
+    /// Whether this is the first rejected watch of the connection; only that one is logged.
+    fn first_rejection(&mut self) -> bool {
+        !std::mem::replace(&mut self.warned, true)
+    }
+}
+
+/// Start forwarding one session's chat channel through the codec. A repeated watch is a no-op.
+fn watch_session(
+    ctx: &Ctx,
+    sid: &str,
+    outbound: &Outbound,
+    listened: &mut HashSet<String>,
+    chat: &mut ChatLinks,
+    event_ids: &mut Vec<ListenerId>,
+) {
+    let generation = {
+        let mut wire = chat.lock();
+        if wire.watched_count() >= chat_wire::MAX_WATCHED_NAMES {
+            drop(wire);
+            if chat.first_rejection() {
+                crate::diagnostic_warn!("[ws] ignored a watch beyond the per-connection limit");
+            }
+            return;
+        }
+        wire.watch_session(sid)
+    };
+    let Some(generation) = generation else { return };
+    // A forwarder registered before the client negotiated sends whole frames; the codec one replaces it.
+    if let Some(old) = chat.forwarders.remove(sid) {
+        ctx.app.unlisten(old);
+    }
+    chat.forwarders.insert(sid.to_string(), chat_forward(&ctx.app, sid, generation, chat.wire.clone(), outbound.clone()));
+    // Work state reaches the sidebar through the channel PTY sessions use, so a session that never spawns a
+    // PTY still needs it registered (once, until the connection closes, as before).
+    if listened.insert(sid.to_string()) {
+        event_ids.push(listen_forward(&ctx.app, &format!("pty://status/{sid}"), outbound.clone()));
+    }
+}
+
+/// Registers a session's chat forwarding through the codec: each event is encoded and queued under the codec
+/// lock, so patches leave in the order they were computed, and never coalesced. An event of a watch that has
+/// since ended (the bus may still be running this handler on another thread) is dropped.
+fn chat_forward(app: &AppCtx, sid: &str, generation: u64, wire: Arc<Mutex<ChatWire>>, outbound: Outbound) -> ListenerId {
+    let name = crate::agent::chat::engine::event_name(sid);
+    let sid = sid.to_string();
+    app.listen(&name.clone(), move |payload| {
+        let payload: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+        let mut wire = wire.lock().unwrap_or_else(|e| e.into_inner());
+        if !wire.is_current(&sid, generation) {
+            return;
+        }
+        if let Some(encoded) = wire.encode(&sid, payload) {
+            outbound.push_event_exact(&name, encoded);
+        }
+    })
 }
 
 /// Routes a command through the share policy when the connection belongs to a share tunnel, and through the
@@ -857,7 +1009,7 @@ mod tests {
         let outbound = Outbound::new("ws-test");
         let mut pty_subs = HashMap::new();
         let mut listened = HashSet::new();
-        let mut chat_listened = HashSet::new();
+        let mut chat = ChatLinks::default();
         let mut event_ids = Vec::new();
         let frame = json!({"t": "invoke", "id": 1, "cmd": cmd, "args": {}}).to_string();
         handle_text(
@@ -867,7 +1019,7 @@ mod tests {
             &outbound,
             &mut pty_subs,
             &mut listened,
-            &mut chat_listened,
+            &mut chat,
             &mut event_ids,
             None,
         );
@@ -955,5 +1107,379 @@ mod tests {
         assert_eq!(kinds[..marker].iter().filter(|c| **c == Class::PtyOutput).count(), 0, "stale output was dropped");
         assert!(kinds[marker + 1..].iter().all(|c| *c == Class::PtyOutput), "only the replay follows the marker");
         assert!(kinds.len() > marker + 1);
+    }
+    /// One simulated connection: the real frame handler, forwarders, codec and outbound queue.
+    struct TestConn {
+        outbound: Outbound,
+        pty_subs: HashMap<String, u64>,
+        listened: HashSet<String>,
+        chat: ChatLinks,
+        event_ids: Vec<ListenerId>,
+        share: Option<super::super::share_policy::ShareScope>,
+        sent: Arc<std::sync::Mutex<Vec<Message>>>,
+        writer: Option<tokio::task::JoinHandle<()>>,
+    }
+
+    impl TestConn {
+        fn new(id: &str) -> Self {
+            Self {
+                outbound: Outbound::new(id),
+                pty_subs: HashMap::new(),
+                listened: HashSet::new(),
+                chat: ChatLinks::default(),
+                event_ids: Vec::new(),
+                share: None,
+                sent: Arc::new(std::sync::Mutex::new(Vec::new())),
+                writer: None,
+            }
+        }
+
+        /// Run the real writer into a recording sink from now on, as a live socket drains the queue.
+        fn start_writer(&mut self) {
+            let sink = Box::pin(futures_util::sink::unfold(self.sent.clone(), |out, msg: Message| async move {
+                out.lock().unwrap().push(msg);
+                Ok::<_, ()>(out)
+            }));
+            self.writer = Some(tokio::spawn(outbound::run_writer(self.outbound.clone(), sink, None)));
+        }
+
+        /// A client that negotiated the codec and watches `names`.
+        fn negotiated(ctx: &Ctx, id: &str, names: &[&str]) -> Self {
+            let mut conn = Self::new(id);
+            conn.send(ctx, json!({"t":"caps","chat":chat_wire::PROTOCOL_VERSION}));
+            for name in names {
+                conn.send(ctx, json!({"t":"watch","name":name}));
+            }
+            conn
+        }
+
+        fn send(&mut self, ctx: &Ctx, frame: Value) {
+            handle_text(
+                ctx,
+                &frame.to_string(),
+                "ws-test",
+                &self.outbound,
+                &mut self.pty_subs,
+                &mut self.listened,
+                &mut self.chat,
+                &mut self.event_ids,
+                self.share.clone(),
+            );
+        }
+
+        fn queued_frames(&self) -> u64 {
+            self.outbound.take_stats()["queuedFrames"].as_u64().unwrap()
+        }
+
+        /// Close the queue and run the real writer into a recording sink. Returns the text frames sent and
+        /// the counters (`chatRows`, `chatExtras`, ...) the `ws_outbound` line would report.
+        async fn drain(mut self) -> (Vec<String>, Value) {
+            if self.writer.is_none() {
+                self.start_writer();
+            }
+            self.outbound.close();
+            self.writer.take().unwrap().await.unwrap();
+            let texts = self.sent
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|m| match m {
+                    Message::Text(t) => Some(t.clone()),
+                    _ => None,
+                })
+                .collect();
+            (texts, self.outbound.take_stats())
+        }
+    }
+
+    fn class(stats: &Value, name: &str, field: &str) -> u64 {
+        stats["classes"][name][field].as_u64().unwrap_or(0)
+    }
+
+    /// Chat event payloads of `sid` among the sent frames, in order.
+    fn chat_payloads(texts: &[String], sid: &str) -> Vec<Value> {
+        let name = crate::agent::chat::engine::event_name(sid);
+        texts
+            .iter()
+            .map(|t| serde_json::from_str::<Value>(t).unwrap())
+            .filter(|v| v["t"] == "event" && v["name"] == name.as_str())
+            .map(|v| v["payload"].clone())
+            .collect()
+    }
+
+    struct StreamRun {
+        negotiated: u64,
+        legacy: u64,
+        flushes: usize,
+    }
+
+    /// Stream an answer of `total` bytes through the real engine path to one negotiated and one legacy
+    /// connection, and check that the negotiated client decodes exactly the streamed text.
+    async fn stream_through_both(total: usize) -> StreamRun {
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        let mut negotiated = TestConn::negotiated(&ctx, "ws-new", &["chat://event/s"]);
+        let mut legacy = TestConn::new("ws-old");
+        legacy.send(&ctx, json!({"t":"invoke","id":1,"cmd":"chat_snapshot","args":{"sessionId":"s"}}));
+        // Both sockets drain while the answer streams, so the quadratic legacy backlog stays under its cap.
+        negotiated.start_writer();
+        legacy.start_writer();
+        let app = ctx.app.clone();
+        let (text, flushes) = tokio::task::spawn_blocking(move || {
+            crate::agent::chat::engine::test_support::stream_answer(&app, "s", total, 64, 8)
+        })
+        .await
+        .unwrap();
+        let (texts, stats) = negotiated.drain().await;
+        let mut decoder = chat_wire::reference::Decoder::default();
+        let mut last = String::new();
+        for payload in chat_payloads(&texts, "s") {
+            let decoded = decoder.decode(&payload).expect("every frame decodes");
+            if let Some(row) = decoded["rows"].as_array().and_then(|rows| rows.last()) {
+                last = row["text"].as_str().unwrap().to_string();
+            }
+        }
+        assert_eq!(last, text, "the decoded answer is the streamed answer");
+        let (_, legacy_stats) = legacy.drain().await;
+        StreamRun {
+            negotiated: class(&stats, "chatRows", "bytes"),
+            legacy: class(&legacy_stats, "chatRows", "bytes"),
+            flushes,
+        }
+    }
+
+    /// AC1: streaming an answer costs O(N) chatRows bytes on a negotiated connection, while the legacy
+    /// connection in the same run keeps the quadratic cost.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ac1_a_streamed_answer_costs_linear_bytes_on_a_negotiated_connection() {
+        let n = 64 * 1024;
+        let small = stream_through_both(n).await;
+        assert!(
+            small.negotiated as usize <= 2 * n + 256 * small.flushes,
+            "negotiated: {} bytes for {n} bytes in {} flushes",
+            small.negotiated,
+            small.flushes
+        );
+        assert!(small.legacy >= 10 * small.negotiated, "legacy {} vs negotiated {}", small.legacy, small.negotiated);
+        let large = stream_through_both(2 * n).await;
+        eprintln!(
+            "chatRows bytes: N={n}: negotiated {} legacy {} ({} flushes); N={}: negotiated {} legacy {} ({} flushes)",
+            small.negotiated, small.legacy, small.flushes, 2 * n, large.negotiated, large.legacy, large.flushes
+        );
+        assert!(
+            large.negotiated as f64 <= 2.2 * small.negotiated as f64,
+            "doubling N took {} -> {} bytes",
+            small.negotiated,
+            large.negotiated
+        );
+        assert!(
+            large.legacy as f64 >= 3.5 * small.legacy as f64,
+            "the legacy path stays quadratic: {} -> {}",
+            small.legacy,
+            large.legacy
+        );
+    }
+
+    fn workflow_extras(workflows: usize, agents: usize) -> Value {
+        let tasks = crate::agent::chat::engine::test_support::workflow_tasks(workflows, agents);
+        json!({"type":"extras","extras":{"fastMode":false,"backgroundTasks":tasks}})
+    }
+
+    /// AC2: after unwatch, rows and extras of that session produce no frame at all on the connection.
+    #[tokio::test]
+    async fn ac2_an_unwatched_session_costs_nothing() {
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        let mut conn = TestConn::negotiated(&ctx, "ws-2", &["chat://event/S"]);
+        let name = crate::agent::chat::engine::event_name("S");
+        let row = |i: usize| json!({"type":"rows","epoch":1,"revision":i,"positions":{},"rows":[{"kind":"assistant","id":"r","text":"x".repeat(i + 1),"streaming":true}]});
+        ctx.app.emit(&name, row(0));
+        assert_eq!(conn.queued_frames(), 1, "a watched session is forwarded");
+        conn.send(&ctx, json!({"t":"unwatch","name":"chat://event/S"}));
+        assert!(conn.chat.forwarders.is_empty(), "the forwarder is gone");
+        let extras = workflow_extras(6, 20);
+        for i in 0..100 {
+            ctx.app.emit(&name, row(i + 1));
+            ctx.app.emit(&name, extras.clone());
+        }
+        assert_eq!(conn.queued_frames(), 1, "nothing was queued after unwatch");
+        let (_, stats) = conn.drain().await;
+        assert_eq!(class(&stats, "chatRows", "frames"), 1, "only the frame from before the unwatch");
+        assert_eq!(class(&stats, "chatExtras", "frames"), 0);
+    }
+
+    /// AC3/AC4: six running workflows travel as a compact status, clock-only and identical publishes send
+    /// nothing, a token change is a small patch, and opening one task sends its tree once, then changes.
+    #[tokio::test]
+    async fn ac3_background_workflows_travel_as_a_compact_status_with_details_on_demand() {
+        use crate::agent::chat::engine::test_support::{flush_extras, publish_extras, workflow_tasks};
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        ctx.app.chat().insert_test_process("S");
+        ctx.app.chat().update_test_extras("S", |extras| extras.background_tasks = workflow_tasks(6, 20));
+        let mut conn = TestConn::negotiated(&ctx, "ws-3", &["chat://event/S"]);
+        publish_extras(&ctx.app, "S");
+        assert_eq!(conn.queued_frames(), 1);
+        for _ in 0..200 {
+            publish_extras(&ctx.app, "S");
+        }
+        assert_eq!(conn.queued_frames(), 1, "clock-only or identical publishes send nothing");
+        ctx.app.chat().update_test_extras("S", |extras| {
+            extras.background_tasks[2].usage = Some(json!({"total_tokens": 6100, "tool_uses": 13}));
+        });
+        publish_extras(&ctx.app, "S");
+        assert_eq!(conn.queued_frames(), 2);
+
+        conn.send(&ctx, json!({"t":"watch","name":"chat://task/S/task3"}));
+        assert!(flush_extras(&ctx.app, "S"), "the watch scheduled a publish for the next flush");
+        assert_eq!(conn.queued_frames(), 3, "exactly one frame with the tree");
+        ctx.app.chat().update_test_extras("S", |extras| {
+            let tree = extras.background_tasks[3].workflow_progress.as_mut().unwrap();
+            tree[6]["tokens"] = json!(99_999);
+        });
+        publish_extras(&ctx.app, "S");
+
+        let (texts, _) = conn.drain().await;
+        let frames: Vec<&String> = texts.iter().filter(|t| t.contains("\"type\":\"extras\"")).collect();
+        assert_eq!(frames.len(), 4);
+        let payloads = chat_payloads(&texts, "S");
+        let first = &payloads[0]["extras"]["backgroundTasks"];
+        assert_eq!(first.as_array().unwrap().len(), 6);
+        for task in first.as_array().unwrap() {
+            assert!(task.get("workflow_progress").is_none());
+            assert_eq!(task["detail_omitted"], true);
+        }
+        assert!(!frames[0].contains("workflow_progress"));
+        assert!(frames[1].len() <= 512, "a token change cost {} bytes: {}", frames[1].len(), frames[1]);
+        let detail = &payloads[2]["patch"]["arr"]["backgroundTasks"]["items"]["task3"];
+        assert_eq!(detail["set"]["workflow_progress"].as_array().unwrap().len(), 21, "task3's whole tree");
+        assert_eq!(detail["del"], json!(["detail_omitted"]));
+        let items = payloads[2]["patch"]["arr"]["backgroundTasks"]["items"].as_object().unwrap();
+        for (task, patch) in items {
+            assert!(task == "task3" || chat_wire::is_clock_only(patch), "{task}: {patch}");
+        }
+        let tree = &payloads[3]["patch"]["arr"]["backgroundTasks"]["items"]["task3"]["arr"]["workflow_progress"];
+        assert!(tree.get("order").is_none());
+        for (entry, patch) in tree["items"].as_object().unwrap() {
+            if entry == "w3a5" {
+                assert_eq!(patch["set"]["tokens"], 99_999);
+            } else {
+                assert!(chat_wire::is_clock_only(patch), "{entry} changed: {patch}");
+            }
+        }
+        let mut decoder = chat_wire::reference::Decoder::default();
+        let decoded: Vec<Value> = payloads.iter().map(|p| decoder.decode(p).unwrap()).collect();
+        assert_eq!(decoded[3]["extras"]["backgroundTasks"][3]["workflow_progress"][6]["tokens"], 99_999);
+    }
+
+    /// AC4: an extras message republished unchanged produces no frame.
+    #[tokio::test]
+    async fn ac4_an_unchanged_republish_is_silent() {
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        let conn = TestConn::negotiated(&ctx, "ws-4", &["chat://event/S"]);
+        let name = crate::agent::chat::engine::event_name("S");
+        let extras = workflow_extras(6, 20);
+        for _ in 0..50 {
+            ctx.app.emit(&name, extras.clone());
+        }
+        let (_, stats) = conn.drain().await;
+        assert_eq!(class(&stats, "chatExtras", "frames"), 1);
+    }
+
+    /// AC6: a connection that never negotiates receives byte-identical frames to the baseline forwarding,
+    /// extras coalescing included; a negotiated one that does not watch receives no chat events at all.
+    #[tokio::test]
+    async fn ac6_an_unnegotiated_connection_gets_the_baseline_frames() {
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        let mut legacy = TestConn::new("ws-old");
+        legacy.send(&ctx, json!({"t":"invoke","id":1,"cmd":"chat_start","args":{"sessionId":"s"}}));
+        let mut quiet = TestConn::negotiated(&ctx, "ws-new", &[]);
+        quiet.send(&ctx, json!({"t":"invoke","id":2,"cmd":"chat_snapshot","args":{"sessionId":"s"}}));
+        let baseline = Outbound::new("ws-baseline");
+        let name = crate::agent::chat::engine::event_name("s");
+        let sequence = vec![
+            json!({"type":"rows","epoch":1,"revision":1,"positions":{"r":0},"rows":[{"kind":"assistant","id":"r","text":"a","streaming":true}]}),
+            json!({"type":"rows","epoch":1,"revision":2,"positions":{"r":0},"rows":[{"kind":"assistant","id":"r","text":"ab","streaming":true}]}),
+            workflow_extras(2, 3),
+            workflow_extras(3, 3),
+            json!({"type":"queued","items":[],"revision":1,"epoch":1}),
+            json!({"type":"reset","epoch":2,"revision":1,"rows":[]}),
+            workflow_extras(1, 1),
+            workflow_extras(1, 2),
+        ];
+        for payload in &sequence {
+            ctx.app.emit(&name, payload.clone());
+            // The baseline path: listen_forward parses the bus payload and queues it with push_event.
+            baseline.push_event(&name, serde_json::from_str(&payload.to_string()).unwrap());
+        }
+        let chat = |texts: Vec<String>| -> Vec<String> { texts.into_iter().filter(|t| t.contains("chat://event/s")).collect() };
+        let listened = legacy.listened.clone();
+        let (legacy_texts, legacy_stats) = legacy.drain().await;
+        let (baseline_texts, baseline_stats) = TestConn { outbound: baseline, ..TestConn::new("unused") }.drain().await;
+        assert_eq!(chat(legacy_texts), chat(baseline_texts));
+        assert_eq!(legacy_stats["coalescedCount"], baseline_stats["coalescedCount"], "extras coalesce as before");
+        assert!(legacy_stats["coalescedCount"].as_u64().unwrap() >= 2);
+        let (quiet_texts, _) = quiet.drain().await;
+        assert!(chat(quiet_texts).is_empty(), "a negotiated client registers through watch only");
+        assert!(listened.contains("s"), "legacy registration still forwards the session's work state");
+    }
+
+    /// A share client cannot watch a session outside its grant, and invalid names are ignored.
+    #[tokio::test]
+    async fn watch_is_scoped_to_the_share_grant_and_validated() {
+        let ctx = test_ctx(ServeMode::ShareTunnel);
+        let mut conn = TestConn::new("ws-share");
+        conn.share = Some(super::super::share_policy::ShareScope {
+            scope: "session".into(),
+            target_id: Some("granted".into()),
+            push_authority: None,
+        });
+        conn.send(&ctx, json!({"t":"caps","chat":1}));
+        conn.send(&ctx, json!({"t":"watch","name":"chat://event/other"}));
+        conn.send(&ctx, json!({"t":"watch","name":"chat://task/other/t1"}));
+        conn.send(&ctx, json!({"t":"watch","name":"chat://event/../etc"}));
+        assert!(conn.chat.forwarders.is_empty());
+        assert_eq!(conn.chat.lock().watched_count(), 0);
+        ctx.app.emit(&crate::agent::chat::engine::event_name("other"), json!({"type":"queued","items":[]}));
+        assert_eq!(conn.queued_frames(), 0);
+        let (texts, _) = conn.drain().await;
+        assert!(texts.is_empty());
+    }
+
+    /// A connection holds at most MAX_WATCHED_NAMES watches; caps with an unknown version negotiates nothing.
+    #[test]
+    fn watches_are_bounded_per_connection() {
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        let mut conn = TestConn::new("ws-many");
+        conn.send(&ctx, json!({"t":"caps","chat":99}));
+        conn.send(&ctx, json!({"t":"watch","name":"chat://event/a"}));
+        assert!(!conn.chat.negotiated() && conn.chat.forwarders.is_empty(), "an unknown codec version is ignored");
+        conn.send(&ctx, json!({"t":"caps","chat":1}));
+        for i in 0..chat_wire::MAX_WATCHED_NAMES + 20 {
+            conn.send(&ctx, json!({"t":"watch","name":format!("chat://event/s{i}")}));
+            conn.send(&ctx, json!({"t":"watch","name":format!("chat://task/s{i}/t")}));
+        }
+        assert_eq!(conn.chat.lock().watched_count(), chat_wire::MAX_WATCHED_NAMES);
+        for (_, id) in conn.chat.forwarders.drain() {
+            ctx.app.unlisten(id);
+        }
+    }
+
+    /// AC7 (server side): a resync request queues the barrier behind every frame encoded before it, and
+    /// everything after it is whole again.
+    #[tokio::test]
+    async fn a_resync_barrier_follows_earlier_frames_and_precedes_whole_ones() {
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        let mut conn = TestConn::negotiated(&ctx, "ws-7", &["chat://event/S"]);
+        let name = crate::agent::chat::engine::event_name("S");
+        let row = |text: &str| json!({"type":"rows","epoch":1,"revision":1,"positions":{},"rows":[{"kind":"assistant","id":"r","text":text,"streaming":true}]});
+        ctx.app.emit(&name, row("a"));
+        ctx.app.emit(&name, row("ab"));
+        conn.send(&ctx, json!({"t":"chat-resync","sid":"S"}));
+        conn.send(&ctx, json!({"t":"chat-resync","sid":"not watched"}));
+        ctx.app.emit(&name, row("abc"));
+        let (texts, _) = conn.drain().await;
+        let payloads = chat_payloads(&texts, "S");
+        assert_eq!(payloads.len(), 4);
+        assert!(payloads[1]["rows"][0].get("patch").is_some());
+        assert_eq!(payloads[2], json!({"type":"resync"}));
+        assert_eq!(payloads[3]["rows"][0]["text"], "abc", "after the barrier the row is whole");
     }
 }
