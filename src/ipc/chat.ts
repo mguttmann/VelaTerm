@@ -909,10 +909,13 @@ export function onChatEvent(
 /**
  * Ask for one background task's workflow tree while the returned function is not called. Over a remote
  * connection the server otherwise sends tasks as a compact status (`detail_omitted`); on the desktop the
- * tree always arrives and this listener simply never fires.
+ * tree always arrives and this listener simply never fires. `onRejected` runs when the server refuses the
+ * request (too many watched names, or an id it does not accept), so the tree will not arrive.
  */
-export function onChatTaskDetail(sessionId: string, taskId: string): Promise<UnlistenFn> {
-  return listen(`chat://task/${sessionId}/${taskId}`, () => {});
+export function onChatTaskDetail(sessionId: string, taskId: string, onRejected?: () => void): Promise<UnlistenFn> {
+  return listen<{ type?: string } | null>(`chat://task/${sessionId}/${taskId}`, event => {
+    if (event?.type === "watchRejected") onRejected?.();
+  });
 }
 
 const toolContexts = new WeakMap<object, { sessionId: string; epoch?: number }>();

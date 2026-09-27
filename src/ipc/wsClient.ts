@@ -18,6 +18,8 @@
 //!   { t:"event", name, payload }          Forwarded Tauri events (pty://status|exit, spawn://, notify://)
 //!   { t:"pty-resync", sid }               The server dropped this terminal's backlog on a slow link;
 //!                                         reset it and reattach (replay), as after a reconnect
+//!   { t:"watch-rejected", name }          The server will not forward this watched name (limit, invalid
+//!                                         or out-of-scope name); its listeners get `{type:"watchRejected"}`
 //!   Binary frame                            PTY output routed to subscribers by sid
 //!
 //! Chat channels (see `chatWire.ts` and `src-tauri/src/web/chat_wire.rs`): after `caps` the server forwards a
@@ -399,10 +401,19 @@ class WsClient {
     return nacl.box.open.after(ct, nonce, this.sharedKey);
   }
 
+  /**
+   * Whether application frames may be sent: the socket is open and, in pairing mode, the E2EE handshake has
+   * finished. An open pairing socket still negotiating its key would send them in plaintext, which the server
+   * treats as a failed handshake and closes the connection. The single gate for `ensure()` and `send()`.
+   */
+  private isOnline(): boolean {
+    return !!this.ws && this.ws.readyState === WebSocket.OPEN && (!this.pairing || this.e2eeReady);
+  }
+
   /** Ensure the socket is connected; concurrent callers share one connection promise. */
   private ensure(): Promise<void> {
     if(this.shareRevoked)return Promise.reject(new TransportError(t("transport.wsDisconnected")));
-    if (this.ws && this.ws.readyState === WebSocket.OPEN) return Promise.resolve();
+    if (this.isOnline()) return Promise.resolve();
     if (this.connectPromise) return this.connectPromise;
     // Pairing mode must wait for its second-factor password. An empty-password handshake would be
     // rejected, causing endless reconnects and a false "wrong password" message before the user
@@ -779,6 +790,10 @@ class WsClient {
       }
       const subs = this.events.get(name);
       if (subs) for (const cb of subs) cb(payload);
+    } else if (msg.t === "watch-rejected") {
+      // A watch the server did not honour would otherwise look like a quiet channel forever. Tell the
+      // listeners of that name, which decide how to recover; a later reconnect watches it again.
+      this.dispatchLocalEvent(String(msg.name ?? ""), { type: "watchRejected" });
     } else if (msg.t === "pty-resync") {
       // The server dropped this terminal's unsent output because the link could not keep up, and
       // stopped streaming it. Everything before the marker has arrived; replace it with a replay.
@@ -826,10 +841,12 @@ class WsClient {
 
   private send(obj: unknown) {
     const text = JSON.stringify(obj);
-    // The socket is owned from construction, so it can be CONNECTING here; sending then throws
-    // InvalidStateError. Encrypt all outbound text after E2EE is ready — handshake hello/auth
-    // frames bypass this path.
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    // The socket is owned from construction, so it can be CONNECTING here, where sending throws
+    // InvalidStateError, or open but still in its E2EE handshake. Drop the frame until the connection is
+    // online: goOnline mirrors every watched chat name again, and a new connection holds no server-side
+    // state that an unwatch or detach from before would have to clear. Encrypt all outbound text after
+    // E2EE is ready; handshake hello/auth frames bypass this path.
+    if (!this.ws || !this.isOnline()) return;
     this.ws.send(this.e2eeReady ? this.encryptText(text) : text);
   }
 

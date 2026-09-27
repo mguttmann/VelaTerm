@@ -82,8 +82,9 @@ Conversation traffic depends on what a window shows. A browser, mobile or Electr
 - A streamed answer sends the newly written text rather than the whole message again, so `chatRows` grows with the length of the answer.
 - Background tasks arrive as a compact status in `chatExtras`. A task's workflow tree is sent only while that task's tab is open: once in full, then only its changes. An update that changes nothing, or only a task's elapsed time, is not sent.
 - If a window notices that it missed an update, it asks for that conversation again and reloads it once; nothing is shown twice.
+- If the backend declines to follow a task tab, for example because the window already follows too many conversations and tabs or the session lies outside what an account share includes, the tab says that its workflow details cannot be shown over this connection instead of loading indefinitely. A workflow tree that still arrives replaces that note.
 
-Windows running an older version, for example a browser tab opened before the backend was updated, keep receiving full updates as before. Windows of the desktop app itself (not the Electron shell) are not affected.
+Windows running an older version, for example a browser tab opened before the backend was updated, keep receiving full updates as before. Windows of the desktop app itself (not the Electron shell) keep receiving live conversation updates in the previous format and do not report which conversations they show. When they open or reload a conversation, however, they send the same request as a remote window, so the backend also answers them with compact task statuses and leaves out the parts that have not changed.
 
 ## What is recorded
 

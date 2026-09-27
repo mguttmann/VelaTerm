@@ -97,6 +97,8 @@ struct SessionWire {
     rows: BTreeMap<String, Value>,
     /// The compacted `extras` object as last sent.
     extras: Option<Value>,
+    /// `extras` frames sent for this watch, so a caller can tell whether one went out since it last looked.
+    extras_sent: u64,
 }
 
 /// The codec state of one connection.
@@ -125,6 +127,15 @@ impl ChatWire {
         self.sessions.len() + self.details.len()
     }
 
+    /// Whether one more watch of `name` would exceed [`MAX_WATCHED_NAMES`]; repeating a held watch never does.
+    pub(crate) fn over_limit(&self, name: &WatchName) -> bool {
+        let held = match name {
+            WatchName::Session(sid) => self.sessions.contains_key(sid),
+            WatchName::Task(sid, task) => self.details.contains(&(sid.clone(), task.clone())),
+        };
+        !held && self.watched_count() >= MAX_WATCHED_NAMES
+    }
+
     /// Start a watch. Returns its generation, or None when the session is already watched.
     pub(crate) fn watch_session(&mut self, sid: &str) -> Option<u64> {
         if self.sessions.contains_key(sid) {
@@ -147,6 +158,11 @@ impl ChatWire {
 
     pub(crate) fn unwatch_task(&mut self, sid: &str, task: &str) -> bool {
         self.details.remove(&(sid.to_string(), task.to_string()))
+    }
+
+    /// `extras` frames encoded for the current watch of `sid`, or None when it is not watched.
+    pub(crate) fn extras_sent(&self, sid: &str) -> Option<u64> {
+        self.sessions.get(sid).map(|session| session.extras_sent)
     }
 
     /// Whether a forwarder registered for `generation` still serves the current watch of `sid`.
@@ -224,6 +240,7 @@ impl SessionWire {
             _ => {
                 payload["extras"] = compacted.clone();
                 self.extras = Some(compacted);
+                self.extras_sent += 1;
                 return Some(payload);
             }
         };
@@ -231,6 +248,7 @@ impl SessionWire {
             return None;
         }
         self.extras = Some(compacted);
+        self.extras_sent += 1;
         payload["patch"] = patch;
         Some(payload)
     }

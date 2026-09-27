@@ -7,14 +7,17 @@
 //!   / {t:"chat-resync",sid}
 //! - Server: {t:"hello",source:"ws-N"} is the **first frame** after connection and identifies the source so
 //!   the frontend can compare itself with Resized/SpawnResult.owner; followed by {t:"reply",id,ok,result|error},
-//!   {t:"event",name,payload}, {t:"ping"} every 30 seconds, {t:"pty-resync",sid}, and binary PTY frames.
+//!   {t:"event",name,payload}, {t:"ping"} every 30 seconds, {t:"pty-resync",sid}, {t:"watch-rejected",name},
+//!   and binary PTY frames.
 //!
 //! Chat channels: a client that sends `caps` with the chat codec version it decodes (see `chat_wire.rs`)
 //! mirrors its local listeners with `watch`/`unwatch` of `chat://event/{sid}` and `chat://task/{sid}/{taskId}`.
 //! The server then forwards a session's chat events exactly while it is watched, encoded as patches against
 //! what this connection was sent last, and sends a task's workflow tree only while that task is watched. A
-//! decoder that finds a gap sends `chat-resync`; the server forgets its bases and queues the barrier event
-//! `{type:"resync"}` on that session's channel, after which everything is whole again. A client that never
+//! watch the server refuses (invalid name, outside a share grant, over the per-connection limit) is answered
+//! with `watch-rejected`, so the view waiting for it can recover. A decoder that finds a gap sends
+//! `chat-resync`; the server forgets its bases and queues the barrier event `{type:"resync"}` on that session's
+//! channel, after which everything is whole again. A client that never
 //! sends `caps` keeps the previous behaviour: chat events of every session it started or read through
 //! `chat_start`/`chat_snapshot`, byte-identical to the engine's frames, until the connection closes.
 //!
@@ -385,7 +388,7 @@ async fn handle_socket(
     for id in event_ids {
         ctx.app.unlisten(id);
     }
-    for (_, id) in chat.forwarders.drain() {
+    for (_, id) in chat.forwarders.drain().chain(chat.status.drain()) {
         ctx.app.unlisten(id);
     }
     // Deregister before detaching so the host stops showing this client the moment the socket is gone,
@@ -543,7 +546,9 @@ fn handle_text(
                     let covered = share
                         .as_ref()
                         .is_none_or(|scope| scope.covers_session(&ctx.app, sid));
-                    if covered && !chat.forwarders.contains_key(sid) {
+                    // Bounded like watches: nothing ever unregisters these before the connection closes.
+                    let room = chat.forwarders.len() < chat_wire::MAX_WATCHED_NAMES;
+                    if covered && room && !chat.forwarders.contains_key(sid) {
                         chat.forwarders.insert(sid.to_string(), listen_forward(
                             &ctx.app,
                             &crate::agent::chat::engine::event_name(sid),
@@ -625,11 +630,12 @@ fn handle_text(
             // snapshot during spawn, and a new agent emits its marker there as well, so later registration would
             // miss them. A listener left after failed spawn is harmless and is removed when the connection closes.
             if listened.insert(sid.clone()) {
-                event_ids.push(listen_forward(
-                    &ctx.app,
-                    &format!("pty://status/{sid}"),
-                    outbound.clone(),
-                ));
+                // A chat watch of this session may already forward its status; the connection owns it now.
+                let status = chat
+                    .status
+                    .remove(&sid)
+                    .unwrap_or_else(|| listen_forward(&ctx.app, &format!("pty://status/{sid}"), outbound.clone()));
+                event_ids.push(status);
                 event_ids.push(listen_forward(
                     &ctx.app,
                     &format!("pty://exit/{sid}"),
@@ -670,39 +676,55 @@ fn handle_text(
         }
         "watch" | "unwatch" if chat.negotiated() => {
             let watch = msg["t"] == "watch";
-            let Some(name) = msg.get("name").and_then(Value::as_str).and_then(chat_wire::parse_name) else {
+            let raw = msg.get("name").and_then(Value::as_str).unwrap_or("");
+            let Some(name) = chat_wire::parse_name(raw) else {
                 if chat.first_rejection() {
                     crate::diagnostic_warn!("[ws] ignored a watch frame with an invalid name");
+                }
+                if watch {
+                    reject_watch(outbound, raw);
                 }
                 return;
             };
             // Share clients only watch sessions their grant covers; leaving needs no check.
             if watch && share.as_ref().is_some_and(|scope| !scope.covers_session(&ctx.app, name.session())) {
+                reject_watch(outbound, raw);
+                return;
+            }
+            if watch && chat.lock().over_limit(&name) {
+                if chat.first_rejection() {
+                    crate::diagnostic_warn!("[ws] ignored a watch beyond the per-connection limit");
+                }
+                reject_watch(outbound, raw);
                 return;
             }
             match (watch, name) {
-                (true, WatchName::Session(sid)) => watch_session(ctx, &sid, outbound, listened, chat, event_ids),
+                (true, WatchName::Session(sid)) => watch_session(ctx, &sid, outbound, listened, chat),
                 (false, WatchName::Session(sid)) => {
                     chat.lock().unwatch_session(&sid);
-                    if let Some(id) = chat.forwarders.remove(&sid) {
+                    for id in [chat.forwarders.remove(&sid), chat.status.remove(&sid)].into_iter().flatten() {
                         ctx.app.unlisten(id);
                     }
                 }
                 (true, WatchName::Task(sid, task)) => {
-                    let added = {
+                    let sent = {
                         let mut wire = chat.lock();
-                        if wire.watched_count() >= chat_wire::MAX_WATCHED_NAMES {
-                            drop(wire);
-                            if chat.first_rejection() {
-                                crate::diagnostic_warn!("[ws] ignored a watch beyond the per-connection limit");
-                            }
+                        if !wire.watch_task(&sid, &task) {
                             return;
                         }
-                        wire.watch_task(&sid, &task)
+                        wire.extras_sent(&sid)
                     };
-                    // The tree goes out with the next publish, which this schedules for the next flush.
-                    if added {
-                        ctx.app.chat().request_extras(&sid);
+                    // Send the tree to this connection alone. Publishing through the engine would reach every
+                    // listener of the session, so a watch/unwatch loop could make one client flood the others.
+                    // Read outside the codec lock: the engine emits while holding its own locks, and its
+                    // forwarders take the codec lock. An extras frame encoded in between already carried the
+                    // tree, and this older read must not overwrite it.
+                    let Some(extras) = ctx.app.chat().published_extras(&sid) else { return };
+                    let mut wire = chat.lock();
+                    if sent.is_some() && wire.extras_sent(&sid) == sent {
+                        if let Some(encoded) = wire.encode(&sid, json!({"type":"extras","extras":extras})) {
+                            outbound.push_event_exact(&crate::agent::chat::engine::event_name(&sid), encoded);
+                        }
                     }
                 }
                 (false, WatchName::Task(sid, task)) => {
@@ -733,6 +755,8 @@ struct ChatLinks {
     wire: Arc<Mutex<ChatWire>>,
     /// sid -> forwarder of `chat://event/{sid}`.
     forwarders: HashMap<String, ListenerId>,
+    /// sid -> forwarder of `pty://status/{sid}` that a watch registered; it ends with the watch.
+    status: HashMap<String, ListenerId>,
     /// An invalid or excess watch was already logged for this connection.
     warned: bool,
 }
@@ -752,36 +776,29 @@ impl ChatLinks {
     }
 }
 
-/// Start forwarding one session's chat channel through the codec. A repeated watch is a no-op.
-fn watch_session(
-    ctx: &Ctx,
-    sid: &str,
-    outbound: &Outbound,
-    listened: &mut HashSet<String>,
-    chat: &mut ChatLinks,
-    event_ids: &mut Vec<ListenerId>,
-) {
-    let generation = {
-        let mut wire = chat.lock();
-        if wire.watched_count() >= chat_wire::MAX_WATCHED_NAMES {
-            drop(wire);
-            if chat.first_rejection() {
-                crate::diagnostic_warn!("[ws] ignored a watch beyond the per-connection limit");
-            }
-            return;
-        }
-        wire.watch_session(sid)
-    };
-    let Some(generation) = generation else { return };
+/// Tell the client a watch will not be served (invalid name, outside a share grant, or over the limit), so a
+/// view waiting for that name can recover instead of waiting forever. Names too long to be valid are not
+/// echoed back.
+fn reject_watch(outbound: &Outbound, name: &str) {
+    if name.len() <= chat_wire::MAX_NAME_LEN {
+        outbound.push_control(Message::Text(json!({"t":"watch-rejected","name":name}).to_string()), Class::Reply);
+    }
+}
+
+/// Start forwarding one session's chat channel through the codec. A repeated watch is a no-op; the caller has
+/// checked the per-connection limit.
+fn watch_session(ctx: &Ctx, sid: &str, outbound: &Outbound, listened: &HashSet<String>, chat: &mut ChatLinks) {
+    let Some(generation) = chat.lock().watch_session(sid) else { return };
     // A forwarder registered before the client negotiated sends whole frames; the codec one replaces it.
     if let Some(old) = chat.forwarders.remove(sid) {
         ctx.app.unlisten(old);
     }
     chat.forwarders.insert(sid.to_string(), chat_forward(&ctx.app, sid, generation, chat.wire.clone(), outbound.clone()));
-    // Work state reaches the sidebar through the channel PTY sessions use, so a session that never spawns a
-    // PTY still needs it registered (once, until the connection closes, as before).
-    if listened.insert(sid.to_string()) {
-        event_ids.push(listen_forward(&ctx.app, &format!("pty://status/{sid}"), outbound.clone()));
+    // Work state reaches the conversation view through the channel PTY sessions use, so a session that never
+    // spawns a PTY still needs it registered. It belongs to this watch and ends with it, so a watch/unwatch
+    // loop cannot pile up listeners; a session whose terminal this connection attached already has one.
+    if !listened.contains(sid) && !chat.status.contains_key(sid) {
+        chat.status.insert(sid.to_string(), listen_forward(&ctx.app, &format!("pty://status/{sid}"), outbound.clone()));
     }
 }
 
@@ -1328,8 +1345,8 @@ mod tests {
         assert_eq!(conn.queued_frames(), 2);
 
         conn.send(&ctx, json!({"t":"watch","name":"chat://task/S/task3"}));
-        assert!(flush_extras(&ctx.app, "S"), "the watch scheduled a publish for the next flush");
         assert_eq!(conn.queued_frames(), 3, "exactly one frame with the tree");
+        assert!(!flush_extras(&ctx.app, "S"), "the watch published nothing to the session's other listeners");
         ctx.app.chat().update_test_extras("S", |extras| {
             let tree = extras.background_tasks[3].workflow_progress.as_mut().unwrap();
             tree[6]["tokens"] = json!(99_999);
@@ -1421,6 +1438,96 @@ mod tests {
         assert!(listened.contains("s"), "legacy registration still forwards the session's work state");
     }
 
+    /// A task watch sends the tree to the watching connection alone: a watch/unwatch loop costs the session's
+    /// other listeners (desktop IPC, legacy and negotiated connections) nothing.
+    #[tokio::test]
+    async fn a_task_watch_loop_cannot_flood_other_listeners() {
+        use crate::agent::chat::engine::test_support::{flush_extras, workflow_tasks};
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        ctx.app.chat().insert_test_process("S");
+        ctx.app.chat().update_test_extras("S", |extras| extras.background_tasks = workflow_tasks(2, 3));
+        let bus = Arc::new(std::sync::Mutex::new(0));
+        let sink = bus.clone();
+        let desktop = ctx.app.listen(&crate::agent::chat::engine::event_name("S"), move |_| *sink.lock().unwrap() += 1);
+        let other = TestConn::negotiated(&ctx, "ws-other", &["chat://event/S"]);
+        let mut conn = TestConn::negotiated(&ctx, "ws-loop", &["chat://event/S"]);
+        for _ in 0..50 {
+            conn.send(&ctx, json!({"t":"watch","name":"chat://task/S/task1"}));
+            assert!(!flush_extras(&ctx.app, "S"), "nothing is left for the engine to publish");
+            conn.send(&ctx, json!({"t":"unwatch","name":"chat://task/S/task1"}));
+        }
+        ctx.app.unlisten(desktop);
+        assert_eq!(*bus.lock().unwrap(), 0, "no event reached the session's bus");
+        assert_eq!(other.queued_frames(), 0);
+        let (texts, _) = conn.drain().await;
+        let payloads = chat_payloads(&texts, "S");
+        // The first watch sends the tree; repeating it changes nothing this connection was sent, so it costs nothing.
+        assert_eq!(payloads.len(), 1, "only the watching connection receives the tree, once");
+        let mut decoder = chat_wire::reference::Decoder::default();
+        let first = decoder.decode(&payloads[0]).unwrap();
+        assert_eq!(first["extras"]["backgroundTasks"][1]["workflow_progress"].as_array().unwrap().len(), 4, "task1's tree");
+        assert_eq!(first["extras"]["backgroundTasks"][0]["detail_omitted"], true);
+    }
+
+    /// A watch the server refuses is answered, so the client can stop waiting for it; accepted and repeated
+    /// ones are not, and names too long to be valid are not echoed (share refusals: see the grant test).
+    #[tokio::test]
+    async fn a_refused_watch_is_answered() {
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        let mut conn = TestConn::negotiated(&ctx, "ws-refused", &["chat://event/s0"]);
+        conn.send(&ctx, json!({"t":"watch","name":"chat://task/s0/bad id"}));
+        conn.send(&ctx, json!({"t":"unwatch","name":"chat://task/s0/bad id"}));
+        conn.send(&ctx, json!({"t":"watch","name":format!("chat://task/s0/{}", "x".repeat(chat_wire::MAX_NAME_LEN))}));
+        for i in 1..chat_wire::MAX_WATCHED_NAMES {
+            conn.send(&ctx, json!({"t":"watch","name":format!("chat://task/s0/t{i}")}));
+        }
+        conn.send(&ctx, json!({"t":"watch","name":"chat://task/s0/over"}));
+        conn.send(&ctx, json!({"t":"watch","name":"chat://event/over"}));
+        conn.send(&ctx, json!({"t":"watch","name":"chat://event/s0"}));
+        for (_, id) in conn.chat.forwarders.drain().chain(conn.chat.status.drain()) {
+            ctx.app.unlisten(id);
+        }
+        let (texts, _) = conn.drain().await;
+        let rejected: Vec<Value> = texts
+            .iter()
+            .map(|t| serde_json::from_str::<Value>(t).unwrap())
+            .filter(|v| v["t"] == "watch-rejected")
+            .map(|v| v["name"].clone())
+            .collect();
+        assert_eq!(rejected, vec![json!("chat://task/s0/bad id"), json!("chat://task/s0/over"), json!("chat://event/over")]);
+    }
+
+    /// The status forwarder a watch registers ends with the watch, so a watch/unwatch loop over ever new
+    /// sessions keeps the connection's bus listeners bounded; a terminal attach takes it over.
+    #[test]
+    fn watch_status_forwarders_end_with_the_watch() {
+        let ctx = test_ctx(ServeMode::LoopbackHttp);
+        let mut conn = TestConn::negotiated(&ctx, "ws-status", &[]);
+        for i in 0..1000 {
+            conn.send(&ctx, json!({"t":"watch","name":format!("chat://event/s{i}")}));
+            conn.send(&ctx, json!({"t":"unwatch","name":format!("chat://event/s{i}")}));
+        }
+        assert!(conn.chat.status.is_empty() && conn.chat.forwarders.is_empty() && conn.event_ids.is_empty());
+        ctx.app.emit("pty://status/s7", json!({"kind":"agent"}));
+        assert_eq!(conn.queued_frames(), 0, "an ended watch forwards no status");
+
+        conn.send(&ctx, json!({"t":"watch","name":"chat://event/live"}));
+        assert_eq!(conn.chat.status.len(), 1);
+        ctx.app.emit("pty://status/live", json!({"kind":"agent"}));
+        assert_eq!(conn.queued_frames(), 1, "a watched session forwards its status once");
+        let before = conn.event_ids.len();
+        conn.send(&ctx, json!({"t":"pty-spawn","id":1,"sid":"live","args":{},"attachOnly":true}));
+        assert!(conn.chat.status.is_empty(), "the attach owns the status forwarder now");
+        assert_eq!(conn.event_ids.len(), before + 3, "status (taken over), exit and killed");
+        conn.send(&ctx, json!({"t":"unwatch","name":"chat://event/live"}));
+        let queued = conn.queued_frames();
+        ctx.app.emit("pty://status/live", json!({"kind":"agent"}));
+        assert_eq!(conn.queued_frames(), queued + 1, "the attached terminal keeps its status, exactly once");
+        for id in conn.event_ids.drain(..) {
+            ctx.app.unlisten(id);
+        }
+    }
+
     /// A share client cannot watch a session outside its grant, and invalid names are ignored.
     #[tokio::test]
     async fn watch_is_scoped_to_the_share_grant_and_validated() {
@@ -1438,9 +1545,10 @@ mod tests {
         assert!(conn.chat.forwarders.is_empty());
         assert_eq!(conn.chat.lock().watched_count(), 0);
         ctx.app.emit(&crate::agent::chat::engine::event_name("other"), json!({"type":"queued","items":[]}));
-        assert_eq!(conn.queued_frames(), 0);
+        assert_eq!(conn.queued_frames(), 3, "only the three refusals");
         let (texts, _) = conn.drain().await;
-        assert!(texts.is_empty());
+        let refused = ["chat://event/other", "chat://task/other/t1", "chat://event/../etc"];
+        assert_eq!(texts, refused.map(|name| json!({"t":"watch-rejected","name":name}).to_string()));
     }
 
     /// A connection holds at most MAX_WATCHED_NAMES watches; caps with an unknown version negotiates nothing.

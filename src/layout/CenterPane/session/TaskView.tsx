@@ -100,6 +100,8 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
   const [error, setError] = useState<string | null>(null);
   const [offline, setOffline] = useState(false);
   const [syncFailed, setSyncFailed] = useState(false);
+  /** The server refused to send this task's workflow tree, so a compact status will not fill in. */
+  const [detailRejected, setDetailRejected] = useState(false);
   const [retry, setRetry] = useState(0);
   const [sampledAt, setSampledAt] = useState(() => performance.now());
   const [now, setNow] = useState(() => performance.now());
@@ -110,6 +112,7 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
   useEffect(() => {
     if (!watching) return;
     let disposed = false;
+    setDetailRejected(false);
     let eventVersion = 0;
     let requestVersion = 0;
     let unlisten: (() => void) | undefined;
@@ -163,7 +166,7 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
       if (disposed) fn();
       else { unlisten = fn; void synchronize(); }
     }).catch(() => { if (!disposed) setSyncFailed(true); });
-    void onChatTaskDetail(tab.sessionId, tab.taskId).then((fn) => {
+    void onChatTaskDetail(tab.sessionId, tab.taskId, () => { if (!disposed) setDetailRejected(true); }).then((fn) => {
       if (disposed) fn();
       else unlistenDetail = fn;
     }).catch(() => {});
@@ -262,7 +265,7 @@ export function TaskView({ tab, hidden }: { tab: TaskTab; hidden: boolean }) {
         <section className="sv-task-section">
           <h3>{t("chat.tasks.phases")}</h3>
           {agents.length === 0 && phases.length === 0 ? (
-            <div className="sv-task-empty">{t(task?.detail_omitted ? "common.loading" : "chat.tasks.noProgress")}</div>
+            <div className="sv-task-empty">{t(!task?.detail_omitted ? "chat.tasks.noProgress" : detailRejected ? "chat.tasks.detailUnavailable" : "common.loading")}</div>
           ) : (
             <>
               {phases.map((phase) => (

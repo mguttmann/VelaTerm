@@ -24,16 +24,27 @@ export class ChatWireGap extends Error {
 
 const isObj = (value: unknown): value is Obj => typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** An own property only. Keys come from agent-controlled data, so `__proto__` or `toString` must never resolve
+ *  through the prototype chain; JSON.parse and the Rust reference decoder only know own keys. */
+const has = (obj: Obj, key: string): boolean => Object.prototype.hasOwnProperty.call(obj, key);
+const own = (obj: Obj, key: string): unknown => (has(obj, key) ? obj[key] : undefined);
+
+/** Write `key` as an own data property, as JSON.parse does. A plain assignment of `__proto__` would replace the
+ *  object's prototype instead of creating the key. */
+function put(obj: Obj, key: string, value: unknown): void {
+  Object.defineProperty(obj, key, { value, writable: true, enumerable: true, configurable: true });
+}
+
 function applyArray(base: unknown, patch: Obj): unknown[] {
   if (!Array.isArray(base)) throw new ChatWireGap("list patch without a list base");
   const key = String(patch.key);
   const bases = new Map<string, unknown>();
-  for (const item of base) if (isObj(item) && typeof item[key] === "string") bases.set(item[key] as string, item);
+  for (const item of base) if (isObj(item) && typeof own(item, key) === "string") bases.set(item[key] as string, item);
   const order = Array.isArray(patch.order) ? (patch.order as string[]) : [...bases.keys()];
   const items = isObj(patch.items) ? patch.items : {};
   return order.map(id => {
-    const item = items[id];
-    if (isObj(item) && "new" in item) return item.new;
+    const item = own(items, id);
+    if (isObj(item) && has(item, "new")) return item.new;
     if (!bases.has(id)) throw new ChatWireGap(`list entry ${id} without a base`);
     return isObj(item) ? applyObject(bases.get(id), item) : bases.get(id);
   });
@@ -44,23 +55,23 @@ export function applyObject(base: unknown, patch: Obj): Obj {
   if (!isObj(base)) throw new ChatWireGap("object patch without an object base");
   const out: Obj = { ...base };
   if (Array.isArray(patch.del)) for (const key of patch.del) delete out[String(key)];
-  if (isObj(patch.set)) Object.assign(out, patch.set);
+  if (isObj(patch.set)) for (const [key, value] of Object.entries(patch.set)) put(out, key, value);
   if (isObj(patch.app)) {
     const lengths = isObj(patch.len) ? patch.len : {};
     for (const [key, suffix] of Object.entries(patch.app)) {
-      const current = out[key];
-      if (typeof current !== "string" || current.length !== lengths[key]) {
+      const current = own(out, key);
+      if (typeof current !== "string" || current.length !== own(lengths, key)) {
         throw new ChatWireGap(`append base of ${key} does not match`);
       }
-      out[key] = current + String(suffix);
+      put(out, key, current + String(suffix));
     }
   }
   if (isObj(patch.sub)) for (const [key, inner] of Object.entries(patch.sub)) {
-    if (!(key in out)) throw new ChatWireGap(`nested patch of ${key} without a base`);
-    out[key] = applyObject(out[key], inner as Obj);
+    if (!has(out, key)) throw new ChatWireGap(`nested patch of ${key} without a base`);
+    put(out, key, applyObject(out[key], inner as Obj));
   }
   if (isObj(patch.arr)) for (const [key, list] of Object.entries(patch.arr)) {
-    out[key] = applyArray(out[key], list as Obj);
+    put(out, key, applyArray(own(out, key), list as Obj));
   }
   return out;
 }

@@ -43,6 +43,26 @@ describe("chat wire decoder", () => {
     expect(() => applyObject({ list: [{ id: "a" }] }, { arr: { list: { key: "id", order: ["a", "b"] } } })).toThrow(ChatWireGap);
   });
 
+  // Keys are agent data. The legacy path (JSON.parse of a full frame) and the Rust reference decoder only know own
+  // keys, so `__proto__` must stay a key and never become the decoded object's prototype.
+  it("keeps agent-controlled keys like __proto__ as own keys, as JSON.parse does", () => {
+    const base = JSON.parse('{"input":{"description":"list"}}');
+    const set = applyObject(base, JSON.parse('{"sub":{"input":{"set":{"__proto__":{"command":"rm -rf ~"}}}}}'));
+    const input = set.input as Record<string, unknown>;
+    expect(Object.getPrototypeOf(input)).toBe(Object.prototype);
+    expect(input.command).toBeUndefined();
+    expect(Object.keys(input)).toEqual(["description", "__proto__"]);
+    expect(JSON.stringify(set)).toBe('{"input":{"description":"list","__proto__":{"command":"rm -rf ~"}}}');
+    const own = applyObject(JSON.parse('{"__proto__":"ab"}'), JSON.parse('{"app":{"__proto__":"c"},"len":{"__proto__":2}}'));
+    expect(JSON.stringify(own)).toBe('{"__proto__":"abc"}');
+    // A nested or list patch of a key the base does not own has no base, whatever the prototype chain offers.
+    expect(() => applyObject({}, JSON.parse('{"sub":{"__proto__":{"set":{"polluted":true}}}}'))).toThrow(ChatWireGap);
+    expect(() => applyObject({}, JSON.parse('{"sub":{"toString":{"set":{"x":1}}}}'))).toThrow(ChatWireGap);
+    expect(() => applyObject({}, JSON.parse('{"arr":{"__proto__":{"key":"id","order":[]}}}'))).toThrow(ChatWireGap);
+    expect(() => applyObject({ list: [] }, JSON.parse('{"arr":{"list":{"key":"id","order":["toString"]}}}'))).toThrow(ChatWireGap);
+    expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+  });
+
   it("passes the full frames of an older server through unchanged", () => {
     const decoder = new ChatWireDecoder();
     const rows = { type: "rows", epoch: 1, revision: 2, rows: [{ kind: "user", id: "u", text: "hi" }] };

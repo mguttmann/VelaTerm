@@ -2639,12 +2639,13 @@ impl ChatManager {
         }
     }
 
-    /// Publish this session's `extras` with the next flush, for a client that just asked for task details.
-    /// The existing pending flag bounds it to one publish per flush interval.
-    pub fn request_extras(&self, session_id: &str) {
-        if let Ok(proc) = self.get(session_id) {
-            mark_extras(&proc);
-        }
+    /// This session's `extras` as a publish would send it, for the one connection that just asked for a task's
+    /// workflow tree; publishing instead would reach every listener. Read-only: unlike most lookups it never
+    /// restarts an agent, and it takes no lock that is held while events are emitted into a caller's lock.
+    pub fn published_extras(&self, session_id: &str) -> Option<Value> {
+        let proc = self.sessions.lock().unwrap().get(session_id).cloned()?;
+        let extras = proc.extras.lock().unwrap().published();
+        serde_json::to_value(extras).ok()
     }
 
     /// Resolve one attachment reference from a slim snapshot.
@@ -10221,24 +10222,39 @@ pub(crate) mod test_support {
         assert_eq!(serde_json::to_value(&compacted).unwrap(), from_codec);
     }
 
-    /// Opening a task tab marks `extras` for the next sweep, which then publishes exactly once.
+    /// Opening a task tab reads the published `extras` without publishing anything to other listeners.
     #[test]
-    fn request_extras_publishes_with_the_next_flush() {
-        let dir = std::env::temp_dir().join(format!("vlx-request-extras-{}", uuid::Uuid::new_v4()));
+    fn published_extras_reads_without_publishing() {
+        let dir = std::env::temp_dir().join(format!("vlx-published-extras-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let db = crate::db::Db::open(&dir.join("t.db")).unwrap();
         let app = AppCtx::Headless(Arc::new(crate::host::HeadlessHost::new(dir.clone(), db)));
         app.chat().insert_test_process("s");
+        app.chat().update_test_extras("s", |extras| extras.background_tasks = workflow_tasks(2, 3));
         let seen = Arc::new(Mutex::new(0));
         let sink = seen.clone();
         app.listen(&event_name("s"), move |_| *sink.lock().unwrap() += 1);
-        assert!(!flush_extras(&app, "s"), "nothing is pending yet");
-        app.chat().request_extras("s");
-        app.chat().request_extras("s");
-        app.chat().request_extras("missing");
-        assert!(flush_extras(&app, "s"));
-        assert!(!flush_extras(&app, "s"), "one publish per request burst");
-        assert_eq!(*seen.lock().unwrap(), 1);
+        // Running tasks get their elapsed time stamped at publish time, so two reads may straddle a millisecond.
+        fn without_elapsed(mut value: Value) -> Value {
+            fn strip(value: &mut Value) {
+                match value {
+                    Value::Object(map) => {
+                        map.remove("elapsed_ms");
+                        map.remove("elapsedMs");
+                        map.values_mut().for_each(strip);
+                    }
+                    Value::Array(items) => items.iter_mut().for_each(strip),
+                    _ => {}
+                }
+            }
+            strip(&mut value);
+            value
+        }
+        let published = serde_json::to_value(app.chat().get("s").unwrap().extras.lock().unwrap().published()).unwrap();
+        assert_eq!(app.chat().published_extras("s").map(without_elapsed), Some(without_elapsed(published)));
+        assert_eq!(app.chat().published_extras("missing"), None);
+        assert!(!flush_extras(&app, "s"), "nothing was marked for a publish");
+        assert_eq!(*seen.lock().unwrap(), 0);
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

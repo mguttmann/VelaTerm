@@ -256,6 +256,24 @@ it("shows loading, not an empty tree, while the server has left the tree out", a
   expect(screen.getByText("This task reports no per-agent progress.")).toBeTruthy();
 });
 
+it("says the tree is unavailable instead of loading forever when the server rejects the detail watch", async () => {
+  let detailCallback: ((event: unknown) => void) | undefined;
+  vi.mocked(listen).mockImplementation((name, callback) => {
+    if (name.startsWith("chat://event/")) eventCallback = callback as (event: ChatEvent) => void;
+    if (name.startsWith("chat://task/")) detailCallback = callback as (event: unknown) => void;
+    return Promise.resolve(unlisten as unknown as () => void);
+  });
+  await mount();
+  extras([{ ...seed, detail_omitted: true }]);
+  expect(screen.getByText("Loading…")).toBeTruthy();
+  act(() => detailCallback?.({ type: "watchRejected" }));
+  expect(screen.queryByText("Loading…")).toBeNull();
+  expect(screen.getByText("The workflow details cannot be shown over this connection right now.")).toBeTruthy();
+  // A tree that does arrive (an older server, or the desktop) still wins.
+  extras([{ ...seed, workflow_progress: progress }]);
+  expect(screen.getByText("Reply GAMMA")).toBeTruthy();
+});
+
 it("reads a fresh snapshot at a resync barrier", async () => {
   await mount();
   snapshotTasks = [{ ...seed, description: "After resync" }];

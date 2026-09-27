@@ -433,3 +433,99 @@ describe("wsClient chat channels", () => {
     expect(sent()).toEqual([]);
   });
 });
+
+describe("wsClient E2EE online gate", () => {
+  const realWebSocket = globalThis.WebSocket;
+  let socket: FakeWebSocket;
+  // Stand-ins for the cipher: this suite pins which frames are sent and whether they are encrypted, not the
+  // cryptography, which the handshake tests above drive for real.
+  type Cipher = { encryptText: (text: string) => string; decryptText: (b64: string) => string | null };
+  const cipher = wsClient as unknown as Cipher;
+  const real: Cipher = { encryptText: cipher.encryptText, decryptText: cipher.decryptText };
+
+  /** A pairing connection whose socket is open but whose handshake has only sent `e2ee_hello`. */
+  function openHandshaking() {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    cipher.encryptText = (text) => `enc:${text}`;
+    cipher.decryptText = (b64) => (b64.startsWith("enc:") ? b64.slice(4) : null);
+    chatInternals.pairing = { token: "device-token", serverPub: nacl.box.keyPair().publicKey };
+    chatInternals.password = "pw";
+    void chatInternals.ensure();
+    socket = created[created.length - 1];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    socket.sent = [];
+  }
+
+  /** Every frame sent so far: encrypted ones decoded, plaintext ones flagged. */
+  const frames = () => socket.sent.map((raw) => {
+    const text = String(raw);
+    return text.startsWith("enc:") ? (JSON.parse(text.slice(4)) as Record<string, unknown>) : { plaintext: text };
+  });
+
+  afterEach(() => {
+    cipher.encryptText = real.encryptText;
+    cipher.decryptText = real.decryptText;
+    clearInterval(chatInternals.idleTimer);
+    chatInternals.idleTimer = undefined;
+    globalThis.WebSocket = realWebSocket;
+    created = [];
+    chatInternals.ws = null;
+    chatInternals.password = "";
+    chatInternals.connectPromise = null;
+    chatInternals.clientKeys = null;
+    chatInternals.events.clear();
+  });
+
+  it("sends no application frame while the E2EE handshake runs, and everything encrypted once online", async () => {
+    openHandshaking();
+    // What the UI does at any moment, a phone unlock included: a view listens, one stops listening, a
+    // terminal is left, a command is invoked. None of it may reach the socket before the handshake ends.
+    let listening = false;
+    const listened = wsClient.listen("chat://task/s/t1", () => {}).then(() => { listening = true; });
+    (wsClient as unknown as { send: (frame: unknown) => void }).send({ t: "unwatch", name: "chat://event/old" });
+    wsClient.teardownPty("pty-1");
+    const invoked = wsClient.invoke("list_tree").catch(() => {});
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(socket.sent, "nothing leaves during the handshake").toEqual([]);
+    expect(listening, "listen waits for the handshake").toBe(false);
+
+    socket.onmessage?.({ data: JSON.stringify({ type: "e2ee_ready" }) });
+    expect(frames().map((frame) => frame.type)).toEqual(["e2ee_auth"]);
+    socket.onmessage?.({ data: `enc:${JSON.stringify({ type: "e2ee_authenticated" })}` });
+    await listened;
+    await vi.waitFor(() => expect(frames().some((frame) => frame.t === "invoke")).toBe(true));
+    const sent = frames();
+    expect(sent.some((frame) => "plaintext" in frame), "every frame is encrypted").toBe(false);
+    expect(sent.map((frame) => frame.t ?? frame.type)).toEqual(["e2ee_auth", "caps", "watch", "invoke"]);
+    expect(sent[2]).toEqual({ t: "watch", name: "chat://task/s/t1" });
+    // The pending invoke is answered by nobody here; fail it so the promise settles.
+    chatInternals.pending.forEach((p) => p.reject(new Error("done")));
+    await invoked;
+  });
+});
+
+describe("wsClient watch rejection", () => {
+  const realWebSocket = globalThis.WebSocket;
+
+  afterEach(() => {
+    globalThis.WebSocket = realWebSocket;
+    chatInternals.ws = null;
+    chatInternals.events.clear();
+  });
+
+  it("hands a rejected watch to the listeners of exactly that name", async () => {
+    globalThis.WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+    const socket = new FakeWebSocket("ws://test/ws");
+    socket.readyState = FakeWebSocket.OPEN;
+    chatInternals.ws = socket;
+    const task: unknown[] = [];
+    const other: unknown[] = [];
+    await wsClient.listen("chat://task/s/t1", (payload) => task.push(payload));
+    await wsClient.listen("chat://task/s/t2", (payload) => other.push(payload));
+    internals.onMessage({ data: JSON.stringify({ t: "watch-rejected", name: "chat://task/s/t1" }) });
+    expect(task).toEqual([{ type: "watchRejected" }]);
+    expect(other).toEqual([]);
+  });
+});
