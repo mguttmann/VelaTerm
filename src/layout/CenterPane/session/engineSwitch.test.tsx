@@ -126,6 +126,18 @@ describe("handing a command to the terminal view", () => {
     expect(setMode).toHaveBeenCalledWith("s", "tui");
   });
 
+  it("does not let a held Enter answer the question it opened", async () => {
+    useTermStore.setState({ runtimes: { s: { status: "running", agent: "claude", agentState: "working" } as never } });
+    render(<Harness />);
+    act(() => switchTo("tui", { prefill: "/status" }));
+    const confirm = await screen.findByRole("button", { name: "Switch" });
+    fireEvent.keyDown(confirm, { key: "Enter", repeat: true });
+    expect(setMode).not.toHaveBeenCalled();
+    fireEvent.keyDown(confirm, { key: "Enter" });
+    await act(async () => {});
+    expect(setMode).toHaveBeenCalledWith("s", "tui");
+  });
+
   it("leaves nothing behind when a working agent's question is cancelled", async () => {
     useTermStore.setState({ runtimes: { s: { status: "running", agent: "claude", agentState: "working" } as never } });
     render(<Harness />);

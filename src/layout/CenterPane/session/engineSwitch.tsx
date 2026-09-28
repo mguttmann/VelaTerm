@@ -130,6 +130,11 @@ export function useEngineSwitch(session: Session) {
         <div
           className="quit-card"
           onKeyDown={(e) => {
+            // A held Enter that opened this question from the composer must not also answer it.
+            if (e.repeat) {
+              e.preventDefault();
+              return;
+            }
             if (e.key === "Escape") cancel();
             if (e.key === "Enter") apply(asking);
           }}

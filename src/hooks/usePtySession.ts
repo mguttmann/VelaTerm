@@ -856,8 +856,10 @@ export function usePtySession(session: Session, cwd?: string, hidden?: boolean) 
           await ptyWrite(session.id, `${autoCmd}\r`);
         }
         // Typed right behind the launch line, the text waits in the terminal's input until the agent reads
-        // it into its prompt. It carries no Enter: the person decides whether it runs.
-        if (prefill) await ptyWrite(session.id, prefill);
+        // it into its prompt. It carries no Enter: the person decides whether it runs. Only a client that wrote
+        // the launch line itself types it: after an attach, another client's launch line may still be on its
+        // way, and the text must never end up in front of it on the shell's command line.
+        if (prefill && autoCmd) await ptyWrite(session.id, prefill);
       } catch (err) {
         clearStarting();
         setRuntime(session.id, { status: "error" });

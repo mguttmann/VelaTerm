@@ -130,7 +130,7 @@ With an agent session open, the Info tab of the right panel shows:
 
 ## 10. Other behavior
 
-- **Automatic names**: a session you did not name takes its name from your first message.
+- **Automatic names**: a session you did not name takes its name from your first message; a slash command such as `/init` does not count.
 - **Theme changes**: switching between light and dark updates running Claude sessions in the terminal view without a restart.
 - **Vela Skills**: Settings ▸ General ▸ "Vela Skills" installs skills for Claude Code and Codex that start child sessions, open files, and read or message other sessions; see [Session Commands](session-commands_20260925_1012.md).
 - **Windows**: Claude Code and Codex are fully supported (they run in PowerShell); the other agents are provided on a best-effort basis.
