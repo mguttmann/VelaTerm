@@ -1816,6 +1816,7 @@ const de: typeof en = {
   "chat.command.tagTitle.terminal": "Öffnet die Terminalansicht dieser Sitzung mit dem eingetippten Befehl. Drücke dort Enter, um ihn auszuführen. Auf der Festplatte gespeicherte Änderungen gelten auch in der Konversationsansicht, Änderungen nur für diese Terminalsitzung nicht.",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd} ändert nur die Terminaloberfläche des Agenten und hat in der Konversationsansicht keine Wirkung.`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd} ist in der Konversationsansicht nicht verfügbar: VelaTerm verwaltet diese Sitzung selbst.`,
+  "chat.command.switching": (cmd: string) => `${cmd} wird in der Terminal-Ansicht geöffnet…`,
   "chat.command.notHere": (cmd: string) => `${cmd} ist für diese Sitzung hier nicht verfügbar.`,
   "chat.command.noArguments": (cmd: string) => `${cmd} nimmt in der Konversationsansicht keine Argumente an.`,
   "chat.command.noImages": (cmd: string) => `${cmd} kann keine Bilder aufnehmen. Entferne sie und versuche es erneut.`,

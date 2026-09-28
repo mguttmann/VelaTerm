@@ -31,31 +31,57 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("handing a command to the terminal view", () => {
-  it("leaves the command for the terminal, without its line ends", async () => {
+  it("leaves the command for the terminal, without its line ends, and reports the switch as done", async () => {
+    const onDone = vi.fn();
     render(<Harness />);
-    await act(async () => switchTo("tui", { prefill: "/status\r\n" }));
+    await act(async () => switchTo("tui", { prefill: "/status\r\n", onDone }));
     expect(setMode).toHaveBeenCalledWith("s", "tui");
     expect(useTermStore.getState().runtimes.s?.agentPrefill).toBe("/status");
+    expect(onDone).toHaveBeenCalledTimes(1);
+  });
+
+  it("ignores a second switch while one is running, even for a working agent", async () => {
+    setMode.mockImplementation(() => new Promise(() => {}));
+    render(<Harness />);
+    await act(async () => switchTo("tui", { prefill: "/status" }));
+    useTermStore.setState({ runtimes: { ...useTermStore.getState().runtimes, s: { ...useTermStore.getState().runtimes.s, status: "running", agent: "claude", agentState: "working" } as never } });
+    await act(async () => switchTo("tui", { prefill: "/status" }));
+    expect(setMode).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("button", { name: "Switch" })).toBeNull();
+  });
+
+  it("reports nothing as done while the server has not answered", async () => {
+    setMode.mockImplementation(() => new Promise(() => {}));
+    const onDone = vi.fn();
+    const onFail = vi.fn();
+    render(<Harness />);
+    await act(async () => switchTo("tui", { prefill: "/status", onDone, onFail }));
+    expect(onDone).not.toHaveBeenCalled();
+    expect(onFail).not.toHaveBeenCalled();
   });
 
   it("leaves nothing behind when the switch fails, and tells the caller", async () => {
     setMode.mockImplementation(() => Promise.reject(new Error("no")));
     const onStart = vi.fn();
+    const onDone = vi.fn();
     const onFail = vi.fn();
     render(<Harness />);
-    await act(async () => switchTo("tui", { prefill: "/status", onStart, onFail }));
+    await act(async () => switchTo("tui", { prefill: "/status", onStart, onDone, onFail }));
     expect(useTermStore.getState().runtimes.s?.agentPrefill).toBeUndefined();
     expect(onStart).toHaveBeenCalledTimes(1);
     expect(onFail).toHaveBeenCalledTimes(1);
+    expect(onDone).not.toHaveBeenCalled();
   });
 
   it("keeps the command for the terminal when the answer was lost but the server switched", async () => {
     setMode.mockImplementation(() => Promise.reject(new Error("connection closed")));
     serverEngine = "tui";
+    const onDone = vi.fn();
     const onFail = vi.fn();
     render(<Harness />);
-    await act(async () => switchTo("tui", { prefill: "/add-dir ../lib", onFail }));
+    await act(async () => switchTo("tui", { prefill: "/add-dir ../lib", onDone, onFail }));
     expect(loadTree).toHaveBeenCalled();
+    expect(onDone).toHaveBeenCalledTimes(1);
     expect(useTermStore.getState().runtimes.s?.agentPrefill).toBe("/add-dir ../lib");
     // Nothing failed from the user's point of view: no draft comes back and no error shows.
     expect(onFail).not.toHaveBeenCalled();
@@ -65,10 +91,12 @@ describe("handing a command to the terminal view", () => {
   it("keeps both the command and the draft while the outcome cannot be read, then settles", async () => {
     setMode.mockImplementation(() => Promise.reject(new Error("connection closed")));
     serverEngine = null;
+    const onDone = vi.fn();
     const onFail = vi.fn();
     render(<Harness />);
-    await act(async () => switchTo("tui", { prefill: "/add-dir ../lib", onFail }));
+    await act(async () => switchTo("tui", { prefill: "/add-dir ../lib", onDone, onFail }));
     expect(onFail).toHaveBeenCalledTimes(1);
+    expect(onDone).not.toHaveBeenCalled();
     expect(useTermStore.getState().runtimes.s?.agentPrefill).toBe("/add-dir ../lib");
     // The next tree (after a reconnect) still shows the conversation view: the command is dropped.
     act(() => useTermStore.setState({ sessions: [{ ...session, engine: "chat" }] }));

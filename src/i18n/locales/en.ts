@@ -1816,6 +1816,7 @@ const en = {
   "chat.command.tagTitle.terminal": "Opens this session's terminal view with the command typed in. Press Enter there to run it. Changes saved to disk carry back to the conversation view; changes that only last for that terminal session do not.",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd} only changes the agent's terminal interface and has no effect in the conversation view.`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd} is not available in the conversation view: VelaTerm manages this session itself.`,
+  "chat.command.switching": (cmd: string) => `Opening ${cmd} in the terminal view…`,
   "chat.command.notHere": (cmd: string) => `${cmd} is not available for this session here.`,
   "chat.command.noArguments": (cmd: string) => `${cmd} takes no arguments in the conversation view.`,
   "chat.command.noImages": (cmd: string) => `${cmd} cannot take images. Remove them and try again.`,

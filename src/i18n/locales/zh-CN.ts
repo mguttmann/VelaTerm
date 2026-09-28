@@ -1761,6 +1761,7 @@ const zhCN: typeof en = {
   "chat.command.tagTitle.terminal": "打开此会话的终端视图，并已输入该命令。在那里按 Enter 即可运行。保存到磁盘的更改会带回对话视图；仅在该终端会话中有效的更改不会。",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd} 只改变智能体的终端界面，在对话视图中没有效果。`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd} 在对话视图中不可用：此会话由 VelaTerm 自行管理。`,
+  "chat.command.switching": (cmd: string) => `正在终端视图中打开 ${cmd}…`,
   "chat.command.notHere": (cmd: string) => `${cmd} 在这里不适用于此会话。`,
   "chat.command.noArguments": (cmd: string) => `${cmd} 在对话视图中不接受参数。`,
   "chat.command.noImages": (cmd: string) => `${cmd} 不能附带图片。请移除图片后重试。`,

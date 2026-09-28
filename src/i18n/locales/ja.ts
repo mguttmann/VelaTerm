@@ -1812,6 +1812,7 @@ const ja: typeof en = {
   "chat.command.tagTitle.terminal": "このセッションのターミナルビューを開き、コマンドを入力した状態にします。実行するにはそこで Enter を押してください。ディスクに保存された変更は会話ビューにも反映されますが、そのターミナルセッション限りの変更は反映されません。",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd} はエージェントのターミナル表示を変えるだけで、会話ビューでは効果がありません。`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd} は会話ビューでは使えません。このセッションは VelaTerm が管理しています。`,
+  "chat.command.switching": (cmd: string) => `${cmd} をターミナル表示で開いています…`,
   "chat.command.notHere": (cmd: string) => `${cmd} はここではこのセッションに使えません。`,
   "chat.command.noArguments": (cmd: string) => `${cmd} は会話ビューでは引数を受け付けません。`,
   "chat.command.noImages": (cmd: string) => `${cmd} には画像を添付できません。画像を外してもう一度お試しください。`,

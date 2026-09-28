@@ -1772,6 +1772,7 @@ const vi: typeof en = {
   "chat.command.tagTitle.terminal": "Mở chế độ xem terminal của phiên này với lệnh đã được gõ sẵn. Nhấn Enter ở đó để chạy. Các thay đổi đã lưu xuống đĩa sẽ có hiệu lực trong chế độ xem hội thoại; các thay đổi chỉ tồn tại trong phiên terminal đó thì không.",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd} chỉ thay đổi giao diện terminal của tác tử và không có tác dụng trong chế độ xem hội thoại.`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd} không khả dụng trong chế độ xem hội thoại: VelaTerm tự quản lý phiên này.`,
+  "chat.command.switching": (cmd: string) => `Đang mở ${cmd} trong chế độ xem terminal…`,
   "chat.command.notHere": (cmd: string) => `${cmd} không khả dụng cho phiên này ở đây.`,
   "chat.command.noArguments": (cmd: string) => `${cmd} không nhận đối số trong chế độ xem hội thoại.`,
   "chat.command.noImages": (cmd: string) => `${cmd} không nhận hình ảnh. Hãy gỡ chúng và thử lại.`,

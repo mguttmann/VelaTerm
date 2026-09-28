@@ -1356,10 +1356,17 @@ export function ChatPane({
           refuse(t("chat.command.notHere", cmd));
           return;
         }
-        // Typed into the agent's own prompt in the terminal view, never submitted there. The draft leaves
-        // the composer only when the switch really begins: a cancelled question leaves it untouched, and a
-        // failed switch puts it back unless something new was typed meanwhile.
-        switchTo("tui", { prefill: text, onStart: taken, onFail: giveBack });
+        // Typed into the agent's own prompt in the terminal view, never submitted there. The draft stays in
+        // the composer until the server has switched, so a slow, lost or failed answer never costs it, and it
+        // leaves then only if it is still the command that was handed over; a line says a switch is running.
+        const switching = t("chat.command.switching", cmd);
+        const dropNote = () => setAttachNote((note) => (note === switching ? null : note));
+        switchTo("tui", {
+          prefill: text,
+          onStart: () => { setError(null); setAttachNote(switching); },
+          onDone: () => { if (draftNow.current === previousDraft) taken(); else dropNote(); },
+          onFail: dropNote,
+        });
         return;
       }
       if (entry.treatment === "picker") {

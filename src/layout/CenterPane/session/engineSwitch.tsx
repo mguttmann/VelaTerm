@@ -18,7 +18,9 @@ export interface SwitchOptions {
   prefill?: string;
   /** Called once the switch really begins, after any question was answered with yes. */
   onStart?: () => void;
-  /** Called when a begun switch fails, so the caller can put back what `onStart` took. */
+  /** Called once the server has switched, also when only a fresh read of the tree shows that it did. */
+  onDone?: () => void;
+  /** Called when a begun switch fails or its outcome cannot be read. */
   onFail?: () => void;
 }
 
@@ -62,7 +64,7 @@ export function useEngineSwitch(session: Session) {
     setAsking(null);
     setFailure(null);
     const store = useTermStore.getState();
-    const { prefill, onStart, onFail } = pending.current;
+    const { prefill, onStart, onDone, onFail } = pending.current;
     pending.current = {};
     const text = engine === "tui" && prefill ? sanitizePrefill(prefill) : "";
     // Set before the switch, so the terminal finds it when it spawns; cleared again if the switch fails.
@@ -70,11 +72,14 @@ export function useEngineSwitch(session: Session) {
     onStart?.();
     void store
       .setSessionEngineMode(session.id, engine)
-      .catch(async (error) => {
+      .then(() => { onDone?.(); }, async (error) => {
         // A failed request does not prove a failed switch: a connection that drops after the server
         // committed loses the answer, not the switch. Only a fresh read of the tree decides what to undo.
         const now = await engineOnServer(session.id);
-        if (now === engine) return;
+        if (now === engine) {
+          onDone?.();
+          return;
+        }
         if (now === undefined) {
           // Unknown: keep the prefill for a terminal that may still open, and give the draft back for a
           // conversation that may stay. The next tree read settles which one survives.
@@ -100,6 +105,8 @@ export function useEngineSwitch(session: Session) {
 
   /** Move to `engine`; see `SwitchOptions`. A cancelled question calls none of the callbacks. */
   const switchTo = (engine: SessionEngine, opts?: SwitchOptions) => {
+    // One switch at a time: a second request while one is running would ask a question it cannot answer.
+    if (switching.current) return;
     pending.current = opts ?? {};
     if (status === "working") setAsking(engine);
     else apply(engine);

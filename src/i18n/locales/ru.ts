@@ -1829,6 +1829,7 @@ const ru: typeof en = {
   "chat.command.tagTitle.terminal": "Открывает терминальный вид этой сессии с набранной командой. Нажмите там Enter, чтобы выполнить её. Изменения, сохранённые на диске, действуют и в виде беседы; изменения только для этой терминальной сессии не переносятся.",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd} меняет только терминальный интерфейс агента и не действует в виде беседы.`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd} недоступна в виде беседы: VelaTerm сам управляет этой сессией.`,
+  "chat.command.switching": (cmd: string) => `Открываем ${cmd} в режиме терминала…`,
   "chat.command.notHere": (cmd: string) => `${cmd} здесь недоступна для этой сессии.`,
   "chat.command.noArguments": (cmd: string) => `${cmd} не принимает аргументов в виде беседы.`,
   "chat.command.noImages": (cmd: string) => `${cmd} не принимает изображения. Уберите их и попробуйте снова.`,

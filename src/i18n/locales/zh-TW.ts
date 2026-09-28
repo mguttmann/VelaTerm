@@ -1762,6 +1762,7 @@ const zhTW: typeof en = {
   "chat.command.tagTitle.terminal": "開啟此工作階段的終端機檢視，並已輸入該指令。在那裡按 Enter 即可執行。儲存到磁碟的變更會帶回對話檢視；僅在該終端機工作階段有效的變更則不會。",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd} 只會改變代理的終端機介面，在對話檢視中沒有效果。`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd} 在對話檢視中無法使用：此工作階段由 VelaTerm 自行管理。`,
+  "chat.command.switching": (cmd: string) => `正在終端機檢視中開啟 ${cmd}…`,
   "chat.command.notHere": (cmd: string) => `${cmd} 在這裡不適用於此工作階段。`,
   "chat.command.noArguments": (cmd: string) => `${cmd} 在對話檢視中不接受參數。`,
   "chat.command.noImages": (cmd: string) => `${cmd} 無法附帶圖片。請移除圖片後再試一次。`,

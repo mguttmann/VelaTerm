@@ -1794,6 +1794,7 @@ const ko: typeof en = {
   "chat.command.tagTitle.terminal": "이 세션의 터미널 보기를 열고 명령을 입력해 둡니다. 실행하려면 그곳에서 Enter를 누르세요. 디스크에 저장된 변경은 대화 보기에도 적용되지만, 그 터미널 세션에만 해당하는 변경은 적용되지 않습니다.",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd}는 에이전트의 터미널 화면만 바꾸며 대화 보기에서는 효과가 없습니다.`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd}는 대화 보기에서 사용할 수 없습니다. 이 세션은 VelaTerm이 직접 관리합니다.`,
+  "chat.command.switching": (cmd: string) => `${cmd}을(를) 터미널 보기에서 여는 중…`,
   "chat.command.notHere": (cmd: string) => `${cmd}는 여기서 이 세션에 사용할 수 없습니다.`,
   "chat.command.noArguments": (cmd: string) => `${cmd}는 대화 보기에서 인수를 받지 않습니다.`,
   "chat.command.noImages": (cmd: string) => `${cmd}에는 이미지를 첨부할 수 없습니다. 이미지를 제거하고 다시 시도하세요.`,

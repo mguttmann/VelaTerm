@@ -1821,6 +1821,7 @@ const ptBR: typeof en = {
   "chat.command.tagTitle.terminal": "Abre a visualização de terminal desta sessão com o comando digitado. Pressione Enter lá para executá-lo. Alterações salvas em disco valem também na visualização de conversa; as que duram só naquela sessão de terminal, não.",
   "chat.command.unavailable.terminal": (cmd: string) => `${cmd} só altera a interface de terminal do agente e não tem efeito na visualização de conversa.`,
   "chat.command.unavailable.session": (cmd: string) => `${cmd} não está disponível na visualização de conversa: o VelaTerm gerencia esta sessão por conta própria.`,
+  "chat.command.switching": (cmd: string) => `Abrindo ${cmd} na visualização de terminal…`,
   "chat.command.notHere": (cmd: string) => `${cmd} não está disponível para esta sessão aqui.`,
   "chat.command.noArguments": (cmd: string) => `${cmd} não aceita argumentos na visualização de conversa.`,
   "chat.command.noImages": (cmd: string) => `${cmd} não aceita imagens. Remova-as e tente novamente.`,

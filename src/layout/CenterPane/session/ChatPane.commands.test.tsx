@@ -29,7 +29,10 @@ beforeEach(() => {
   liveCommands = [];
   engine.switchTo.mockReset();
   // By default the switch begins at once and succeeds, as for an idle agent.
-  engine.switchTo.mockImplementation((_engine: string, opts?: { onStart?: () => void }) => opts?.onStart?.());
+  engine.switchTo.mockImplementation((_engine: string, opts?: { onStart?: () => void; onDone?: () => void }) => {
+    opts?.onStart?.();
+    opts?.onDone?.();
+  });
   clearChatSession.mockClear();
   forkSession.mockClear();
   vi.mocked(invoke).mockReset();
@@ -94,7 +97,7 @@ describe("Claude commands in the conversation view", () => {
     expect(commands()).not.toContain("chat_send");
   });
 
-  it("puts the draft back when the switch fails at once", async () => {
+  it("keeps the draft when the switch fails at once", async () => {
     engine.switchTo.mockImplementation((_engine: string, opts?: { onStart?: () => void; onFail?: () => void }) => {
       opts?.onStart?.();
       opts?.onFail?.();
@@ -102,6 +105,7 @@ describe("Claude commands in the conversation view", () => {
     const input = await mountPane();
     await submit(input, "/add-dir ../lib");
     expect(input.value).toBe("/add-dir ../lib");
+    expect(screen.queryByText("Opening /add-dir in the terminal view…")).toBeNull();
   });
 
   it("keeps the draft when the switch is cancelled before it begins", async () => {
@@ -114,7 +118,7 @@ describe("Claude commands in the conversation view", () => {
     expect(commands()).not.toContain("chat_send");
   });
 
-  it("puts the draft back when the switch fails", async () => {
+  it("keeps the draft when the switch fails later", async () => {
     engine.switchTo.mockImplementation((_engine: string, opts?: { onStart?: () => void; onFail?: () => void }) => {
       opts?.onStart?.();
       // The failure arrives after the emptied composer has rendered.
@@ -123,7 +127,48 @@ describe("Claude commands in the conversation view", () => {
     const input = await mountPane();
     await submit(input, "/add-dir ../lib");
     await waitFor(() => expect(input.value).toBe("/add-dir ../lib"));
+    await waitFor(() => expect(screen.queryByText("Opening /add-dir in the terminal view…")).toBeNull());
     expect(commands()).not.toContain("chat_send");
+  });
+
+  it("keeps the draft and says a switch is running until the server has switched", async () => {
+    // The answer never comes, as over a half-open connection.
+    engine.switchTo.mockImplementation((_engine: string, opts?: { onStart?: () => void }) => opts?.onStart?.());
+    const input = await mountPane();
+    await submit(input, "/status");
+    expect(await screen.findByText("Opening /status in the terminal view…")).toBeTruthy();
+    expect(input.value).toBe("/status");
+    expect(commands()).not.toContain("chat_send");
+  });
+
+  it("keeps what was typed while a slow switch was running", async () => {
+    let done: (() => void) | undefined;
+    engine.switchTo.mockImplementation((_engine: string, opts?: { onStart?: () => void; onDone?: () => void }) => {
+      opts?.onStart?.();
+      done = opts?.onDone;
+    });
+    const input = await mountPane();
+    await submit(input, "/status");
+    // The command has not left the composer while the switch runs.
+    expect(input.value).toBe("/status");
+    fireEvent.change(input, { target: { value: "something new" } });
+    act(() => done?.());
+    expect(input.value).toBe("something new");
+  });
+
+  it("keeps what was typed when a slow switch then fails", async () => {
+    let fail: (() => void) | undefined;
+    engine.switchTo.mockImplementation((_engine: string, opts?: { onStart?: () => void; onFail?: () => void }) => {
+      opts?.onStart?.();
+      fail = opts?.onFail;
+    });
+    const input = await mountPane();
+    await submit(input, "/status");
+    expect(input.value).toBe("/status");
+    fireEvent.change(input, { target: { value: "/status and more" } });
+    act(() => fail?.());
+    expect(input.value).toBe("/status and more");
+    expect(screen.queryByText("Opening /status in the terminal view…")).toBeNull();
   });
 
   it("explains a command that means nothing here and keeps the draft", async () => {
