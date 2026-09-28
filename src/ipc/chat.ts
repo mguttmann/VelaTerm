@@ -207,6 +207,10 @@ export interface ChatCommand {
   argumentHint?: string;
   /** Native invocation prefix. Provider entries accept either completion trigger. */
   invocation?: "/" | "$";
+  /** Other names the agent runs this command under, such as Claude's `/reset` for `/clear`. */
+  aliases?: string[];
+  /** Claude only: set on Claude Code's own commands, absent on user, project, plugin and MCP ones. */
+  builtin?: boolean;
 }
 
 /** Read the current provider catalogue without sending a prompt or opening a conversation. */

@@ -173,6 +173,9 @@ pub enum Incoming {
     RateLimit(Value),
     /// Every live background task after a change. Replace semantics.
     BackgroundTasks(Vec<Value>),
+    /// The full slash-command list after a mid-session change (a plugin or skill appeared or went away).
+    /// Replace semantics, in the same shape `initialize` answers with.
+    Commands(Vec<Value>),
     /// A turn finished, successfully or not. `model_usage` is the per-model cost and context window.
     Result {
         subtype: String,
@@ -301,6 +304,13 @@ pub fn parse_line(line: &str) -> Incoming {
                     return Incoming::BackgroundTasks(
                         v.get("tasks").and_then(Value::as_array).cloned().unwrap_or_default(),
                     );
+                }
+                // A frame without a list says nothing; reading it as an empty list would clear the menu.
+                Some("commands_changed") => {
+                    return match v.get("commands").and_then(Value::as_array) {
+                        Some(commands) => Incoming::Commands(commands.clone()),
+                        None => Incoming::Other,
+                    };
                 }
                 _ => return Incoming::Other,
             }
@@ -848,6 +858,17 @@ mod tests {
             Incoming::BackgroundTasks(tasks) => assert_eq!(tasks.len(), 1),
             _ => panic!("expected BackgroundTasks"),
         }
+        match parse_line(r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"x","aliases":["y"],"builtin":true}]}"#) {
+            Incoming::Commands(commands) => {
+                assert_eq!(commands.len(), 1);
+                assert_eq!(commands[0]["aliases"][0], "y");
+            }
+            _ => panic!("expected Commands"),
+        }
+        assert!(matches!(
+            parse_line(r#"{"type":"system","subtype":"commands_changed"}"#),
+            Incoming::Other
+        ));
         assert!(matches!(
             parse_line(r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed_warning","utilization":0.9}}"#),
             Incoming::RateLimit(_)

@@ -3739,6 +3739,14 @@ fn handle_line(app: &AppCtx, session_id: &str, proc: &Arc<ChatProcess>, line: &s
             }
             release_if_idle(app, session_id, proc);
         }
+        // The same mapping as the handshake's list, so a menu refreshed mid-session reads exactly like one
+        // read at start.
+        Incoming::Commands(list) => {
+            if let Ok(commands) = skills::claude_commands(&json!({ "commands": list })) {
+                *proc.commands.lock().unwrap() = commands.clone();
+                emit(app, session_id, json!({"type":"commands","commands":commands}));
+            }
+        }
         Incoming::LocalCommand { id, text } => {
             proc.timeline.lock().unwrap().upsert(ChatRow::Command { id, text });
         }
@@ -8140,6 +8148,19 @@ mod tests {
         assert_eq!(events.load(Ordering::Relaxed), 1);
     }
 
+    /// A slash command sent first leaves the placeholder name alone; the first real prompt names it.
+    #[test]
+    fn chat_title_skips_a_slash_command_sent_first() {
+        let (app, manager, events) = title_fixture("title-slash", SessionKind::Claude, "Claude 1");
+        manager.send(&app, "s", "/effort high", Vec::new(), "queue").unwrap();
+        finish_turn(&manager, &app, "s", "success");
+        assert_eq!(stored_title(&app), "Claude 1");
+        assert_eq!(events.load(Ordering::Relaxed), 0);
+        manager.send(&app, "s", "Fix the build", Vec::new(), "queue").unwrap();
+        assert_eq!(stored_title(&app), "Fix the build");
+        assert_eq!(events.load(Ordering::Relaxed), 1);
+    }
+
     /// Nothing running means nothing to wait for: the message goes straight out.
     #[test]
     fn a_message_sent_to_an_idle_agent_goes_out_at_once() {
@@ -9293,6 +9314,24 @@ mod tests {
         handle_line(&app, "s", &proc, r#"{"type":"system","subtype":"task_notification","task_id":"shell","status":"completed"}"#);
         assert!(!running(&manager, "s"));
         assert!(manager.snapshot("s").rows.iter().any(|row| matches!(row, ChatRow::Tool { output: Some(output), .. } if output == "done")));
+    }
+
+    /// A mid-session change to the command list replaces the one the handshake reported.
+    #[test]
+    fn commands_changed_replaces_the_command_list() {
+        let app = ctx("commands-changed");
+        let proc = inert_process(SessionKind::Claude);
+        *proc.commands.lock().unwrap() = vec![json!({"name":"old","invocation":"/"})];
+        handle_line(&app, "s", &proc, r#"{"type":"system","subtype":"commands_changed","commands":[{"name":"clear","aliases":["reset","new"],"builtin":true},{"name":"mine"}]}"#);
+        let commands = proc.commands.lock().unwrap().clone();
+        assert_eq!(commands.len(), 2);
+        assert_eq!(commands[0]["name"], "clear");
+        assert_eq!(commands[0]["aliases"], json!(["reset", "new"]));
+        assert_eq!(commands[0]["builtin"], true);
+        assert!(commands.iter().all(|command| command["invocation"] == "/"));
+        // A frame without a list keeps what is there.
+        handle_line(&app, "s", &proc, r#"{"type":"system","subtype":"commands_changed"}"#);
+        assert_eq!(proc.commands.lock().unwrap().len(), 2);
     }
 
     /// A foreground task is over once its turn ends, whether or not its final frame arrived; one moved to
