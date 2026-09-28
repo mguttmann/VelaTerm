@@ -79,7 +79,13 @@ impl ChatManager {
             let root = repo::get_project_root(&conn, &session.project_id)?;
             (session, root)
         };
-        let resume = previous.agent_session_id.lock().unwrap().clone().or(session.agent_session_id.clone());
+        let confirmed = previous.agent_session_id.lock().unwrap().clone();
+        // A fork that has not written its first turn is still only a branch point: it restarts as a fork.
+        let fork = confirmed.is_none() && {
+            let conn = app.db().conn.lock().unwrap();
+            repo::get_fork_pending(&conn, session_id)?
+        };
+        let resume = confirmed.or(session.agent_session_id.clone());
         if resume.is_none() && !previous.timeline.lock().unwrap().rows.is_empty() {
             return Err("CHAT_PERMISSION_RESTART_NO_HISTORY".into());
         }
@@ -130,7 +136,7 @@ impl ChatManager {
             next.timeline.lock().unwrap().replace_all(rows.clone());
             *next.user_targets.lock().unwrap() = previous.user_targets.lock().unwrap().clone();
             // Claude does not publish its native id until a turn starts; preserve it while idle.
-            *next.agent_session_id.lock().unwrap() = resume;
+            *next.agent_session_id.lock().unwrap() = if fork { None } else { resume };
             emit(app, session_id, reset_event(&next));
             next.request_and_wait("set_permission_mode", |id| {
                 protocol::control_request(id, protocol::set_permission_mode("bypassPermissions"))
