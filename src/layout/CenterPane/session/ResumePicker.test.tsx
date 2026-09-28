@@ -148,6 +148,8 @@ describe("the resume picker", () => {
     render(<ResumePicker sessionId="s" onClose={() => {}} />);
     expect(await screen.findByRole("alert")).toHaveProperty("textContent", "The conversations of this directory could not be read.");
     expect(screen.queryByText(/Permission denied/)).toBeNull();
+    // A failed listing is not still loading.
+    expect(screen.queryByRole("status")).toBeNull();
     cleanup();
     list = (args) => Promise.resolve(page(listing(), args));
     resume = () => Promise.reject(new Error("Failed to start claude: No such file or directory"));

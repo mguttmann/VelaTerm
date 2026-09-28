@@ -211,7 +211,7 @@ export function ResumePicker({
             {t(loadingMore ? "common.loading" : "chat.resume.showOlder")}
           </button>
         </div>}
-        {!settled ? <div className="resume-picker-empty" role="status">{t("common.loading")}</div> : shown &&
+        {!settled ? !error && <div className="resume-picker-empty" role="status">{t("common.loading")}</div> : shown &&
           (!visible.length ? <div className="resume-picker-empty">
             <Icons.search size={28} />
             <p>{t(search ? "chat.resume.noMatches" : "chat.resume.empty")}</p>
