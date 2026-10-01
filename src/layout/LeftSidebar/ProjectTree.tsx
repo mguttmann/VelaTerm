@@ -919,8 +919,10 @@ export function ProjectTree(h: TreeHandlers) {
   ) => {
     const src = dragSource;
     if (src?.kind === "project") {
-      // A dragged project reorders only among other projects: no center zone, no drop on itself or on rows below.
-      if (targetKind !== "project" || src.id === id) return;
+      // A dragged project reorders only among other projects of its own kind: no center zone, no drop on itself
+      // or on rows below. Collections always stay above folder-backed projects, so a drop across that line could
+      // never show.
+      if (targetKind !== "project" || src.id === id || !sameProjectKind(src.id, id)) return;
       hasCenter = false;
     }
     e.preventDefault();
@@ -931,6 +933,8 @@ export function ProjectTree(h: TreeHandlers) {
       prev?.id === id && prev.zone === zone ? prev : { id, zone },
     );
   };
+  const sameProjectKind = (a: string, b: string) =>
+    isVirtualProject(projects.find((p) => p.id === a)) === isVirtualProject(projects.find((p) => p.id === b));
   const sortBetween = (
     siblings: { id: string; sortOrder: number }[],
     targetId: string,
@@ -999,11 +1003,15 @@ export function ProjectTree(h: TreeHandlers) {
     const p = readPayload(e);
     if (!p) return;
 
-    // A dragged project lands before or after the target among all projects; the center zone and the project
-    // itself are no-ops. Projects have no parent, so every target column stays null and only sort_order moves.
+    // A dragged project lands before or after the target among the projects of its own kind; the center zone,
+    // the project itself and a target of the other kind are no-ops. Projects have no parent, so every target
+    // column stays null and only sort_order moves.
     if (p.kind === "project") {
-      if (zone === "center" || p.id === projectId) return;
-      const siblings = [...projects].sort((a, b) => a.sortOrder - b.sortOrder);
+      if (zone === "center" || p.id === projectId || !sameProjectKind(p.id, projectId)) return;
+      const collection = isVirtualProject(projects.find((q) => q.id === projectId));
+      const siblings = projects
+        .filter((q) => isVirtualProject(q) === collection)
+        .sort((a, b) => a.sortOrder - b.sortOrder);
       const order = sortBetween(siblings, projectId, zone === "top" ? "before" : "after");
       void moveNode("project", p.id, null, null, null, order);
       return;

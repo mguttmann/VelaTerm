@@ -238,6 +238,22 @@ describe("ProjectTree drag and drop", () => {
     expect(storeState.moveMany).not.toHaveBeenCalled();
   });
 
+  it("reorders collections and folder-backed projects only among their own kind", () => {
+    // Collections always render above folder-backed projects, so a drop across that line could never show.
+    storeState.projects.push({ id: "pk", name: "Kit", rootPath: "", sortOrder: 1500, collapsed: true, createdAt: 0 });
+    try {
+      render(<ProjectTree {...handlers} />);
+      expect(dragTo(rowOf("Kit"), rowOf("Alpha"), 2).highlighted).toBe(false);
+      expect(dragTo(rowOf("Beta"), rowOf("Kit"), ROW_HEIGHT - 2).highlighted).toBe(false);
+      expect(storeState.moveNode).not.toHaveBeenCalled();
+      // The collection's order does not count among folder-backed projects: before Beta lies between Alpha and Beta.
+      dragTo(rowOf("Gamma"), rowOf("Beta"), 2);
+      expect(storeState.moveNode).toHaveBeenCalledWith("project", "pc", null, null, null, 1500);
+    } finally {
+      storeState.projects.pop();
+    }
+  });
+
   it("still moves a session dropped on a project header into that project's root", () => {
     render(<ProjectTree {...handlers} />);
     const shell = rowOf("Shell");
