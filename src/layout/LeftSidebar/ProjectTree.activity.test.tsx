@@ -150,6 +150,19 @@ describe("ProjectTree activity order", () => {
     const { container } = renderTree();
     expect(renderedNames(container)).toEqual(manualOrder);
   });
+
+  it("keeps collections above projects in both orders", () => {
+    // A collection has no folder; the store delivers it after the projects, and it has no activity.
+    storeState.projects = [...storeState.projects, { ...project("c1", 3), rootPath: "" }];
+    storeState.sessions = [...storeState.sessions, session("c1s", "c1", 1)];
+    const manual = renderTree();
+    expect(renderedNames(manual.container)).toEqual(["c1", "c1s", ...manualOrder]);
+    manual.unmount();
+    storeState.sortByActivity = true;
+    storeState.sessionActivity = { s4: 300 };
+    const active = renderTree();
+    expect(renderedNames(active.container)).toEqual(["c1", "c1s", "p2", "s4", ...manualOrder.slice(0, 7)]);
+  });
 });
 
 describe("ProjectTree drag gate", () => {
